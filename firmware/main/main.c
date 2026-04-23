@@ -7,6 +7,9 @@
 #include "esp_log.h"
 #include "nvs_flash.h"
 #include "ethernet_init.h"
+#include "settings_store.h"
+#include "web_server.h"
+#include "mdns.h"
 
 static const char *TAG = "main";
 
@@ -14,10 +17,10 @@ static void eth_event_handler(void *arg, esp_event_base_t event_base,
                               int32_t event_id, void *event_data)
 {
     switch (event_id) {
-    case ETHERNET_EVENT_CONNECTED:    ESP_LOGI(TAG, "Ethernet link up");    break;
-    case ETHERNET_EVENT_DISCONNECTED: ESP_LOGI(TAG, "Ethernet link down");  break;
-    case ETHERNET_EVENT_START:        ESP_LOGI(TAG, "Ethernet started");    break;
-    case ETHERNET_EVENT_STOP:         ESP_LOGI(TAG, "Ethernet stopped");    break;
+    case ETHERNET_EVENT_CONNECTED:    ESP_LOGI(TAG, "Ethernet link up");   break;
+    case ETHERNET_EVENT_DISCONNECTED: ESP_LOGI(TAG, "Ethernet link down"); break;
+    case ETHERNET_EVENT_START:        ESP_LOGI(TAG, "Ethernet started");   break;
+    case ETHERNET_EVENT_STOP:         ESP_LOGI(TAG, "Ethernet stopped");   break;
     }
 }
 
@@ -26,6 +29,11 @@ static void got_ip_event_handler(void *arg, esp_event_base_t event_base,
 {
     ip_event_got_ip_t *event = (ip_event_got_ip_t *)event_data;
     ESP_LOGI(TAG, "Got IP: " IPSTR, IP2STR(&event->ip_info.ip));
+
+    mdns_init();
+    mdns_hostname_set("home-energy-manager");
+    mdns_instance_name_set("Home Energy Manager");
+    mdns_service_add(NULL, "_http", "_tcp", 80, NULL, 0);
 }
 
 void app_main(void)
@@ -46,4 +54,7 @@ void app_main(void)
     ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_ETH_GOT_IP, &got_ip_event_handler, NULL));
 
     ESP_ERROR_CHECK(esp_eth_start(eth_handles[0]));
+
+    settings_store_init();
+    web_server_start();
 }
