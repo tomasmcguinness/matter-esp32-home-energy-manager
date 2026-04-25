@@ -1,0 +1,545 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    background: #0f1117;
+    color: #e2e8f0;
+    min-height: 100vh;
+    padding: 20px;
+    overflow-x: hidden;
+  }
+
+  h1.sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0,0,0,0); }
+
+  .header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 24px;
+  }
+  .header-title { font-size: 18px; font-weight: 600; color: #f8fafc; }
+  .header-sub { font-size: 12px; color: #64748b; margin-top: 2px; }
+  .live-badge {
+    display: flex; align-items: center; gap: 6px;
+    background: #1e2330; border: 1px solid #2d3748;
+    padding: 6px 12px; border-radius: 20px; font-size: 12px; color: #94a3b8;
+  }
+  .live-dot { width: 7px; height: 7px; border-radius: 50%; background: #22c55e; animation: pulse 2s infinite; }
+
+  @keyframes pulse { 0%,100% { opacity:1; } 50% { opacity:0.4; } }
+
+  /* GRID LAYOUT */
+  .canvas {
+    position: relative;
+    width: 100%;
+    max-width: 900px;
+    margin: 0 auto;
+  }
+
+  /* SVG for connections */
+  .connections-svg {
+    position: absolute;
+    top: 0; left: 0;
+    width: 100%; height: 100%;
+    pointer-events: none;
+    overflow: visible;
+  }
+
+  /* ROWS */
+  .row {
+    display: flex;
+    justify-content: center;
+    gap: 24px;
+    margin-bottom: 0;
+    position: relative;
+  }
+  .row-1 { margin-top: 0; }
+  .row-2 { margin-top: 60px; }
+  .row-3 { margin-top: 60px; }
+
+  /* CARDS */
+  .device-card {
+    background: #1a1f2e;
+    border: 1.5px solid #2d3748;
+    border-radius: 14px;
+    padding: 14px 16px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 8px;
+    min-width: 120px;
+    cursor: pointer;
+    transition: border-color 0.2s, transform 0.15s, box-shadow 0.2s;
+    position: relative;
+    user-select: none;
+  }
+  .device-card:hover {
+    border-color: #4a90d9;
+    transform: translateY(-2px);
+    box-shadow: 0 4px 20px rgba(74,144,217,0.15);
+  }
+  .device-card.active { border-color: #22c55e; box-shadow: 0 0 0 1px #22c55e44; }
+  .device-card.solar { border-color: #f59e0b44; }
+  .device-card.solar:hover, .device-card.solar.active { border-color: #f59e0b; box-shadow: 0 0 0 1px #f59e0b44; }
+  .device-card.battery { border-color: #8b5cf644; }
+  .device-card.battery:hover, .device-card.battery.active { border-color: #8b5cf6; box-shadow: 0 0 0 1px #8b5cf644; }
+  .device-card.grid { border-color: #3b82f644; }
+  .device-card.grid:hover, .device-card.grid.active { border-color: #3b82f6; box-shadow: 0 0 0 1px #3b82f644; }
+  .device-card.consumer-unit {
+    min-width: 180px;
+    background: #12161f;
+    border-color: #4a90d9;
+    box-shadow: 0 0 0 1px #4a90d944;
+  }
+
+  .device-icon {
+    width: 44px; height: 44px;
+    border-radius: 10px;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 24px;
+  }
+  .icon-grid { background: #1e3a5f; }
+  .icon-solar { background: #3d2a00; }
+  .icon-battery { background: #2d1f4e; }
+  .icon-cu { background: #1a2744; }
+  .icon-appliance { background: #1f2937; }
+  .icon-ev { background: #1a3320; }
+
+  .device-name { font-size: 11px; font-weight: 600; color: #94a3b8; text-transform: uppercase; letter-spacing: 0.5px; text-align: center; }
+  .device-power { font-size: 18px; font-weight: 700; color: #f8fafc; text-align: center; line-height: 1; }
+  .device-power span { font-size: 11px; font-weight: 400; color: #64748b; }
+  .device-status {
+    font-size: 10px; padding: 2px 8px; border-radius: 10px;
+    background: #1e2330; color: #64748b;
+  }
+  .status-on { background: #14532d44; color: #4ade80; }
+  .status-exporting { background: #1e3a5f44; color: #60a5fa; }
+  .status-charging { background: #2d1f4e44; color: #a78bfa; }
+  .status-off { background: #1e2330; color: #475569; }
+
+  /* Consumer unit special */
+  .cu-header { font-size: 11px; font-weight: 700; color: #60a5fa; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 4px; }
+  .cu-circuits {
+    width: 100%;
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+  }
+  .cu-circuit {
+    display: flex; justify-content: space-between; align-items: center;
+    background: #1e2535; border-radius: 5px; padding: 3px 8px; font-size: 10px;
+  }
+  .cu-circuit-name { color: #94a3b8; }
+  .cu-circuit-val { color: #e2e8f0; font-weight: 600; }
+  .cu-breaker {
+    width: 6px; height: 6px; border-radius: 50%;
+    background: #22c55e; box-shadow: 0 0 4px #22c55e;
+    flex-shrink: 0; margin-left: 6px;
+  }
+  .cu-breaker.trip { background: #ef4444; box-shadow: 0 0 4px #ef4444; }
+
+  /* Flow labels on SVG lines */
+  .flow-label {
+    font-size: 10px;
+    fill: #64748b;
+    text-anchor: middle;
+  }
+
+  /* Animated flow dots */
+  @keyframes flowMove {
+    from { stroke-dashoffset: 40; }
+    to   { stroke-dashoffset: 0; }
+  }
+  @keyframes flowMoveRev {
+    from { stroke-dashoffset: 0; }
+    to   { stroke-dashoffset: 40; }
+  }
+  .flow-line {
+    fill: none;
+    stroke-width: 2.5;
+    stroke-dasharray: 8 6;
+    animation: flowMove 1.2s linear infinite;
+  }
+  .flow-line.reverse { animation: flowMoveRev 1.2s linear infinite; }
+  .flow-line.solar-line { stroke: #f59e0b; }
+  .flow-line.battery-line { stroke: #8b5cf6; }
+  .flow-line.grid-import { stroke: #3b82f6; }
+  .flow-line.grid-export { stroke: #22c55e; }
+  .flow-line.home-line { stroke: #4a90d9; }
+  .flow-line.idle { stroke: #2d3748; animation: none; stroke-dasharray: 4 6; }
+
+  /* Detail panel */
+  .detail-panel {
+    margin-top: 28px;
+    background: #1a1f2e;
+    border: 1.5px solid #2d3748;
+    border-radius: 14px;
+    padding: 18px 20px;
+    max-width: 900px;
+    margin-left: auto;
+    margin-right: auto;
+    display: none;
+  }
+  .detail-panel.visible { display: block; }
+  .detail-title { font-size: 14px; font-weight: 700; color: #f8fafc; margin-bottom: 14px; display: flex; align-items: center; gap: 8px; }
+  .detail-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; }
+  .detail-stat { background: #12161f; border-radius: 8px; padding: 10px 12px; }
+  .detail-stat-label { font-size: 10px; color: #64748b; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 4px; }
+  .detail-stat-val { font-size: 16px; font-weight: 700; color: #e2e8f0; }
+
+  /* Summary bar */
+  .summary-bar {
+    display: flex; gap: 12px; margin-bottom: 24px; flex-wrap: wrap;
+    max-width: 900px; margin-left: auto; margin-right: auto;
+  }
+  .sum-card {
+    background: #1a1f2e;
+    border: 1.5px solid #2d3748;
+    border-radius: 10px;
+    padding: 10px 16px;
+    flex: 1; min-width: 120px;
+  }
+  .sum-label { font-size: 10px; color: #64748b; text-transform: uppercase; letter-spacing: 0.5px; }
+  .sum-val { font-size: 20px; font-weight: 800; margin-top: 2px; }
+  .sum-val.green { color: #4ade80; }
+  .sum-val.blue { color: #60a5fa; }
+  .sum-val.yellow { color: #fbbf24; }
+  .sum-val.purple { color: #a78bfa; }
+  .sum-sub { font-size: 10px; color: #475569; margin-top: 2px; }
+
+  .toggle-btn {
+    background: #1e2535; border: 1px solid #2d3748; border-radius: 8px;
+    color: #94a3b8; padding: 6px 12px; font-size: 11px; cursor: pointer;
+    margin-top: 6px; transition: background 0.2s, color 0.2s;
+  }
+  .toggle-btn:hover { background: #273044; color: #e2e8f0; }
+  .toggle-btn.active-toggle { background: #22c55e22; border-color: #22c55e; color: #4ade80; }
+</style>
+</head>
+<body>
+<h1 class="sr-only">Home energy usage dashboard showing grid, solar, battery, consumer unit and appliances</h1>
+
+<div class="header">
+  <div>
+    <div class="header-title">🏠 Home Energy Monitor</div>
+    <div class="header-sub">Live power flow — 12 Brackenwood Close</div>
+  </div>
+  <div class="live-badge"><div class="live-dot"></div> LIVE</div>
+</div>
+
+<!-- Summary bar -->
+<div class="summary-bar" id="summaryBar">
+  <div class="sum-card">
+    <div class="sum-label">Solar generating</div>
+    <div class="sum-val yellow" id="sumSolar">3.8 kW</div>
+    <div class="sum-sub">↑ Peak today: 4.2 kW</div>
+  </div>
+  <div class="sum-card">
+    <div class="sum-label">Home consuming</div>
+    <div class="sum-val blue" id="sumHome">2.6 kW</div>
+    <div class="sum-sub">↓ vs yesterday avg</div>
+  </div>
+  <div class="sum-card">
+    <div class="sum-label">Grid export</div>
+    <div class="sum-val green" id="sumExport">1.2 kW</div>
+    <div class="sum-sub">£0.18 earned today</div>
+  </div>
+  <div class="sum-card">
+    <div class="sum-label">Battery</div>
+    <div class="sum-val purple" id="sumBat">78%</div>
+    <div class="sum-sub">Charging at 0.4 kW</div>
+  </div>
+</div>
+
+<!-- Main canvas -->
+<div class="canvas" id="canvas">
+  <!-- SVG wiring -->
+  <svg class="connections-svg" id="wires" xmlns="http://www.w3.org/2000/svg"></svg>
+
+  <!-- Row 1: Sources -->
+  <div class="row row-1" id="row1">
+    <div class="device-card grid" id="card-grid" onclick="selectCard('grid')">
+      <div class="device-icon icon-grid">🔌</div>
+      <div class="device-name">Grid</div>
+      <div class="device-power">0.0 <span>kW</span></div>
+      <div class="device-status status-exporting">Exporting</div>
+    </div>
+
+    <div class="device-card solar" id="card-solar" onclick="selectCard('solar')">
+      <div class="device-icon icon-solar">☀️</div>
+      <div class="device-name">Solar Inverter</div>
+      <div class="device-power">3.8 <span>kW</span></div>
+      <div class="device-status status-on">Generating</div>
+    </div>
+
+    <div class="device-card battery" id="card-battery" onclick="selectCard('battery')">
+      <div class="device-icon icon-battery">🔋</div>
+      <div class="device-name">Battery</div>
+      <div class="device-power">0.4 <span>kW</span></div>
+      <div class="device-status status-charging">Charging</div>
+    </div>
+  </div>
+
+  <!-- Row 2: Consumer Unit -->
+  <div class="row row-2" id="row2">
+    <div class="device-card consumer-unit" id="card-cu" onclick="selectCard('cu')">
+      <div class="cu-header">⚡ Consumer Unit</div>
+      <div class="cu-circuits">
+        <div class="cu-circuit"><span class="cu-circuit-name">Lighting</span><span class="cu-circuit-val">0.2 kW</span><div class="cu-breaker"></div></div>
+        <div class="cu-circuit"><span class="cu-circuit-name">Ring Main</span><span class="cu-circuit-val">1.1 kW</span><div class="cu-breaker"></div></div>
+        <div class="cu-circuit"><span class="cu-circuit-name">Kitchen</span><span class="cu-circuit-val">0.8 kW</span><div class="cu-breaker"></div></div>
+        <div class="cu-circuit"><span class="cu-circuit-name">EV Charger</span><span class="cu-circuit-val">0.5 kW</span><div class="cu-breaker"></div></div>
+        <div class="cu-circuit"><span class="cu-circuit-name">Immersion</span><span class="cu-circuit-val">0.0 kW</span><div class="cu-breaker trip"></div></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Row 3: Appliances -->
+  <div class="row row-3" id="row3">
+    <div class="device-card" id="card-lights" onclick="selectCard('lights')">
+      <div class="device-icon icon-appliance">💡</div>
+      <div class="device-name">Lighting</div>
+      <div class="device-power">0.2 <span>kW</span></div>
+      <div class="device-status status-on">On</div>
+    </div>
+    <div class="device-card" id="card-oven" onclick="selectCard('oven')">
+      <div class="device-icon icon-appliance">🍳</div>
+      <div class="device-name">Oven/Hob</div>
+      <div class="device-power">1.8 <span>kW</span></div>
+      <div class="device-status status-on">On</div>
+    </div>
+    <div class="device-card" id="card-washing" onclick="selectCard('washing')">
+      <div class="device-icon icon-appliance">🫧</div>
+      <div class="device-name">Washing Machine</div>
+      <div class="device-power">0.6 <span>kW</span></div>
+      <div class="device-status status-on">Running</div>
+    </div>
+    <div class="device-card ev" id="card-ev" onclick="selectCard('ev')">
+      <div class="device-icon icon-ev">🚗</div>
+      <div class="device-name">EV Charger</div>
+      <div class="device-power">0.0 <span>kW</span></div>
+      <div class="device-status status-off">Standby</div>
+    </div>
+  </div>
+</div>
+
+<!-- Detail panel -->
+<div class="detail-panel" id="detailPanel">
+  <div class="detail-title" id="detailTitle">—</div>
+  <div class="detail-grid" id="detailGrid"></div>
+</div>
+
+<script>
+const deviceData = {
+  grid: {
+    label: '🔌 Grid Connection',
+    stats: [
+      {label:'Current Flow', val:'Exporting 1.2 kW'},
+      {label:'Voltage', val:'240 V'},
+      {label:'Frequency', val:'50.01 Hz'},
+      {label:'Today Exported', val:'8.4 kWh'},
+      {label:'Today Imported', val:'0.0 kWh'},
+      {label:'Tariff', val:'Octopus Flux'},
+      {label:'Export Rate', val:'15 p/kWh'},
+      {label:'Import Rate', val:'28 p/kWh'},
+    ]
+  },
+  solar: {
+    label: '☀️ Solar Inverter',
+    stats: [
+      {label:'Output Now', val:'3.8 kW'},
+      {label:'DC Input', val:'4.1 kW'},
+      {label:'Efficiency', val:'92.7%'},
+      {label:'Today', val:'18.2 kWh'},
+      {label:'This Month', val:'312 kWh'},
+      {label:'Panels', val:'12 × 380W'},
+      {label:'Orientation', val:'South 15°'},
+      {label:'Temp', val:'42°C'},
+    ]
+  },
+  battery: {
+    label: '🔋 Battery Storage',
+    stats: [
+      {label:'State of Charge', val:'78%'},
+      {label:'Charging At', val:'0.4 kW'},
+      {label:'Capacity', val:'10 kWh'},
+      {label:'Usable', val:'9.2 kWh'},
+      {label:'Cycles', val:'247'},
+      {label:'Health', val:'96%'},
+      {label:'Est. Full', val:'2h 15m'},
+      {label:'Mode', val:'Auto'},
+    ]
+  },
+  cu: {
+    label: '⚡ Consumer Unit',
+    stats: [
+      {label:'Total Load', val:'2.6 kW'},
+      {label:'Main Fuse', val:'100A'},
+      {label:'Circuits', val:'5 active'},
+      {label:'Trips Today', val:'0'},
+      {label:'Phase', val:'Single'},
+      {label:'Earth Type', val:'TN-S'},
+      {label:'Installed', val:'2021'},
+      {label:'Next Service', val:'2026'},
+    ]
+  },
+  lights: {
+    label: '💡 Lighting',
+    stats: [
+      {label:'Rooms On', val:'4 of 8'},
+      {label:'Power', val:'0.2 kW'},
+      {label:'Bulbs', val:'LED × 24'},
+      {label:'Today', val:'0.8 kWh'},
+    ]
+  },
+  oven: {
+    label: '🍳 Oven / Hob',
+    stats: [
+      {label:'Power', val:'1.8 kW'},
+      {label:'Hob Zones', val:'2 active'},
+      {label:'Set Temp', val:'200°C'},
+      {label:'Running', val:'38 min'},
+    ]
+  },
+  washing: {
+    label: '🫧 Washing Machine',
+    stats: [
+      {label:'Power', val:'0.6 kW'},
+      {label:'Programme', val:'40°C Cotton'},
+      {label:'Remaining', val:'22 min'},
+      {label:'Today', val:'0.9 kWh'},
+    ]
+  },
+  ev: {
+    label: '🚗 EV Charger',
+    stats: [
+      {label:'Status', val:'Standby'},
+      {label:'Power', val:'0.0 kW'},
+      {label:'Max Rate', val:'7.4 kW'},
+      {label:'Today', val:'0.0 kWh'},
+    ]
+  },
+};
+
+let selected = null;
+
+function selectCard(id) {
+  if (selected === id) {
+    selected = null;
+    document.querySelectorAll('.device-card').forEach(c => c.classList.remove('active'));
+    document.getElementById('detailPanel').classList.remove('visible');
+    return;
+  }
+  selected = id;
+  document.querySelectorAll('.device-card').forEach(c => c.classList.remove('active'));
+  document.getElementById('card-' + id).classList.add('active');
+
+  const d = deviceData[id];
+  document.getElementById('detailTitle').textContent = d.label;
+  const grid = document.getElementById('detailGrid');
+  grid.innerHTML = '';
+  d.stats.forEach(s => {
+    grid.innerHTML += `<div class="detail-stat"><div class="detail-stat-label">${s.label}</div><div class="detail-stat-val">${s.val}</div></div>`;
+  });
+  document.getElementById('detailPanel').classList.add('visible');
+}
+
+// Wire drawing
+function getCardCenter(id) {
+  const canvas = document.getElementById('canvas');
+  const card = document.getElementById('card-' + id);
+  if (!card) return null;
+  const cr = card.getBoundingClientRect();
+  const cv = canvas.getBoundingClientRect();
+  return {
+    x: cr.left + cr.width / 2 - cv.left,
+    y: cr.top + cr.height / 2 - cv.top,
+    top: cr.top - cv.top,
+    bottom: cr.top + cr.height - cv.top,
+    left: cr.left - cv.left,
+    right: cr.left + cr.width - cv.left,
+  };
+}
+
+function drawWires() {
+  const svg = document.getElementById('wires');
+  svg.innerHTML = '';
+
+  const cu = getCardCenter('cu');
+  const grid = getCardCenter('grid');
+  const solar = getCardCenter('solar');
+  const battery = getCardCenter('battery');
+
+  if (!cu || !grid || !solar || !battery) return;
+
+  const conns = [
+    { from: grid, fromBottom: true, cls: 'grid-import reverse' },
+    { from: solar, fromBottom: true, cls: 'solar-line' },
+    { from: battery, fromBottom: true, cls: 'battery-line' },
+  ];
+
+  conns.forEach(c => {
+    const fx = c.from.x;
+    const fy = c.from.bottom;
+    const tx = cu.x;
+    const ty = cu.top;
+    const midY = (fy + ty) / 2;
+    const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+    path.setAttribute('class', `flow-line ${c.cls}`);
+    path.setAttribute('d', `M ${fx} ${fy} C ${fx} ${midY}, ${tx} ${midY}, ${tx} ${ty}`);
+    svg.appendChild(path);
+  });
+
+  const appliances = ['lights', 'oven', 'washing', 'ev'];
+  appliances.forEach(a => {
+    const ap = getCardCenter(a);
+    if (!ap) return;
+    const fx = cu.x;
+    const fy = cu.bottom;
+    const tx = ap.x;
+    const ty = ap.top;
+    const midY = (fy + ty) / 2;
+    const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+    const cls = a === 'ev' ? 'home-line idle' : 'home-line';
+    path.setAttribute('class', `flow-line ${cls}`);
+    path.setAttribute('d', `M ${fx} ${fy} C ${fx} ${midY}, ${tx} ${midY}, ${tx} ${ty}`);
+    svg.appendChild(path);
+  });
+}
+
+function resizeObserve() {
+  setTimeout(drawWires, 100);
+}
+
+window.addEventListener('load', resizeObserve);
+window.addEventListener('resize', drawWires);
+
+// Live simulation
+const targets = {
+  solarPow: 3.8,
+  battPow: 0.4,
+  homePow: 2.6,
+};
+let vals = { ...targets };
+
+function jitter(v, range) {
+  return Math.max(0, v + (Math.random() - 0.5) * range * 2);
+}
+
+setInterval(() => {
+  vals.solarPow = jitter(targets.solarPow, 0.12);
+  vals.homePow = jitter(targets.homePow, 0.08);
+  vals.battPow = jitter(targets.battPow, 0.05);
+  const export_ = Math.max(0, vals.solarPow - vals.homePow - vals.battPow);
+
+  document.getElementById('sumSolar').textContent = vals.solarPow.toFixed(1) + ' kW';
+  document.getElementById('sumHome').textContent = vals.homePow.toFixed(1) + ' kW';
+  document.getElementById('sumExport').textContent = export_.toFixed(1) + ' kW';
+}, 2500);
+</script>
+</body>
+</html>

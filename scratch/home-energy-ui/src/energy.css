@@ -1,0 +1,215 @@
+/* ── Reset ─────────────────────────────────────────────────────────── */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  background: #0f1117;
+  color: #e2e8f0;
+  min-height: 100vh;
+}
+
+/* ── App shell ──────────────────────────────────────────────────────── */
+.app {
+  padding: 20px;
+  max-width: 980px;
+  margin: 0 auto;
+}
+
+/* ── Header ─────────────────────────────────────────────────────────── */
+.header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 20px;
+}
+.header-title { font-size: 18px; font-weight: 600; color: #f8fafc; }
+.header-sub   { font-size: 12px; color: #64748b; margin-top: 2px; }
+
+.live-badge {
+  display: flex; align-items: center; gap: 6px;
+  background: #1e2330; border: 1px solid #2d3748;
+  padding: 6px 12px; border-radius: 20px;
+  font-size: 12px; color: #94a3b8;
+}
+.live-dot {
+  width: 7px; height: 7px; border-radius: 50%;
+  background: #22c55e;
+  animation: pulse 2s infinite;
+}
+@keyframes pulse { 0%,100% { opacity:1; } 50% { opacity:0.35; } }
+
+/* ── Summary bar ─────────────────────────────────────────────────────── */
+.summary-bar {
+  display: flex; gap: 12px;
+  margin-bottom: 24px;
+  flex-wrap: wrap;
+}
+.sum-card {
+  background: #1a1f2e;
+  border: 1.5px solid #2d3748;
+  border-radius: 10px;
+  padding: 10px 16px;
+  flex: 1; min-width: 120px;
+}
+.sum-label { font-size: 10px; color: #64748b; text-transform: uppercase; letter-spacing: 0.5px; }
+.sum-val   { font-size: 20px; font-weight: 800; margin-top: 2px; }
+.sum-val.yellow { color: #fbbf24; }
+.sum-val.blue   { color: #60a5fa; }
+.sum-val.green  { color: #4ade80; }
+.sum-val.purple { color: #a78bfa; }
+.sum-sub { font-size: 10px; color: #475569; margin-top: 2px; }
+
+/* ── Canvas ──────────────────────────────────────────────────────────── */
+.canvas {
+  position: relative;
+  width: 100%;
+}
+
+/* SVG overlay */
+.flow-canvas-wrap {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  overflow: visible;
+}
+.connections-svg {
+  width: 100%; height: 100%;
+  overflow: visible;
+}
+
+/* ── Rows ────────────────────────────────────────────────────────────── */
+.row {
+  display: flex;
+  justify-content: center;
+  gap: 20px;
+  position: relative;
+}
+.row-1 { margin-top: 0; }
+.row-2 { margin-top: 56px; }
+.row-3 { margin-top: 56px; padding-bottom: 20px; }
+
+/* ── Device card ─────────────────────────────────────────────────────── */
+.device-card {
+  background: #1a1f2e;
+  border: 1.5px solid #2d3748;
+  border-radius: 14px;
+  padding: 14px 16px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  min-width: 118px;
+  cursor: pointer;
+  transition: border-color 0.2s, transform 0.15s, box-shadow 0.2s;
+  user-select: none;
+}
+.device-card:hover {
+  border-color: #4a90d9;
+  transform: translateY(-2px);
+  box-shadow: 0 4px 20px rgba(74,144,217,0.15);
+}
+.device-card.offline { opacity: 0.5; }
+
+/* Colour variants */
+.device-card.grid    { border-color: #3b82f622; }
+.device-card.solar   { border-color: #f59e0b22; }
+.device-card.battery { border-color: #8b5cf622; }
+.device-card.ev      { border-color: #22c55e22; }
+
+.device-card.grid.active    { border-color: #3b82f6; box-shadow: 0 0 0 1px #3b82f644; }
+.device-card.solar.active   { border-color: #f59e0b; box-shadow: 0 0 0 1px #f59e0b44; }
+.device-card.battery.active { border-color: #8b5cf6; box-shadow: 0 0 0 1px #8b5cf644; }
+.device-card.active         { border-color: #22c55e; box-shadow: 0 0 0 1px #22c55e44; }
+
+/* Consumer unit */
+.device-card.consumer-unit {
+  min-width: 200px;
+  background: #12161f;
+  border-color: #4a90d9;
+  box-shadow: 0 0 0 1px #4a90d922;
+}
+.device-card.consumer-unit.active { border-color: #60a5fa; box-shadow: 0 0 0 1px #60a5fa44; }
+
+/* Icon */
+.device-icon {
+  width: 44px; height: 44px;
+  border-radius: 10px;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 24px;
+}
+.icon-grid      { background: #1e3a5f; }
+.icon-solar     { background: #3d2a00; }
+.icon-battery   { background: #2d1f4e; }
+.icon-cu        { background: #1a2744; }
+.icon-appliance { background: #1f2937; }
+.icon-ev        { background: #1a3320; }
+
+.device-name  { font-size: 11px; font-weight: 600; color: #94a3b8; text-transform: uppercase; letter-spacing: 0.5px; text-align: center; }
+.device-power { font-size: 18px; font-weight: 700; color: #f8fafc; line-height: 1; }
+.device-power span { font-size: 11px; font-weight: 400; color: #64748b; }
+
+.device-status { font-size: 10px; padding: 2px 8px; border-radius: 10px; background: #1e2330; color: #64748b; }
+.status-on        { background: #14532d44; color: #4ade80; }
+.status-exporting { background: #1e3a5f44; color: #60a5fa; }
+.status-charging  { background: #2d1f4e44; color: #a78bfa; }
+.status-off       { background: #1e2330;   color: #475569; }
+
+/* ── Consumer unit interior ──────────────────────────────────────────── */
+.cu-header {
+  font-size: 11px; font-weight: 700; color: #60a5fa;
+  text-transform: uppercase; letter-spacing: 0.5px;
+  margin-bottom: 4px;
+}
+.cu-circuits { width: 100%; display: flex; flex-direction: column; gap: 3px; }
+.cu-circuit {
+  display: flex; justify-content: space-between; align-items: center;
+  background: #1e2535; border-radius: 5px; padding: 3px 8px; font-size: 10px;
+}
+.cu-circuit-name { color: #94a3b8; }
+.cu-circuit-val  { color: #e2e8f0; font-weight: 600; margin-left: auto; margin-right: 6px; }
+.cu-breaker {
+  width: 6px; height: 6px; border-radius: 50%;
+  background: #22c55e; box-shadow: 0 0 4px #22c55e;
+  flex-shrink: 0;
+}
+.cu-breaker.trip { background: #ef4444; box-shadow: 0 0 4px #ef4444; }
+
+/* ── Flow lines ──────────────────────────────────────────────────────── */
+@keyframes flowMove    { from { stroke-dashoffset: 40; } to { stroke-dashoffset: 0; } }
+@keyframes flowMoveRev { from { stroke-dashoffset: 0;  } to { stroke-dashoffset: 40; } }
+
+.flow-line {
+  fill: none;
+  stroke-width: 2.5;
+  stroke-dasharray: 8 6;
+  animation: flowMove 1.2s linear infinite;
+}
+.flow-line.idle {
+  stroke: #2d3748 !important;
+  animation: none;
+  stroke-dasharray: 4 6;
+}
+
+/* ── Detail panel ────────────────────────────────────────────────────── */
+.detail-panel {
+  display: none;
+  margin-top: 28px;
+  background: #1a1f2e;
+  border: 1.5px solid #2d3748;
+  border-radius: 14px;
+  padding: 18px 20px;
+}
+.detail-panel.visible { display: block; }
+
+.detail-title {
+  font-size: 14px; font-weight: 700; color: #f8fafc;
+  margin-bottom: 14px;
+}
+.detail-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+  gap: 10px;
+}
+.detail-stat { background: #12161f; border-radius: 8px; padding: 10px 12px; }
+.detail-stat-label { font-size: 10px; color: #64748b; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 4px; }
+.detail-stat-val   { font-size: 15px; font-weight: 700; color: #e2e8f0; }
