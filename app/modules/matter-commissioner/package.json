@@ -1,0 +1,7 @@
+{
+  "name": "matter-commissioner",
+  "version": "1.0.0",
+  "description": "Native iOS Matter.framework commissioning module",
+  "main": "src/index.ts",
+  "private": true
+}
