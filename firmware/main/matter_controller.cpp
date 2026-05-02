@@ -80,6 +80,10 @@ public:
                                             chip::Crypto::P256Keypair &keypair, chip::MutableByteSpan &rcac,
                                             chip::MutableByteSpan &icac, chip::MutableByteSpan &noc) override
     {
+        if (keypair.Initialize(chip::Crypto::ECPKeyTarget::ECDSA) != CHIP_NO_ERROR) {
+            ESP_LOGE(TAG, "Failed to initialize controller keypair");
+            return ESP_FAIL;
+        }
         CHIP_ERROR err = generate_noc_chain(node_id, fabric_id, chip::kUndefinedCATs, keypair.Pubkey(), rcac, icac, noc);
         return err == CHIP_NO_ERROR ? ESP_OK : ESP_FAIL;
     }
