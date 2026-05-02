@@ -10,6 +10,10 @@ idf_component_register(SRCS
         joltwallet__littlefs ethernet_init espressif__mdns espressif__esp_matter
 )
 
+if(CONFIG_SPIFFS_ATTESTATION_TRUST_STORE)
+    spiffs_create_partition_image(paa_cert ${CMAKE_SOURCE_DIR}/paa_cert FLASH_IN_PROJECT)
+endif()
+
 add_custom_target(react_build
     COMMAND npm run build --emptyOutDir
     WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/html_app
