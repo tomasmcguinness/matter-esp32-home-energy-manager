@@ -3,6 +3,7 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <stdio.h>
+#include <inttypes.h>
 
 #include "esp_http_server.h"
 #include "esp_log.h"
@@ -10,6 +11,7 @@
 #include "cJSON.h"
 
 #include "settings_store.h"
+#include "managers/device_manager.h"
 
 static const char *TAG = "web_server";
 
@@ -121,6 +123,74 @@ static esp_err_t settings_put_handler(httpd_req_t *req)
     return send_json(req, settings_to_json(&updated), 200);
 }
 
+static esp_err_t devices_get_handler(httpd_req_t *req)
+{
+    char *json = device_manager_get_all_json();
+    if (!json) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "OOM");
+        return ESP_FAIL;
+    }
+    httpd_resp_set_type(req, "application/json");
+    esp_err_t err = httpd_resp_sendstr(req, json);
+    free(json);
+    return err;
+}
+
+static esp_err_t device_endpoint_put_handler(httpd_req_t *req)
+{
+    uint64_t node_id = 0;
+    unsigned int endpoint_id = 0;
+    if (sscanf(req->uri, "/api/devices/%" SCNu64 "/endpoints/%u", &node_id, &endpoint_id) != 2) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid URI");
+        return ESP_FAIL;
+    }
+
+    if (req->content_len <= 0 || req->content_len > MAX_POST_BODY) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid body");
+        return ESP_FAIL;
+    }
+    char body[MAX_POST_BODY + 1];
+    int received = 0;
+    while (received < (int)req->content_len) {
+        int r = httpd_req_recv(req, body + received, req->content_len - received);
+        if (r <= 0) {
+            httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Recv failed");
+            return ESP_FAIL;
+        }
+        received += r;
+    }
+    body[received] = '\0';
+
+    cJSON *root = cJSON_Parse(body);
+    if (!root) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Bad JSON");
+        return ESP_FAIL;
+    }
+    cJSON *included_json = cJSON_GetObjectItemCaseSensitive(root, "included");
+    if (!cJSON_IsBool(included_json)) {
+        cJSON_Delete(root);
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Missing included");
+        return ESP_FAIL;
+    }
+    bool included = cJSON_IsTrue(included_json);
+    cJSON_Delete(root);
+
+    esp_err_t err = device_manager_set_endpoint_included(node_id, (uint16_t)endpoint_id, included);
+    if (err == ESP_ERR_NOT_FOUND) {
+        httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "Not found");
+        return ESP_FAIL;
+    }
+    if (err != ESP_OK) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Update failed");
+        return ESP_FAIL;
+    }
+    device_manager_persist();
+
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, "{}");
+    return ESP_OK;
+}
+
 static esp_err_t static_get_handler(httpd_req_t *req)
 {
     char fs_path[FS_PATH_MAX];
@@ -167,12 +237,16 @@ esp_err_t web_server_start(void)
         return err;
     }
 
-    const httpd_uri_t settings_get = { .uri = "/api/settings", .method = HTTP_GET, .handler = settings_get_handler };
-    const httpd_uri_t settings_put = { .uri = "/api/settings", .method = HTTP_PUT, .handler = settings_put_handler };
-    const httpd_uri_t static_files = { .uri = "/*",            .method = HTTP_GET, .handler = static_get_handler   };
+    const httpd_uri_t settings_get = { .uri = "/api/settings",              .method = HTTP_GET, .handler = settings_get_handler        };
+    const httpd_uri_t settings_put = { .uri = "/api/settings",              .method = HTTP_PUT, .handler = settings_put_handler        };
+    const httpd_uri_t devices_get  = { .uri = "/api/devices",               .method = HTTP_GET, .handler = devices_get_handler         };
+    const httpd_uri_t endpoint_put = { .uri = "/api/devices/*/endpoints/*", .method = HTTP_PUT, .handler = device_endpoint_put_handler };
+    const httpd_uri_t static_files = { .uri = "/*",                         .method = HTTP_GET, .handler = static_get_handler          };
 
     httpd_register_uri_handler(server, &settings_get);
     httpd_register_uri_handler(server, &settings_put);
+    httpd_register_uri_handler(server, &devices_get);
+    httpd_register_uri_handler(server, &endpoint_put);
     httpd_register_uri_handler(server, &static_files);
 
     ESP_LOGI(TAG, "Web server started on port 80");

@@ -2,6 +2,8 @@ import { NavLink, Routes, Route } from 'react-router'
 import './App.css'
 import Home from './Home.tsx'
 import Settings from './Settings.tsx'
+import Devices from './Devices.tsx'
+import DeviceEndpoints from './DeviceEndpoints.tsx'
 
 function App() {
   return (
@@ -18,6 +20,9 @@ function App() {
                 <NavLink className="nav-link" to="/">Home</NavLink>
               </li>
               <li className="nav-item">
+                <NavLink className="nav-link" to="/devices">Devices</NavLink>
+              </li>
+              <li className="nav-item">
                 <NavLink className="nav-link" to="/settings">Settings</NavLink>
               </li>
             </ul>
@@ -27,6 +32,8 @@ function App() {
       <div className="container">
         <Routes>
           <Route path="/" element={<Home />} />
+          <Route path="/devices" element={<Devices />} />
+          <Route path="/devices/:nodeId" element={<DeviceEndpoints />} />
           <Route path="/settings" element={<Settings />} />
         </Routes>
       </div>
