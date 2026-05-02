@@ -1,3 +1,4 @@
 dependencies:
   joltwallet/littlefs: ^1.10.0
-  espressif/mdns: "*"
+  espressif/mdns: '*'
+  espressif/esp_matter: '*'

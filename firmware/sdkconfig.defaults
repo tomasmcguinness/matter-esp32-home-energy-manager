@@ -6,3 +6,54 @@ CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
 CONFIG_PARTITION_TABLE_OFFSET=0x8000
 
 CONFIG_LWIP_IPV6_AUTOCONFIG=y
+CONFIG_LWIP_HOOK_IP6_ROUTE_DEFAULT=y
+CONFIG_LWIP_HOOK_ND6_GET_GW_DEFAULT=y
+CONFIG_LWIP_IPV6_NUM_ADDRESSES=12
+
+# SPIRAM (HP SRAM via cache) — required for Matter's large static footprint on ESP32-P4.
+# Without this, the CHIP task's static stack buffer lands outside the LP SRAM range
+# that esp_ptr_byte_accessible considers valid, causing xTaskCreateStaticPinnedToCore
+# to assert at startup.
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_USE_MALLOC=y
+CONFIG_SPIRAM_ALLOW_STACK_EXTERNAL_MEMORY=y
+
+# Increase stack sizes for Matter
+CONFIG_CHIP_TASK_STACK_SIZE=15360
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=10240
+
+# Increase UDP endpoints for commissioner
+CONFIG_NUM_UDP_ENDPOINTS=16
+
+CONFIG_ESP_MATTER_ENABLE_MATTER_SERVER=n
+
+# Enable Controller
+CONFIG_ENABLE_CHIP_CONTROLLER_BUILD=y
+CONFIG_ESP_MATTER_CONTROLLER_ENABLE=y
+
+# Enable HKDF in mbedtls (required by Matter)
+CONFIG_MBEDTLS_HKDF_C=y
+
+# Enable chip shell for debugging
+CONFIG_ENABLE_CHIP_SHELL=y
+CONFIG_ESP_MATTER_CONSOLE_TASK_STACK=4096
+CONFIG_CHIP_SHELL_CMD_LINE_BUF_MAX_LENGTH=512
+
+# Disable network commissioning drivers we don't use
+CONFIG_WIFI_NETWORK_COMMISSIONING_DRIVER=n
+CONFIG_ENABLE_CHIPOBLE=n
+
+# Disable Wi-Fi and Thread explicitly
+CONFIG_ENABLE_WIFI_STATION=n
+CONFIG_ENABLE_MATTER_OVER_THREAD=n
+
+# Use the ESP-IDF mdns component (not CHIP minimal-mDNS) so the app can
+# register additional delegated hostnames/services via mdns_delegate_hostname_add
+CONFIG_USE_MINIMAL_MDNS=n
+
+# Disable BLE commissioning — not needed for on-network
+CONFIG_BT_ENABLED=n
+CONFIG_ENABLE_CHIPOBLE=n
+
+# Enable WebSocket support in the HTTP server
+CONFIG_HTTPD_WS_SUPPORT=y
