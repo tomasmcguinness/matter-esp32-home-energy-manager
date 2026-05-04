@@ -12,6 +12,10 @@
 
 #include "settings_store.h"
 #include "managers/device_manager.h"
+#include "matter_controller.h"
+
+#include "mbedtls/base64.h"
+#include "mdns.h"
 
 static const char *TAG = "web_server";
 
@@ -20,6 +24,7 @@ static const char *TAG = "web_server";
 #define FILE_READ_CHUNK  1024
 #define FS_PATH_MAX      544
 #define MAX_POST_BODY    1024
+#define MAX_DER_CERT_LEN 600
 
 static const char *mime_type_for(const char *path)
 {
@@ -191,6 +196,290 @@ static esp_err_t device_endpoint_put_handler(httpd_req_t *req)
     return ESP_OK;
 }
 
+// static esp_err_t controller_noc_post_handler(httpd_req_t *req)
+// {
+//     if (req->content_len <= 0 || req->content_len > MAX_POST_BODY) {
+//         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid body");
+//         return ESP_FAIL;
+//     }
+//     char body[MAX_POST_BODY + 1];
+//     int received = 0;
+//     while (received < (int)req->content_len) {
+//         int r = httpd_req_recv(req, body + received, req->content_len - received);
+//         if (r <= 0) {
+//             httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Recv failed");
+//             return ESP_FAIL;
+//         }
+//         received += r;
+//     }
+//     body[received] = '\0';
+
+//     cJSON *root = cJSON_Parse(body);
+//     if (!root) {
+//         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Bad JSON");
+//         return ESP_FAIL;
+//     }
+//     cJSON *csr_item     = cJSON_GetObjectItemCaseSensitive(root, "csr");
+//     cJSON *node_id_item = cJSON_GetObjectItemCaseSensitive(root, "nodeId");
+//     if (!cJSON_IsString(csr_item)) {
+//         cJSON_Delete(root);
+//         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Missing csr");
+//         return ESP_FAIL;
+//     }
+
+//     // Decode base64 CSR before freeing root
+//     uint8_t csr_der[300];
+//     size_t  csr_der_len = 0;
+//     int rc = mbedtls_base64_decode(csr_der, sizeof(csr_der), &csr_der_len,
+//                                    (const uint8_t *)csr_item->valuestring,
+//                                    strlen(csr_item->valuestring));
+
+//     // Use nodeId from request body if provided, otherwise auto-assign
+//     uint64_t node_id = (cJSON_IsNumber(node_id_item) && node_id_item->valuedouble >= 1.0)
+//                        ? (uint64_t)node_id_item->valuedouble
+//                        : matter_controller_allocate_node_id();
+//     cJSON_Delete(root);
+
+//     if (rc != 0) {
+//         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid base64 CSR");
+//         return ESP_FAIL;
+//     }
+
+//     // Sign the NOC — heap-allocate output buffers to keep stack usage low
+//     uint8_t *noc_der  = malloc(MAX_DER_CERT_LEN);
+//     uint8_t *rcac_der = malloc(MAX_DER_CERT_LEN);
+//     if (!noc_der || !rcac_der) {
+//         free(noc_der);
+//         free(rcac_der);
+//         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "OOM");
+//         return ESP_FAIL;
+//     }
+
+//     size_t noc_len  = MAX_DER_CERT_LEN;
+//     size_t rcac_len = MAX_DER_CERT_LEN;
+//     esp_err_t err = matter_controller_sign_noc(csr_der, csr_der_len, node_id,
+//                                                noc_der,  &noc_len,
+//                                                rcac_der, &rcac_len);
+//     if (err != ESP_OK) {
+//         free(noc_der);
+//         free(rcac_der);
+//         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "NOC signing failed");
+//         return ESP_FAIL;
+//     }
+
+//     // Base64-encode NOC and RCAC
+//     size_t   noc_b64_len = 0,  rcac_b64_len = 0;
+//     size_t   noc_b64_buf  = ((noc_len  + 2) / 3) * 4 + 1;
+//     size_t   rcac_b64_buf = ((rcac_len + 2) / 3) * 4 + 1;
+//     uint8_t *noc_b64  = malloc(noc_b64_buf);
+//     uint8_t *rcac_b64 = malloc(rcac_b64_buf);
+//     if (!noc_b64 || !rcac_b64) {
+//         free(noc_der); free(rcac_der); free(noc_b64); free(rcac_b64);
+//         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "OOM");
+//         return ESP_FAIL;
+//     }
+
+//     mbedtls_base64_encode(noc_b64,  noc_b64_buf,  &noc_b64_len,  noc_der,  noc_len);
+//     mbedtls_base64_encode(rcac_b64, rcac_b64_buf, &rcac_b64_len, rcac_der, rcac_len);
+//     noc_b64[noc_b64_len]   = '\0';
+//     rcac_b64[rcac_b64_len] = '\0';
+//     free(noc_der);
+//     free(rcac_der);
+
+//     cJSON *resp = cJSON_CreateObject();
+//     cJSON_AddNumberToObject(resp, "nodeId", (double)node_id);
+//     cJSON_AddStringToObject(resp, "noc",  (char *)noc_b64);
+//     cJSON_AddStringToObject(resp, "rcac", (char *)rcac_b64);
+//     free(noc_b64);
+//     free(rcac_b64);
+
+//     return send_json(req, resp, 201);
+// }
+
+static esp_err_t controller_commission_post_handler(httpd_req_t *req)
+{
+    if (req->content_len <= 0 || req->content_len > MAX_POST_BODY) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid body");
+        return ESP_FAIL;
+    }
+    char body[MAX_POST_BODY + 1];
+    int received = 0;
+    while (received < (int)req->content_len) {
+        int r = httpd_req_recv(req, body + received, req->content_len - received);
+        if (r <= 0) {
+            httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Recv failed");
+            return ESP_FAIL;
+        }
+        received += r;
+    }
+    body[received] = '\0';
+
+    cJSON *root = cJSON_Parse(body);
+    if (!root) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Bad JSON");
+        return ESP_FAIL;
+    }
+    cJSON *payload_item = cJSON_GetObjectItemCaseSensitive(root, "onboardingPayload");
+    if (!cJSON_IsString(payload_item)) {
+        cJSON_Delete(root);
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Missing onboardingPayload");
+        return ESP_FAIL;
+    }
+    // Copy the payload string before freeing the JSON tree.
+    char payload[256];
+    strncpy(payload, payload_item->valuestring, sizeof(payload) - 1);
+    payload[sizeof(payload) - 1] = '\0';
+    cJSON_Delete(root);
+
+    ESP_LOGI(TAG, "Payload: %s", payload);
+
+    esp_err_t err = matter_controller_commission_on_network(payload);
+    
+    if (err == ESP_ERR_INVALID_ARG) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid onboarding payload");
+        return ESP_FAIL;
+    }
+    if (err == ESP_ERR_TIMEOUT) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Commissioning timed out");
+        return ESP_FAIL;
+    }
+    if (err != ESP_OK) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Commissioning failed");
+        return ESP_FAIL;
+    }
+
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, "{}");
+    return ESP_OK;
+}
+
+static esp_err_t controller_nodes_get_handler(httpd_req_t *req)
+{
+    uint64_t nodes[32];
+    size_t   count = 0;
+    if (matter_controller_get_nodes(nodes, 32, &count) != ESP_OK) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Failed to read nodes");
+        return ESP_FAIL;
+    }
+
+    cJSON *root  = cJSON_CreateObject();
+    cJSON *array = cJSON_AddArrayToObject(root, "nodes");
+    for (size_t i = 0; i < count; i++) {
+        cJSON *node = cJSON_CreateObject();
+        // cJSON numbers are doubles; node IDs fit safely in 53-bit mantissa for
+        // reasonable node ID values, but we also add a string field for safety.
+        cJSON_AddNumberToObject(node, "nodeId", (double)nodes[i]);
+        cJSON_AddItemToArray(array, node);
+    }
+
+    esp_err_t err = send_json(req, root, 200);
+    cJSON_Delete(root);
+    return err;
+}
+
+static esp_err_t controller_unpair_post_handler(httpd_req_t *req)
+{
+    if (req->content_len <= 0 || req->content_len > MAX_POST_BODY) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid body");
+        return ESP_FAIL;
+    }
+    char body[MAX_POST_BODY + 1];
+    int received = 0;
+    while (received < (int)req->content_len) {
+        int r = httpd_req_recv(req, body + received, req->content_len - received);
+        if (r <= 0) {
+            httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Recv failed");
+            return ESP_FAIL;
+        }
+        received += r;
+    }
+    body[received] = '\0';
+
+    cJSON *root = cJSON_Parse(body);
+    if (!root) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Bad JSON");
+        return ESP_FAIL;
+    }
+    cJSON *node_item = cJSON_GetObjectItemCaseSensitive(root, "nodeId");
+    if (!cJSON_IsNumber(node_item)) {
+        cJSON_Delete(root);
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Missing nodeId");
+        return ESP_FAIL;
+    }
+    uint64_t node_id = (uint64_t)node_item->valuedouble;
+    cJSON_Delete(root);
+
+    esp_err_t err = matter_controller_remove_node(node_id);
+    if (err == ESP_ERR_TIMEOUT) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Unpair timed out");
+        return ESP_FAIL;
+    }
+    if (err != ESP_OK) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Unpair failed");
+        return ESP_FAIL;
+    }
+
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, "{}");
+    return ESP_OK;
+}
+
+// static esp_err_t controller_fabric_get_handler(httpd_req_t *req)
+// {
+//     uint64_t fabric_id = 0;
+//     uint8_t  ipk[16];
+
+//     if (matter_controller_get_fabric_info(&fabric_id, ipk, sizeof(ipk)) != ESP_OK) {
+//         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Controller not initialized");
+//         return ESP_FAIL;
+//     }
+
+//     unsigned char ipk_b64[25]; // 16 bytes → 24 base64 chars + null
+//     size_t ipk_b64_len = 0;
+//     mbedtls_base64_encode(ipk_b64, sizeof(ipk_b64), &ipk_b64_len, ipk, sizeof(ipk));
+//     ipk_b64[ipk_b64_len] = '\0';
+
+//     cJSON *root = cJSON_CreateObject();
+//     cJSON_AddNumberToObject(root, "fabricId", (double)fabric_id);
+//     cJSON_AddStringToObject(root, "ipk", (char *)ipk_b64);
+//     return send_json(req, root, 200);
+// }
+
+static esp_err_t debug_mdns_get_handler(httpd_req_t *req)
+{
+    mdns_result_t *results = NULL;
+    // Browse for _http._tcp — broadly advertised, good multicast smoke test.
+    // 3 s timeout, up to 20 results.
+    esp_err_t err = mdns_query_ptr("_http", "_tcp", 3000, 20, &results);
+
+    cJSON *root  = cJSON_CreateObject();
+    cJSON *array = cJSON_AddArrayToObject(root, "services");
+
+    if (err == ESP_OK && results) {
+        for (mdns_result_t *r = results; r; r = r->next) {
+            cJSON *svc = cJSON_CreateObject();
+            if (r->hostname) cJSON_AddStringToObject(svc, "host", r->hostname);
+            if (r->instance_name) cJSON_AddStringToObject(svc, "name", r->instance_name);
+            cJSON_AddNumberToObject(svc, "port", r->port);
+
+            // First IPv4 address if present
+            for (mdns_ip_addr_t *a = r->addr; a; a = a->next) {
+                if (a->addr.type == ESP_IPADDR_TYPE_V4) {
+                    char ip[16];
+                    snprintf(ip, sizeof(ip), IPSTR, IP2STR(&a->addr.u_addr.ip4));
+                    cJSON_AddStringToObject(svc, "ip", ip);
+                    break;
+                }
+            }
+            cJSON_AddItemToArray(array, svc);
+        }
+        mdns_query_results_free(results);
+    }
+
+    cJSON_AddStringToObject(root, "status", err == ESP_OK ? "ok" : esp_err_to_name(err));
+    return send_json(req, root, 200);
+}
+
 static esp_err_t static_get_handler(httpd_req_t *req)
 {
     char fs_path[FS_PATH_MAX];
@@ -228,7 +517,8 @@ esp_err_t web_server_start(void)
     config.server_port     = 80;
     config.lru_purge_enable = true;
     config.uri_match_fn    = httpd_uri_match_wildcard;
-    config.stack_size      = 8192;
+    config.stack_size      = 12288;
+    config.max_uri_handlers = 10;
 
     httpd_handle_t server = NULL;
     err = httpd_start(&server, &config);
@@ -237,16 +527,28 @@ esp_err_t web_server_start(void)
         return err;
     }
 
-    const httpd_uri_t settings_get = { .uri = "/api/settings",              .method = HTTP_GET, .handler = settings_get_handler        };
-    const httpd_uri_t settings_put = { .uri = "/api/settings",              .method = HTTP_PUT, .handler = settings_put_handler        };
-    const httpd_uri_t devices_get  = { .uri = "/api/devices",               .method = HTTP_GET, .handler = devices_get_handler         };
-    const httpd_uri_t endpoint_put = { .uri = "/api/devices/*/endpoints/*", .method = HTTP_PUT, .handler = device_endpoint_put_handler };
-    const httpd_uri_t static_files = { .uri = "/*",                         .method = HTTP_GET, .handler = static_get_handler          };
+    const httpd_uri_t settings_get      = { .uri = "/api/settings",              .method = HTTP_GET, .handler = settings_get_handler           };
+    const httpd_uri_t settings_put      = { .uri = "/api/settings",              .method = HTTP_PUT, .handler = settings_put_handler           };
+    const httpd_uri_t devices_get       = { .uri = "/api/devices",               .method = HTTP_GET, .handler = devices_get_handler            };
+    const httpd_uri_t endpoint_put      = { .uri = "/api/devices/*/endpoints/*", .method = HTTP_PUT, .handler = device_endpoint_put_handler    };
+    //const httpd_uri_t fabric_get        = { .uri = "/controller/fabric",     .method = HTTP_GET,  .handler = controller_fabric_get_handler     };
+    //const httpd_uri_t noc_post          = { .uri = "/controller/noc",        .method = HTTP_POST, .handler = controller_noc_post_handler        };
+    const httpd_uri_t nodes_get         = { .uri = "/controller/nodes",     .method = HTTP_GET,  .handler = controller_nodes_get_handler      };
+    const httpd_uri_t commission_post   = { .uri = "/controller/commission", .method = HTTP_POST, .handler = controller_commission_post_handler };
+    const httpd_uri_t unpair_post       = { .uri = "/controller/unpair",    .method = HTTP_POST, .handler = controller_unpair_post_handler     };
+    const httpd_uri_t debug_mdns        = { .uri = "/debug/mdns",           .method = HTTP_GET,  .handler = debug_mdns_get_handler            };
+    const httpd_uri_t static_files      = { .uri = "/*",                    .method = HTTP_GET,  .handler = static_get_handler                };
 
     httpd_register_uri_handler(server, &settings_get);
     httpd_register_uri_handler(server, &settings_put);
     httpd_register_uri_handler(server, &devices_get);
     httpd_register_uri_handler(server, &endpoint_put);
+    //httpd_register_uri_handler(server, &fabric_get);
+    //httpd_register_uri_handler(server, &noc_post);
+    httpd_register_uri_handler(server, &nodes_get);
+    httpd_register_uri_handler(server, &commission_post);
+    httpd_register_uri_handler(server, &unpair_post);
+    httpd_register_uri_handler(server, &debug_mdns);
     httpd_register_uri_handler(server, &static_files);
 
     ESP_LOGI(TAG, "Web server started on port 80");

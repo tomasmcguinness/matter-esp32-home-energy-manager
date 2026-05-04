@@ -6,7 +6,36 @@
 	objectVersion = 77;
 	objects = {
 
+/* Begin PBXBuildFile section */
+		2CA5699A2FA7A6A400A7CBA8 /* RequestHandler.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = 2CA569932FA7A6A400A7CBA8 /* RequestHandler.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
+/* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		2CA569982FA7A6A400A7CBA8 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 2CC804242FA3DBE2008077DC /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 2CA569922FA7A6A400A7CBA8;
+			remoteInfo = RequestHandler;
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXCopyFilesBuildPhase section */
+		2CA5699F2FA7A6A400A7CBA8 /* Embed Foundation Extensions */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "";
+			dstSubfolderSpec = 13;
+			files = (
+				2CA5699A2FA7A6A400A7CBA8 /* RequestHandler.appex in Embed Foundation Extensions */,
+			);
+			name = "Embed Foundation Extensions";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXCopyFilesBuildPhase section */
+
 /* Begin PBXFileReference section */
+		2CA569932FA7A6A400A7CBA8 /* RequestHandler.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = RequestHandler.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 		2CC8042C2FA3DBE2008077DC /* HEMS.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = HEMS.app; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
@@ -18,9 +47,33 @@
 			);
 			target = 2CC8042B2FA3DBE2008077DC /* home-energy-manager-commissioner */;
 		};
+		2CA5699E2FA7A6A400A7CBA8 /* Exceptions for "RequestHandler" folder in "RequestHandler" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				ESP32Client.swift,
+				Info.plist,
+			);
+			target = 2CA569922FA7A6A400A7CBA8 /* RequestHandler */;
+		};
+		2CA569A02FA7A7C200A7CBA8 /* Exceptions for "RequestHandler" folder in "home-energy-manager-commissioner" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				ESP32Client.swift,
+			);
+			target = 2CC8042B2FA3DBE2008077DC /* home-energy-manager-commissioner */;
+		};
 /* End PBXFileSystemSynchronizedBuildFileExceptionSet section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
+		2CA569942FA7A6A400A7CBA8 /* RequestHandler */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			exceptions = (
+				2CA569A02FA7A7C200A7CBA8 /* Exceptions for "RequestHandler" folder in "home-energy-manager-commissioner" target */,
+				2CA5699E2FA7A6A400A7CBA8 /* Exceptions for "RequestHandler" folder in "RequestHandler" target */,
+			);
+			path = RequestHandler;
+			sourceTree = "<group>";
+		};
 		2CC8042E2FA3DBE2008077DC /* home-energy-manager-commissioner */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
 			exceptions = (
@@ -32,6 +85,13 @@
 /* End PBXFileSystemSynchronizedRootGroup section */
 
 /* Begin PBXFrameworksBuildPhase section */
+		2CA569902FA7A6A400A7CBA8 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		2CC804292FA3DBE2008077DC /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
@@ -46,6 +106,7 @@
 			isa = PBXGroup;
 			children = (
 				2CC8042E2FA3DBE2008077DC /* home-energy-manager-commissioner */,
+				2CA569942FA7A6A400A7CBA8 /* RequestHandler */,
 				2CC8042D2FA3DBE2008077DC /* Products */,
 			);
 			sourceTree = "<group>";
@@ -54,6 +115,7 @@
 			isa = PBXGroup;
 			children = (
 				2CC8042C2FA3DBE2008077DC /* HEMS.app */,
+				2CA569932FA7A6A400A7CBA8 /* RequestHandler.appex */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -61,6 +123,28 @@
 /* End PBXGroup section */
 
 /* Begin PBXNativeTarget section */
+		2CA569922FA7A6A400A7CBA8 /* RequestHandler */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 2CA5699B2FA7A6A400A7CBA8 /* Build configuration list for PBXNativeTarget "RequestHandler" */;
+			buildPhases = (
+				2CA5698F2FA7A6A400A7CBA8 /* Sources */,
+				2CA569902FA7A6A400A7CBA8 /* Frameworks */,
+				2CA569912FA7A6A400A7CBA8 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			fileSystemSynchronizedGroups = (
+				2CA569942FA7A6A400A7CBA8 /* RequestHandler */,
+			);
+			name = RequestHandler;
+			packageProductDependencies = (
+			);
+			productName = RequestHandler;
+			productReference = 2CA569932FA7A6A400A7CBA8 /* RequestHandler.appex */;
+			productType = "com.apple.product-type.app-extension";
+		};
 		2CC8042B2FA3DBE2008077DC /* home-energy-manager-commissioner */ = {
 			isa = PBXNativeTarget;
 			buildConfigurationList = 2CC804372FA3DBE2008077DC /* Build configuration list for PBXNativeTarget "home-energy-manager-commissioner" */;
@@ -68,10 +152,12 @@
 				2CC804282FA3DBE2008077DC /* Sources */,
 				2CC804292FA3DBE2008077DC /* Frameworks */,
 				2CC8042A2FA3DBE2008077DC /* Resources */,
+				2CA5699F2FA7A6A400A7CBA8 /* Embed Foundation Extensions */,
 			);
 			buildRules = (
 			);
 			dependencies = (
+				2CA569992FA7A6A400A7CBA8 /* PBXTargetDependency */,
 			);
 			fileSystemSynchronizedGroups = (
 				2CC8042E2FA3DBE2008077DC /* home-energy-manager-commissioner */,
@@ -93,6 +179,9 @@
 				LastSwiftUpdateCheck = 2600;
 				LastUpgradeCheck = 2600;
 				TargetAttributes = {
+					2CA569922FA7A6A400A7CBA8 = {
+						CreatedOnToolsVersion = 26.0;
+					};
 					2CC8042B2FA3DBE2008077DC = {
 						CreatedOnToolsVersion = 26.0;
 					};
@@ -113,11 +202,19 @@
 			projectRoot = "";
 			targets = (
 				2CC8042B2FA3DBE2008077DC /* home-energy-manager-commissioner */,
+				2CA569922FA7A6A400A7CBA8 /* RequestHandler */,
 			);
 		};
 /* End PBXProject section */
 
 /* Begin PBXResourcesBuildPhase section */
+		2CA569912FA7A6A400A7CBA8 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		2CC8042A2FA3DBE2008077DC /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
@@ -128,6 +225,13 @@
 /* End PBXResourcesBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
+		2CA5698F2FA7A6A400A7CBA8 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		2CC804282FA3DBE2008077DC /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
@@ -137,7 +241,71 @@
 		};
 /* End PBXSourcesBuildPhase section */
 
+/* Begin PBXTargetDependency section */
+		2CA569992FA7A6A400A7CBA8 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 2CA569922FA7A6A400A7CBA8 /* RequestHandler */;
+			targetProxy = 2CA569982FA7A6A400A7CBA8 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
+
 /* Begin XCBuildConfiguration section */
+		2CA5699C2FA7A6A400A7CBA8 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = R9KK4QW233;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = RequestHandler/Info.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = RequestHandler;
+				INFOPLIST_KEY_NSHumanReadableCopyright = "";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = "com.tomasmcguinness.home-energy-manager-commissioner.RequestHandler";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SKIP_INSTALL = YES;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		2CA5699D2FA7A6A400A7CBA8 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = R9KK4QW233;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = RequestHandler/Info.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = RequestHandler;
+				INFOPLIST_KEY_NSHumanReadableCopyright = "";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = "com.tomasmcguinness.home-energy-manager-commissioner.RequestHandler";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SKIP_INSTALL = YES;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
 		2CC804352FA3DBE2008077DC /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
@@ -336,6 +504,15 @@
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
+		2CA5699B2FA7A6A400A7CBA8 /* Build configuration list for PBXNativeTarget "RequestHandler" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				2CA5699C2FA7A6A400A7CBA8 /* Debug */,
+				2CA5699D2FA7A6A400A7CBA8 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
 		2CC804272FA3DBE2008077DC /* Build configuration list for PBXProject "home-energy-manager-commissioner" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (

@@ -2,29 +2,30 @@ import MatterSupport
 import OSLog
 
 class RequestHandler: MatterAddDeviceExtensionRequestHandler {
-    
+
     enum PairingError: Error {
-        case invalidCredentials
+        case hubNotConfigured
         case pairingFailed
     }
-    
+
     private let logger = Logger(subsystem: "com.yourcompany.matterapp", category: "DeviceSetup")
-    
+
     nonisolated override init() {
         super.init()
         logger.debug("MatterAddDeviceExtensionRequestHandler initialized")
     }
-    
+
     override func commissionDevice(in home: MatterAddDeviceRequest.Home?, onboardingPayload: String, commissioningID: UUID) async throws {
-        logger.debug("Commissioning device in home '\(String(describing: home?.displayName))' with payload: \(onboardingPayload).")
+        logger.debug("commissionDevice payload=\(onboardingPayload)")
+
+        let url    = URL(string: "http://home-energy-manager.local")
         
+        let client = ESP32Client(baseURL: url!)
         do {
-            // Parse the onboarding payload and commission the device to your app using the Matter framework APIs.
-            logger.info("Successfully commissioned device with ID: \(commissioningID)")
-            
-            
+            try await client.commissionDevice(onboardingPayload: onboardingPayload)
+            logger.info("Commissioning complete for ID \(commissioningID)")
         } catch {
-            logger.error("Failed to commission device: \(error.localizedDescription)")
+            logger.error("Commissioning failed: \(error.localizedDescription)")
             throw PairingError.pairingFailed
         }
     }

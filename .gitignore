@@ -62,3 +62,4 @@ firmware/dependencies.lock
 firmware/html_app/node_modules/
 firmware/html_app/dist/
 
+*/xcuserdata/*
