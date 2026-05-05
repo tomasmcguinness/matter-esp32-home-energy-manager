@@ -6,9 +6,7 @@ idf_component_register(SRCS
         "managers/device_manager.cpp"
     INCLUDE_DIRS "."
     PRIV_INCLUDE_DIRS  "." "${ESP_MATTER_PATH}/examples/common/utils"
-    REQUIRES
-        esp_netif esp_eth esp_event nvs_flash esp_http_server spiffs json
-        joltwallet__littlefs ethernet_init espressif__mdns
+    LDFRAGMENTS "linker.lf"    
 )
 
 if(CONFIG_SPIFFS_ATTESTATION_TRUST_STORE)
@@ -36,3 +34,5 @@ spiffs_create_partition_image(storage "${CMAKE_SOURCE_DIR}/html_compiled_app" FL
 # target_sources(${matter_lib} PRIVATE
 #     "${CMAKE_SOURCE_DIR}/managed_components/espressif__esp_matter/connectedhomeip/connectedhomeip/src/platform/ESP32/ESP32DnssdImpl.cpp"
 # )
+
+target_compile_options(${COMPONENT_LIB} PRIVATE "-DCHIP_HAVE_CONFIG_H")

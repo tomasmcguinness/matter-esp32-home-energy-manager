@@ -567,23 +567,6 @@ esp_err_t matter_controller_start(void)
         return err;
     }
 
-    {
-        auto *commissioner = esp_matter::controller::matter_controller_client::get_instance().get_commissioner();
-        auto &fabricTable  = const_cast<chip::FabricTable &>(commissioner->GetFabricTable());
-        chip::app::DnssdServer::Instance().SetFabricTable(&fabricTable);
-    }
-
-    // {
-    //     for (auto & fabric : chip::Server::GetInstance().GetFabricTable())
-    //     {
-    //         ESP_LOGI(TAG, "  [%u] fabricId=0x%016llx nodeId=0x%016llx vendorId=%u",
-    //                  fabric.GetFabricIndex(),
-    //                  (unsigned long long)fabric.GetFabricId(),
-    //                  (unsigned long long)fabric.GetNodeId(),
-    //                  fabric.GetVendorId());
-    //     }
-    // }
-
     chip::DeviceLayer::PlatformMgr().UnlockChipStack();
 
     ESP_LOGI(TAG, "Matter commissioner started");
