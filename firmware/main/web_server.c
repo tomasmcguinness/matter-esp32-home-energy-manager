@@ -359,6 +359,18 @@ static esp_err_t debug_mdns_get_handler(httpd_req_t *req)
     return send_json(req, root, 200);
 }
 
+static esp_err_t factory_reset_post_handler(httpd_req_t *req)
+{
+    esp_err_t err = matter_factory_reset();
+    if (err != ESP_OK) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Factory reset failed");
+        return ESP_FAIL;
+    }
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, "{}");
+    return ESP_OK;
+}
+
 static esp_err_t static_get_handler(httpd_req_t *req)
 {
     char fs_path[FS_PATH_MAX];
@@ -397,7 +409,7 @@ esp_err_t web_server_start(void)
     config.lru_purge_enable = true;
     config.uri_match_fn    = httpd_uri_match_wildcard;
     config.stack_size      = 12288;
-    config.max_uri_handlers = 10;
+    config.max_uri_handlers = 11;
 
     httpd_handle_t server = NULL;
     err = httpd_start(&server, &config);
@@ -414,6 +426,7 @@ esp_err_t web_server_start(void)
     const httpd_uri_t commission_post   = { .uri = "/controller/commission", .method = HTTP_POST, .handler = controller_commission_post_handler };
     const httpd_uri_t unpair_post       = { .uri = "/controller/unpair",    .method = HTTP_POST, .handler = controller_unpair_post_handler     };
     const httpd_uri_t debug_mdns        = { .uri = "/debug/mdns",           .method = HTTP_GET,  .handler = debug_mdns_get_handler            };
+    const httpd_uri_t factory_reset     = { .uri = "/api/factory-reset",    .method = HTTP_POST, .handler = factory_reset_post_handler        };
     const httpd_uri_t static_files      = { .uri = "/*",                    .method = HTTP_GET,  .handler = static_get_handler                };
 
     httpd_register_uri_handler(server, &settings_get);
@@ -424,6 +437,7 @@ esp_err_t web_server_start(void)
     httpd_register_uri_handler(server, &commission_post);
     httpd_register_uri_handler(server, &unpair_post);
     httpd_register_uri_handler(server, &debug_mdns);
+    httpd_register_uri_handler(server, &factory_reset);
     httpd_register_uri_handler(server, &static_files);
 
     ESP_LOGI(TAG, "Web server started on port 80");

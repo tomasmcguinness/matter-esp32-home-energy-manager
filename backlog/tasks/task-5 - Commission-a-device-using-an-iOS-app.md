@@ -1,12 +1,12 @@
 ---
 id: TASK-5
 title: Commission a device using an iOS app
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-05-05 05:44'
-updated_date: '2026-05-05 05:48'
+updated_date: '2026-05-05 14:10'
 labels: []
-milestone: m-1
+milestone: m-0
 dependencies: []
 ---
 

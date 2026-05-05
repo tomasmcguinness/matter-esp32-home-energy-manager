@@ -262,6 +262,15 @@ char *device_manager_get_all_json(void)
     return text;
 }
 
+esp_err_t device_manager_clear(void)
+{
+    xSemaphoreTake(s_mutex, portMAX_DELAY);
+    s_devices.clear();
+    s_next_node_id = FIRST_NODE_ID;
+    xSemaphoreGive(s_mutex);
+    return device_manager_persist();
+}
+
 esp_err_t device_manager_persist(void)
 {
     xSemaphoreTake(s_mutex, portMAX_DELAY);

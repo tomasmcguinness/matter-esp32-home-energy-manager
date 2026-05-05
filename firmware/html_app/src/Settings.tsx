@@ -10,6 +10,9 @@ function Settings() {
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [success, setSuccess] = useState(false)
+  const [confirmReset, setConfirmReset] = useState(false)
+  const [resetting, setResetting] = useState(false)
+  const [resetDone, setResetDone] = useState(false)
 
   useEffect(() => {
     fetch('/api/settings')
@@ -52,6 +55,18 @@ function Settings() {
       })
   }
 
+  function handleFactoryReset() {
+    setResetting(true)
+    fetch('/api/factory-reset', { method: 'POST' })
+      .then((r) => { if (!r.ok) throw new Error(`HTTP ${r.status}`) })
+      .then(() => setResetDone(true))
+      .catch((e: unknown) => {
+        setError(e instanceof Error ? e.message : 'Factory reset failed')
+        setResetting(false)
+        setConfirmReset(false)
+      })
+  }
+
   if (loading) return <p className="mt-3">Loading…</p>
 
   return (
@@ -76,6 +91,41 @@ function Settings() {
           {saving ? 'Saving…' : 'Save'}
         </button>
       </form>
+
+      <hr className="mt-5" />
+      <h5 className="text-danger">Danger Zone</h5>
+      <p className="text-muted" style={{ maxWidth: 480, fontSize: '0.9rem' }}>
+        A factory reset will erase all Matter fabric credentials, device data, and settings.
+        The device will restart and need to be commissioned again.
+      </p>
+
+      {resetDone ? (
+        <div className="alert alert-warning">
+          Factory reset initiated — the device is restarting.
+        </div>
+      ) : confirmReset ? (
+        <div className="d-flex gap-2 align-items-center">
+          <span className="text-danger fw-semibold" style={{ fontSize: '0.9rem' }}>Are you sure?</span>
+          <button
+            className="btn btn-danger btn-sm"
+            onClick={handleFactoryReset}
+            disabled={resetting}
+          >
+            {resetting ? 'Resetting…' : 'Yes, factory reset'}
+          </button>
+          <button
+            className="btn btn-outline-secondary btn-sm"
+            onClick={() => setConfirmReset(false)}
+            disabled={resetting}
+          >
+            Cancel
+          </button>
+        </div>
+      ) : (
+        <button className="btn btn-outline-danger btn-sm" onClick={() => setConfirmReset(true)}>
+          Factory Reset
+        </button>
+      )}
     </>
   )
 }
