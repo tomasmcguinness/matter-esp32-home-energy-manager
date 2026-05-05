@@ -54,9 +54,10 @@ CONFIG_ENABLE_CHIPOBLE=n
 CONFIG_ENABLE_WIFI_STATION=n
 CONFIG_ENABLE_MATTER_OVER_THREAD=n
 
-# Use the ESP-IDF mdns component (not CHIP minimal-mDNS) so the app can
+# We want to use the ESP-IDF mdns component (not CHIP minimal-mDNS) so the app can
 # register additional delegated hostnames/services via mdns_delegate_hostname_add
-CONFIG_USE_MINIMAL_MDNS=n
+# but the ESP32-P4 can't support this at this time.
+CONFIG_USE_MINIMAL_MDNS=y
 
 # Disable BLE commissioning — not needed for on-network
 CONFIG_BT_ENABLED=n
