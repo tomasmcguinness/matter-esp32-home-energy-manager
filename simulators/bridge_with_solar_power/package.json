@@ -1,0 +1,15 @@
+{
+  "name": "bridge-with-solar-power",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "start": "tsx bridge.ts"
+  },
+  "dependencies": {
+    "@matter/main": "^0.15.6"
+  },
+  "devDependencies": {
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.3"
+  }
+}
