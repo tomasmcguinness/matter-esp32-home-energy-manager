@@ -10,6 +10,7 @@
 #include <esp_matter_controller_credentials_issuer.h>
 #include <esp_matter_controller_pairing_command.h>
 
+#include <app/server/Dnssd.h>
 #include <controller/CHIPDeviceController.h>
 #include <controller/DevicePairingDelegate.h>
 #include <controller/OperationalCredentialsDelegate.h>
@@ -564,6 +565,12 @@ esp_err_t matter_controller_start(void)
         ESP_LOGE(TAG, "Commissioner setup failed: 0x%x", err);
         chip::DeviceLayer::PlatformMgr().UnlockChipStack();
         return err;
+    }
+
+    {
+        auto *commissioner = esp_matter::controller::matter_controller_client::get_instance().get_commissioner();
+        auto &fabricTable  = const_cast<chip::FabricTable &>(commissioner->GetFabricTable());
+        chip::app::DnssdServer::Instance().SetFabricTable(&fabricTable);
     }
 
     // {
