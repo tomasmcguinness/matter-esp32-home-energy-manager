@@ -262,6 +262,70 @@ char *device_manager_get_all_json(void)
     return text;
 }
 
+static constexpr uint32_t kDevTypeAggregator      = 0x000E;
+static constexpr uint32_t kDevTypeBridgedNode     = 0x0013;
+static constexpr uint32_t kDevTypeSolarPower      = 0x0017;
+static constexpr uint32_t kDevTypeElectricalSensor = 0x0510;
+
+void device_manager_log_structure(uint64_t node_id)
+{
+    xSemaphoreTake(s_mutex, portMAX_DELAY);
+    auto *dev = find_device(node_id);
+    if (!dev) {
+        xSemaphoreGive(s_mutex);
+        ESP_LOGW(TAG, "Node 0x%llx not found in device manager", (unsigned long long)node_id);
+        return;
+    }
+
+    bool is_bridge = false;
+    for (const auto &ep : dev->endpoints) {
+        for (auto dt : ep.device_types) {
+            if (dt == kDevTypeAggregator) { is_bridge = true; break; }
+        }
+        if (is_bridge) break;
+    }
+
+    if (is_bridge) {
+        ESP_LOGI(TAG, "Node 0x%llx is a BRIDGE (%s %s)",
+                 (unsigned long long)node_id,
+                 dev->vendor_name.c_str(), dev->product_name.c_str());
+
+        for (const auto &ep : dev->endpoints) {
+            bool bridged = false, solar = false, elecSensor = false;
+            for (auto dt : ep.device_types) {
+                if (dt == kDevTypeBridgedNode)      bridged    = true;
+                if (dt == kDevTypeSolarPower)       solar      = true;
+                if (dt == kDevTypeElectricalSensor) elecSensor = true;
+            }
+            if (bridged) {
+                const char *tag = solar      ? " [SOLAR POWER 0x0017]"       :
+                                  elecSensor ? " [ELECTRICAL SENSOR 0x0510]" : "";
+                ESP_LOGI(TAG, "  endpoint %u: Bridged Node%s", ep.endpoint_id, tag);
+            }
+        }
+    } else {
+        ESP_LOGI(TAG, "Node 0x%llx is a direct device (%s %s)",
+                 (unsigned long long)node_id,
+                 dev->vendor_name.c_str(), dev->product_name.c_str());
+        for (const auto &ep : dev->endpoints) {
+            for (auto dt : ep.device_types) {
+                ESP_LOGI(TAG, "  endpoint %u: device type 0x%04x", ep.endpoint_id, (unsigned)dt);
+            }
+        }
+    }
+
+    xSemaphoreGive(s_mutex);
+}
+
+esp_err_t device_manager_clear_device_endpoints(uint64_t node_id)
+{
+    xSemaphoreTake(s_mutex, portMAX_DELAY);
+    auto *dev = find_device(node_id);
+    if (dev) dev->endpoints.clear();
+    xSemaphoreGive(s_mutex);
+    return dev ? ESP_OK : ESP_ERR_NOT_FOUND;
+}
+
 esp_err_t device_manager_clear(void)
 {
     xSemaphoreTake(s_mutex, portMAX_DELAY);

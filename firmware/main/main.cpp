@@ -62,7 +62,7 @@ extern "C" void app_main(void)
     ESP_ERROR_CHECK(esp_event_loop_create_default());
 
     //ESP_ERROR_CHECK(settings_store_init());
-    //ESP_ERROR_CHECK(device_manager_init());
+    ESP_ERROR_CHECK(device_manager_init());
 
     uint8_t eth_port_cnt = 0;
     esp_eth_handle_t *eth_handles;

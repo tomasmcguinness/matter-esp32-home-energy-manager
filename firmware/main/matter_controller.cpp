@@ -220,6 +220,7 @@ static void on_interrogation_done(uint64_t node_id,
                                   const chip::Platform::ScopedMemoryBufferWithSize<chip::app::EventPathParams> &)
 {
     ESP_LOGI(TAG, "Interrogation complete for node 0x%llx", (unsigned long long)node_id);
+    device_manager_log_structure(node_id);
     device_manager_persist();
 }
 
@@ -341,6 +342,18 @@ esp_err_t matter_controller_commission_on_network(const char *onboarding_payload
     }
 
     return ESP_FAIL;
+}
+
+// ---------------------------------------------------------------------------
+// Public re-interrogation
+// ---------------------------------------------------------------------------
+
+esp_err_t matter_controller_interrogate_node(uint64_t node_id)
+{
+    // Clear stale endpoints so removed endpoints don't persist after re-interview
+    device_manager_clear_device_endpoints(node_id);
+    interrogate_node(node_id);
+    return ESP_OK;
 }
 
 // ---------------------------------------------------------------------------

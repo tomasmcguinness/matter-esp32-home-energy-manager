@@ -17,6 +17,7 @@ uint64_t  matter_controller_allocate_node_id(void);
 //                                      uint8_t *rcac_out, size_t *rcac_len);
 esp_err_t matter_controller_commission_on_network(const char *onboarding_payload);
 esp_err_t matter_controller_remove_node(uint64_t node_id);
+esp_err_t matter_controller_interrogate_node(uint64_t node_id);
 esp_err_t matter_controller_get_nodes(uint64_t *nodes, size_t max, size_t *count_out);
 esp_err_t matter_factory_reset(void);
 

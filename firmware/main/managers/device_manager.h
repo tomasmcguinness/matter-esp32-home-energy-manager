@@ -24,6 +24,8 @@ esp_err_t device_manager_set_endpoint_included(uint64_t node_id, uint16_t endpoi
 char     *device_manager_get_all_json(void); // caller must free
 esp_err_t device_manager_persist(void);
 esp_err_t device_manager_clear(void);
+esp_err_t device_manager_clear_device_endpoints(uint64_t node_id);
+void      device_manager_log_structure(uint64_t node_id);
 
 #ifdef __cplusplus
 }

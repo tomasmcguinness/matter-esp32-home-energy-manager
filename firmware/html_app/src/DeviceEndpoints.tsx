@@ -23,9 +23,11 @@ function DeviceEndpoints() {
   const [device, setDevice] = useState<Device | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  const [interrogating, setInterrogating] = useState(false)
+  const [interrogateMsg, setInterrogateMsg] = useState<string | null>(null)
 
-  useEffect(() => {
-    fetch('/api/devices')
+  function loadDevice() {
+    return fetch('/api/devices')
       .then((r) => {
         if (!r.ok) throw new Error(`HTTP ${r.status}`)
         return r.json() as Promise<DevicesResponse>
@@ -33,13 +35,29 @@ function DeviceEndpoints() {
       .then((data) => {
         const found = data.devices.find((d) => String(d.nodeId) === nodeId)
         setDevice(found ?? null)
-        setLoading(false)
       })
-      .catch((e: unknown) => {
-        setError(e instanceof Error ? e.message : 'Failed to load devices')
-        setLoading(false)
-      })
+  }
+
+  useEffect(() => {
+    loadDevice()
+      .catch((e: unknown) => setError(e instanceof Error ? e.message : 'Failed to load devices'))
+      .finally(() => setLoading(false))
   }, [nodeId])
+
+  function handleReinterrogate() {
+    setInterrogating(true)
+    setInterrogateMsg(null)
+    fetch(`/api/devices/${nodeId}/interrogate`, { method: 'POST' })
+      .then((r) => { if (!r.ok) throw new Error(`HTTP ${r.status}`) })
+      .then(() => {
+        setInterrogateMsg('Interrogation started — refreshing in 3 s…')
+        return new Promise<void>((resolve) => setTimeout(resolve, 3000))
+      })
+      .then(() => loadDevice())
+      .then(() => setInterrogateMsg('Interrogation complete.'))
+      .catch((e: unknown) => setInterrogateMsg(e instanceof Error ? e.message : 'Interrogation failed'))
+      .finally(() => setInterrogating(false))
+  }
 
   function toggleIncluded(ep: Endpoint) {
     if (!device) return
@@ -86,10 +104,18 @@ function DeviceEndpoints() {
       <div className="d-flex align-items-center gap-3 mt-3 mb-2">
         <Link to="/devices" className="btn btn-outline-secondary btn-sm">← Back</Link>
         <h1 className="mb-0">{device.vendorName} {device.productName}</h1>
+        <button
+          className="btn btn-outline-primary btn-sm ms-auto"
+          onClick={handleReinterrogate}
+          disabled={interrogating}
+        >
+          {interrogating ? 'Interrogating…' : 'Re-interrogate'}
+        </button>
       </div>
       <p className="text-muted">Node 0x{device.nodeId.toString(16).toUpperCase()}</p>
       <hr />
       {error && <div className="alert alert-danger">{error}</div>}
+      {interrogateMsg && <div className="alert alert-info py-2">{interrogateMsg}</div>}
       {device.endpoints.length === 0 ? (
         <p className="text-muted">No endpoints discovered for this device.</p>
       ) : (

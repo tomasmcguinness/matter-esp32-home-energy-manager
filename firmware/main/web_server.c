@@ -253,30 +253,6 @@ static esp_err_t controller_commission_post_handler(httpd_req_t *req)
     return ESP_OK;
 }
 
-static esp_err_t controller_nodes_get_handler(httpd_req_t *req)
-{
-    uint64_t nodes[32];
-    size_t   count = 0;
-    if (matter_controller_get_nodes(nodes, 32, &count) != ESP_OK) {
-        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Failed to read nodes");
-        return ESP_FAIL;
-    }
-
-    cJSON *root  = cJSON_CreateObject();
-    cJSON *array = cJSON_AddArrayToObject(root, "nodes");
-    for (size_t i = 0; i < count; i++) {
-        cJSON *node = cJSON_CreateObject();
-        // cJSON numbers are doubles; node IDs fit safely in 53-bit mantissa for
-        // reasonable node ID values, but we also add a string field for safety.
-        cJSON_AddNumberToObject(node, "nodeId", (double)nodes[i]);
-        cJSON_AddItemToArray(array, node);
-    }
-
-    esp_err_t err = send_json(req, root, 200);
-    cJSON_Delete(root);
-    return err;
-}
-
 static esp_err_t controller_unpair_post_handler(httpd_req_t *req)
 {
     if (req->content_len <= 0 || req->content_len > MAX_POST_BODY) {
@@ -359,6 +335,30 @@ static esp_err_t debug_mdns_get_handler(httpd_req_t *req)
     return send_json(req, root, 200);
 }
 
+static esp_err_t device_interrogate_post_handler(httpd_req_t *req)
+{
+    uint64_t node_id = 0;
+    if (sscanf(req->uri, "/api/devices/%" SCNu64 "/interrogate", &node_id) != 1) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid URI");
+        return ESP_FAIL;
+    }
+
+    esp_err_t err = matter_controller_interrogate_node(node_id);
+    if (err == ESP_ERR_NOT_FOUND) {
+        httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "Device not found");
+        return ESP_FAIL;
+    }
+    if (err != ESP_OK) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Interrogation failed");
+        return ESP_FAIL;
+    }
+
+    httpd_resp_set_status(req, "202 Accepted");
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, "{}");
+    return ESP_OK;
+}
+
 static esp_err_t factory_reset_post_handler(httpd_req_t *req)
 {
     esp_err_t err = matter_factory_reset();
@@ -409,7 +409,7 @@ esp_err_t web_server_start(void)
     config.lru_purge_enable = true;
     config.uri_match_fn    = httpd_uri_match_wildcard;
     config.stack_size      = 12288;
-    config.max_uri_handlers = 11;
+    config.max_uri_handlers = 12;
 
     httpd_handle_t server = NULL;
     err = httpd_start(&server, &config);
@@ -422,21 +422,21 @@ esp_err_t web_server_start(void)
     const httpd_uri_t settings_put      = { .uri = "/api/settings",              .method = HTTP_PUT, .handler = settings_put_handler           };
     const httpd_uri_t devices_get       = { .uri = "/api/devices",               .method = HTTP_GET, .handler = devices_get_handler            };
     const httpd_uri_t endpoint_put      = { .uri = "/api/devices/*/endpoints/*", .method = HTTP_PUT, .handler = device_endpoint_put_handler    };
-    const httpd_uri_t nodes_get         = { .uri = "/controller/nodes",     .method = HTTP_GET,  .handler = controller_nodes_get_handler      };
     const httpd_uri_t commission_post   = { .uri = "/controller/commission", .method = HTTP_POST, .handler = controller_commission_post_handler };
     const httpd_uri_t unpair_post       = { .uri = "/controller/unpair",    .method = HTTP_POST, .handler = controller_unpair_post_handler     };
     const httpd_uri_t debug_mdns        = { .uri = "/debug/mdns",           .method = HTTP_GET,  .handler = debug_mdns_get_handler            };
-    const httpd_uri_t factory_reset     = { .uri = "/api/factory-reset",    .method = HTTP_POST, .handler = factory_reset_post_handler        };
-    const httpd_uri_t static_files      = { .uri = "/*",                    .method = HTTP_GET,  .handler = static_get_handler                };
+    const httpd_uri_t device_interrogate = { .uri = "/api/devices/*/interrogate", .method = HTTP_POST, .handler = device_interrogate_post_handler };
+    const httpd_uri_t factory_reset      = { .uri = "/api/factory-reset",         .method = HTTP_POST, .handler = factory_reset_post_handler       };
+    const httpd_uri_t static_files       = { .uri = "/*",                         .method = HTTP_GET,  .handler = static_get_handler               };
 
     httpd_register_uri_handler(server, &settings_get);
     httpd_register_uri_handler(server, &settings_put);
     httpd_register_uri_handler(server, &devices_get);
     httpd_register_uri_handler(server, &endpoint_put);
-    httpd_register_uri_handler(server, &nodes_get);
     httpd_register_uri_handler(server, &commission_post);
     httpd_register_uri_handler(server, &unpair_post);
     httpd_register_uri_handler(server, &debug_mdns);
+    httpd_register_uri_handler(server, &device_interrogate);
     httpd_register_uri_handler(server, &factory_reset);
     httpd_register_uri_handler(server, &static_files);
 

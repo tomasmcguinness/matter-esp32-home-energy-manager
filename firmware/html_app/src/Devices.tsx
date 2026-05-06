@@ -23,12 +23,8 @@ function deviceTypeName(id: number): string {
   const names: Record<number, string> = {
     14: 'Aggregator',
     19: 'Root Node',
-    256: 'On/Off Light',
-    257: 'Dimmable Light',
-    266: 'On/Off Plug',
-    770: 'Temperature Sensor',
-    774: 'Flow Sensor',
-    1296: 'Bridged Node',
+    23: 'Solar Power',
+    1296: 'Electrical Sensor',
   }
   return names[id] ?? `0x${id.toString(16).toUpperCase()}`
 }
