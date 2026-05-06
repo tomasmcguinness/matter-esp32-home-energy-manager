@@ -1,0 +1,175 @@
+#include "node_config_manager.h"
+
+#include <stdio.h>
+#include <unistd.h>
+#include <vector>
+#include <string>
+
+#include "esp_log.h"
+#include "esp_littlefs.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
+#include "cJSON.h"
+
+static const char *TAG = "node_config_manager";
+
+#define LFS_BASE_PATH "/littlefs"
+#define NODES_PATH    LFS_BASE_PATH "/nodes.json"
+#define NODES_TMP     LFS_BASE_PATH "/nodes.json.tmp"
+
+struct node_config_t {
+    std::string id;
+    float x = 0.0f;
+    float y = 0.0f;
+    std::string settings_json = "{}";
+};
+
+static std::vector<node_config_t> s_nodes;
+static SemaphoreHandle_t s_mutex = nullptr;
+
+static node_config_t *find_node(const char *id)
+{
+    for (auto &n : s_nodes) {
+        if (n.id == id) return &n;
+    }
+    return nullptr;
+}
+
+static cJSON *build_json(void)
+{
+    cJSON *root = cJSON_CreateObject();
+    cJSON *arr  = cJSON_AddArrayToObject(root, "nodes");
+    for (const auto &nc : s_nodes) {
+        cJSON *obj = cJSON_CreateObject();
+        cJSON_AddStringToObject(obj, "id", nc.id.c_str());
+        cJSON_AddNumberToObject(obj, "x", nc.x);
+        cJSON_AddNumberToObject(obj, "y", nc.y);
+        cJSON *settings = cJSON_Parse(nc.settings_json.c_str());
+        cJSON_AddItemToObject(obj, "settings", settings ? settings : cJSON_CreateObject());
+        cJSON_AddItemToArray(arr, obj);
+    }
+    return root;
+}
+
+static void load_from_disk(void)
+{
+    FILE *f = fopen(NODES_PATH, "r");
+    if (!f) { ESP_LOGI(TAG, "No nodes file; starting fresh"); return; }
+
+    fseek(f, 0, SEEK_END);
+    long size = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    if (size <= 0 || size > 16384) { fclose(f); return; }
+
+    char *buf = (char *)malloc(size + 1);
+    if (!buf) { fclose(f); return; }
+    size_t n = fread(buf, 1, size, f);
+    fclose(f);
+    buf[n] = '\0';
+
+    cJSON *root = cJSON_Parse(buf);
+    free(buf);
+    if (!root) return;
+
+    cJSON *nodes = cJSON_GetObjectItemCaseSensitive(root, "nodes");
+    cJSON *item  = nullptr;
+    cJSON_ArrayForEach(item, nodes) {
+        cJSON *id = cJSON_GetObjectItemCaseSensitive(item, "id");
+        if (!cJSON_IsString(id)) continue;
+
+        node_config_t nc;
+        nc.id = id->valuestring;
+
+        cJSON *x = cJSON_GetObjectItemCaseSensitive(item, "x");
+        if (cJSON_IsNumber(x)) nc.x = (float)x->valuedouble;
+
+        cJSON *y = cJSON_GetObjectItemCaseSensitive(item, "y");
+        if (cJSON_IsNumber(y)) nc.y = (float)y->valuedouble;
+
+        cJSON *settings = cJSON_GetObjectItemCaseSensitive(item, "settings");
+        if (settings) {
+            char *s = cJSON_PrintUnformatted(settings);
+            if (s) { nc.settings_json = s; free(s); }
+        }
+        s_nodes.push_back(nc);
+    }
+    cJSON_Delete(root);
+    ESP_LOGI(TAG, "Loaded %u node config(s)", (unsigned)s_nodes.size());
+}
+
+esp_err_t node_config_manager_init(void)
+{
+    s_mutex = xSemaphoreCreateMutex();
+    if (!s_mutex) return ESP_ERR_NO_MEM;
+
+    // LittleFS is already mounted by device_manager; tolerate already-mounted error
+    esp_vfs_littlefs_conf_t conf = {
+        .base_path              = LFS_BASE_PATH,
+        .partition_label        = "config",
+        .format_if_mount_failed = true,
+        .dont_mount             = false,
+    };
+    esp_err_t err = esp_vfs_littlefs_register(&conf);
+    if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
+        ESP_LOGE(TAG, "LittleFS mount failed: 0x%x", err);
+        return err;
+    }
+
+    load_from_disk();
+    return ESP_OK;
+}
+
+esp_err_t node_config_manager_upsert(const char *node_id, float x, float y)
+{
+    xSemaphoreTake(s_mutex, portMAX_DELAY);
+    auto *nc = find_node(node_id);
+    if (nc) {
+        nc->x = x;
+        nc->y = y;
+    } else {
+        node_config_t n;
+        n.id = node_id;
+        n.x  = x;
+        n.y  = y;
+        s_nodes.push_back(n);
+    }
+    xSemaphoreGive(s_mutex);
+    return node_config_manager_persist();
+}
+
+char *node_config_manager_get_all_json(void)
+{
+    xSemaphoreTake(s_mutex, portMAX_DELAY);
+    cJSON *root = build_json();
+    xSemaphoreGive(s_mutex);
+    char *text = cJSON_PrintUnformatted(root);
+    cJSON_Delete(root);
+    return text;
+}
+
+esp_err_t node_config_manager_persist(void)
+{
+    xSemaphoreTake(s_mutex, portMAX_DELAY);
+    cJSON *root = build_json();
+    xSemaphoreGive(s_mutex);
+
+    char *text = cJSON_PrintUnformatted(root);
+    cJSON_Delete(root);
+    if (!text) return ESP_ERR_NO_MEM;
+
+    esp_err_t result = ESP_OK;
+    FILE *f = fopen(NODES_TMP, "w");
+    if (!f) { result = ESP_FAIL; goto done; }
+    if (fputs(text, f) == EOF) { fclose(f); result = ESP_FAIL; goto done; }
+    fflush(f);
+    fsync(fileno(f));
+    fclose(f);
+    if (rename(NODES_TMP, NODES_PATH) != 0) result = ESP_FAIL;
+done:
+    free(text);
+    if (result == ESP_OK)
+        ESP_LOGI(TAG, "Persisted %u node config(s)", (unsigned)s_nodes.size());
+    else
+        ESP_LOGE(TAG, "Failed to persist node configs");
+    return result;
+}

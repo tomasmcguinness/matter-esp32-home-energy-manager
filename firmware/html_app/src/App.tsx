@@ -29,14 +29,12 @@ function App() {
           </div>
         </div>
       </nav>
-      <div className="container">
-        <Routes>
-          <Route path="/" element={<Home />} />
-          <Route path="/devices" element={<Devices />} />
-          <Route path="/devices/:nodeId" element={<DeviceEndpoints />} />
-          <Route path="/settings" element={<Settings />} />
-        </Routes>
-      </div>
+      <Routes>
+        <Route path="/" element={<Home />} />
+        <Route path="/devices" element={<div className="container"><Devices /></div>} />
+        <Route path="/devices/:nodeId" element={<div className="container"><DeviceEndpoints /></div>} />
+        <Route path="/settings" element={<div className="container"><Settings /></div>} />
+      </Routes>
     </>
   )
 }

@@ -12,6 +12,7 @@
 
 #include "settings_store.h"
 #include "managers/device_manager.h"
+#include "managers/node_config_manager.h"
 #include "matter_controller.h"
 
 #include "mbedtls/base64.h"
@@ -371,6 +372,70 @@ static esp_err_t factory_reset_post_handler(httpd_req_t *req)
     return ESP_OK;
 }
 
+static esp_err_t nodes_get_handler(httpd_req_t *req)
+{
+    char *json = node_config_manager_get_all_json();
+    if (!json) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "OOM");
+        return ESP_FAIL;
+    }
+    httpd_resp_set_type(req, "application/json");
+    esp_err_t err = httpd_resp_sendstr(req, json);
+    free(json);
+    return err;
+}
+
+static esp_err_t node_put_handler(httpd_req_t *req)
+{
+    // URI is /api/nodes/<id>
+    const char *last_slash = strrchr(req->uri, '/');
+    if (!last_slash || *(last_slash + 1) == '\0') {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid URI");
+        return ESP_FAIL;
+    }
+    const char *node_id = last_slash + 1;
+
+    if (req->content_len <= 0 || req->content_len > MAX_POST_BODY) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid body");
+        return ESP_FAIL;
+    }
+    char body[MAX_POST_BODY + 1];
+    int received = 0;
+    while (received < (int)req->content_len) {
+        int r = httpd_req_recv(req, body + received, req->content_len - received);
+        if (r <= 0) {
+            httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Recv failed");
+            return ESP_FAIL;
+        }
+        received += r;
+    }
+    body[received] = '\0';
+
+    cJSON *root = cJSON_Parse(body);
+    if (!root) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Bad JSON");
+        return ESP_FAIL;
+    }
+    cJSON *xj = cJSON_GetObjectItemCaseSensitive(root, "x");
+    cJSON *yj = cJSON_GetObjectItemCaseSensitive(root, "y");
+    if (!cJSON_IsNumber(xj) || !cJSON_IsNumber(yj)) {
+        cJSON_Delete(root);
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Missing x/y");
+        return ESP_FAIL;
+    }
+    float x = (float)xj->valuedouble;
+    float y = (float)yj->valuedouble;
+    cJSON_Delete(root);
+
+    esp_err_t err = node_config_manager_upsert(node_id, x, y);
+    if (err != ESP_OK) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Persist failed");
+        return ESP_FAIL;
+    }
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_sendstr(req, "{}");
+}
+
 static esp_err_t static_get_handler(httpd_req_t *req)
 {
     char fs_path[FS_PATH_MAX];
@@ -409,7 +474,7 @@ esp_err_t web_server_start(void)
     config.lru_purge_enable = true;
     config.uri_match_fn    = httpd_uri_match_wildcard;
     config.stack_size      = 12288;
-    config.max_uri_handlers = 12;
+    config.max_uri_handlers = 14;
 
     httpd_handle_t server = NULL;
     err = httpd_start(&server, &config);
@@ -427,6 +492,8 @@ esp_err_t web_server_start(void)
     const httpd_uri_t debug_mdns        = { .uri = "/debug/mdns",           .method = HTTP_GET,  .handler = debug_mdns_get_handler            };
     const httpd_uri_t device_interrogate = { .uri = "/api/devices/*/interrogate", .method = HTTP_POST, .handler = device_interrogate_post_handler };
     const httpd_uri_t factory_reset      = { .uri = "/api/factory-reset",         .method = HTTP_POST, .handler = factory_reset_post_handler       };
+    const httpd_uri_t nodes_get          = { .uri = "/api/nodes",                 .method = HTTP_GET,  .handler = nodes_get_handler                };
+    const httpd_uri_t node_put           = { .uri = "/api/nodes/*",               .method = HTTP_PUT,  .handler = node_put_handler                 };
     const httpd_uri_t static_files       = { .uri = "/*",                         .method = HTTP_GET,  .handler = static_get_handler               };
 
     httpd_register_uri_handler(server, &settings_get);
@@ -438,6 +505,8 @@ esp_err_t web_server_start(void)
     httpd_register_uri_handler(server, &debug_mdns);
     httpd_register_uri_handler(server, &device_interrogate);
     httpd_register_uri_handler(server, &factory_reset);
+    httpd_register_uri_handler(server, &nodes_get);
+    httpd_register_uri_handler(server, &node_put);
     httpd_register_uri_handler(server, &static_files);
 
     ESP_LOGI(TAG, "Web server started on port 80");

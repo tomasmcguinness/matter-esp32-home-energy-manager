@@ -7,6 +7,9 @@ export type Settings = {
 
 let settings: Settings = { name: 'Home Energy Manager' }
 
+type NodeConfig = { id: string; x: number; y: number; settings: Record<string, unknown> }
+let nodeConfigs: NodeConfig[] = []
+
 let devices: Device[] = [
   {
     nodeId: 10000,
@@ -50,6 +53,23 @@ export const handlers = [
           }
         : d
     )
+    return HttpResponse.json({})
+  }),
+
+  http.get('/api/nodes', () => {
+    return HttpResponse.json({ nodes: nodeConfigs })
+  }),
+
+  http.put('/api/nodes/:nodeId', async ({ params, request }) => {
+    const id = params.nodeId as string
+    const body = (await request.json()) as { x: number; y: number }
+    const existing = nodeConfigs.find(n => n.id === id)
+    if (existing) {
+      existing.x = body.x
+      existing.y = body.y
+    } else {
+      nodeConfigs.push({ id, x: body.x, y: body.y, settings: {} })
+    }
     return HttpResponse.json({})
   }),
 ]
