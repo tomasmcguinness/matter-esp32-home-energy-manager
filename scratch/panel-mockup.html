@@ -1,0 +1,470 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Home Energy Manager – Panel Mockup</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: system-ui, -apple-system, sans-serif; background: #f8fafc; color: #1e293b; height: 100vh; display: flex; flex-direction: column; overflow: hidden; }
+
+  /* ── Navbar ── */
+  nav { height: 52px; background: #fff; border-bottom: 1px solid #e2e8f0; display: flex; align-items: center; padding: 0 20px; gap: 24px; flex-shrink: 0; }
+  nav .brand { font-weight: 600; font-size: 15px; color: #1e293b; }
+  nav a { font-size: 13px; color: #64748b; text-decoration: none; }
+  nav a.active { color: #2563eb; font-weight: 500; }
+
+  /* ── Main layout ── */
+  .main { display: flex; flex: 1; overflow: hidden; }
+
+  /* ── Left panel ── */
+  .panel { width: 240px; background: #fff; border-right: 1px solid #e2e8f0; display: flex; flex-direction: column; flex-shrink: 0; overflow: hidden; }
+  .panel-header { padding: 12px 14px; border-bottom: 1px solid #e2e8f0; }
+  .panel-header h2 { font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: .06em; color: #94a3b8; }
+  .panel-body { flex: 1; overflow-y: auto; padding: 8px 0; }
+
+  .section-label { font-size: 11px; font-weight: 600; color: #94a3b8; text-transform: uppercase; letter-spacing: .05em; padding: 10px 14px 4px; }
+
+  .device-item { display: flex; align-items: center; gap: 10px; padding: 8px 14px; cursor: grab; border-radius: 0; transition: background .12s; user-select: none; position: relative; }
+  .device-item:hover { background: #f1f5f9; }
+  .device-item:active { cursor: grabbing; }
+  .device-item .icon { width: 32px; height: 32px; border-radius: 8px; display: flex; align-items: center; justify-content: center; font-size: 16px; flex-shrink: 0; }
+  .device-item .info { flex: 1; min-width: 0; }
+  .device-item .name { font-size: 13px; font-weight: 500; color: #1e293b; }
+  .device-item .desc { font-size: 11px; color: #94a3b8; margin-top: 1px; }
+  .device-item .badge { font-size: 10px; padding: 2px 6px; border-radius: 4px; font-weight: 500; flex-shrink: 0; }
+  .badge-canvas { background: #eff6ff; color: #2563eb; }
+  .badge-edge   { background: #f0fdf4; color: #16a34a; }
+
+  .drag-hint { font-size: 11px; color: #cbd5e1; padding: 16px 14px 8px; display: flex; align-items: center; gap: 6px; }
+  .drag-hint svg { opacity: .5; }
+
+  /* ── Canvas ── */
+  .canvas-wrap { flex: 1; position: relative; overflow: hidden; background: #f8f8f6; }
+  canvas#grid-bg { position: absolute; inset: 0; pointer-events: none; }
+  #canvas { position: absolute; inset: 0; }
+
+  /* ── Nodes ── */
+  .node { position: absolute; background: #fff; border: 1.5px solid #e2e8f0; border-radius: 8px; padding: 8px 14px; font-size: 13px; font-weight: 500; color: #1e293b; cursor: default; box-shadow: 0 1px 3px rgba(0,0,0,.06); white-space: nowrap; text-align: center; min-width: 110px; }
+  .node.highlight { border-color: #2563eb; box-shadow: 0 0 0 3px rgba(37,99,235,.15); }
+
+  /* drop ghost */
+  #ghost { position: fixed; background: #fff; border: 1.5px dashed #94a3b8; border-radius: 8px; padding: 8px 14px; font-size: 13px; font-weight: 500; color: #64748b; pointer-events: none; display: none; z-index: 999; white-space: nowrap; box-shadow: 0 4px 12px rgba(0,0,0,.1); opacity: .85; }
+
+  /* drop zones */
+  .canvas-wrap.drag-canvas-over { background: #f0f7ff; }
+  .drop-hint { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; pointer-events: none; opacity: 0; transition: opacity .2s; }
+  .drop-hint span { background: rgba(37,99,235,.08); border: 2px dashed #93c5fd; border-radius: 12px; padding: 10px 20px; font-size: 13px; color: #2563eb; font-weight: 500; }
+  .canvas-wrap.drag-canvas-over .drop-hint { opacity: 1; }
+
+  /* edge tooltip */
+  #edge-tooltip { position: fixed; background: #1e293b; color: #fff; font-size: 11px; padding: 4px 8px; border-radius: 5px; pointer-events: none; display: none; z-index: 1000; }
+
+  /* inserted node flash */
+  @keyframes nodeAppear { from { transform: translate(-50%,-50%) scale(.6); opacity:0; } to { transform: translate(-50%,-50%) scale(1); opacity:1; } }
+  .node-new { animation: nodeAppear .25s cubic-bezier(.34,1.56,.64,1) forwards; }
+</style>
+</head>
+<body>
+
+<nav>
+  <span class="brand">⚡ Home Energy Manager</span>
+  <a href="#" class="active">Home</a>
+  <a href="#">Devices</a>
+  <a href="#">Settings</a>
+</nav>
+
+<div class="main">
+
+  <!-- Left panel -->
+  <div class="panel">
+    <div class="panel-header"><h2>Available Devices</h2></div>
+    <div class="panel-body">
+
+      <div class="section-label">Generators</div>
+      <div class="device-item" draggable="true" data-type="solar" data-drop="canvas">
+        <div class="icon" style="background:#fef9c3;">☀️</div>
+        <div class="info">
+          <div class="name">Solar Power</div>
+          <div class="desc">PV generation source</div>
+        </div>
+        <span class="badge badge-canvas">node</span>
+      </div>
+
+      <div class="section-label">Sensors</div>
+      <div class="device-item" draggable="true" data-type="sensor" data-drop="edge">
+        <div class="icon" style="background:#f0fdf4;">⚡</div>
+        <div class="info">
+          <div class="name">Electrical Sensor</div>
+          <div class="desc">Inline power meter</div>
+        </div>
+        <span class="badge badge-edge">edge</span>
+      </div>
+
+      <div class="device-item" draggable="true" data-type="sensor" data-drop="edge">
+        <div class="icon" style="background:#f0fdf4;">🔋</div>
+        <div class="info">
+          <div class="name">Battery Monitor</div>
+          <div class="desc">State-of-charge sensor</div>
+        </div>
+        <span class="badge badge-edge">edge</span>
+      </div>
+
+      <div class="section-label">Loads</div>
+      <div class="device-item" draggable="true" data-type="load" data-drop="canvas">
+        <div class="icon" style="background:#faf5ff;">🔌</div>
+        <div class="info">
+          <div class="name">EV Charger</div>
+          <div class="desc">Vehicle charging point</div>
+        </div>
+        <span class="badge badge-canvas">node</span>
+      </div>
+      <div class="device-item" draggable="true" data-type="load" data-drop="canvas">
+        <div class="icon" style="background:#faf5ff;">🌡️</div>
+        <div class="info">
+          <div class="name">Heat Pump</div>
+          <div class="desc">Space heating load</div>
+        </div>
+        <span class="badge badge-canvas">node</span>
+      </div>
+
+      <div class="drag-hint">
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 8V6a2 2 0 0 0-2-2v0a2 2 0 0 0-2 2v5"/><path d="M10 10.5V9a2 2 0 0 0-2-2v0a2 2 0 0 0-2 2v7a6 6 0 0 0 12 0v-3a2 2 0 0 0-2-2v0a2 2 0 0 0-2 2"/></svg>
+        Drag <strong style="margin:0 2px">node</strong> items onto canvas,
+        <strong style="margin:0 2px">edge</strong> items onto a wire
+      </div>
+    </div>
+  </div>
+
+  <!-- Canvas -->
+  <div class="canvas-wrap" id="canvasWrap">
+    <canvas id="grid-bg"></canvas>
+    <svg id="canvas" style="overflow:visible;"></svg>
+    <div class="drop-hint"><span>Drop here to add node</span></div>
+  </div>
+</div>
+
+<div id="ghost"></div>
+<div id="edge-tooltip"></div>
+
+<script>
+// ── dot grid background ──────────────────────────────────────────────────────
+const bgCanvas = document.getElementById('grid-bg')
+function drawDots() {
+  const w = bgCanvas.offsetWidth, h = bgCanvas.offsetHeight
+  bgCanvas.width = w; bgCanvas.height = h
+  const ctx = bgCanvas.getContext('2d')
+  const gap = 24, r = 1.2
+  ctx.fillStyle = '#cbd5e1'
+  for (let x = 0; x < w; x += gap)
+    for (let y = 0; y < h; y += gap)
+      { ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI*2); ctx.fill() }
+}
+window.addEventListener('resize', drawDots)
+drawDots()
+
+// ── SVG canvas setup ─────────────────────────────────────────────────────────
+const svg = document.getElementById('canvas')
+const wrap = document.getElementById('canvasWrap')
+
+// ── Node data ────────────────────────────────────────────────────────────────
+let nodes = [
+  { id: 'grid',          label: 'Grid',          x: 0,    y: -160, color: null },
+  { id: 'consumer_unit', label: 'Consumer Unit',  x: 0,    y: 0,    color: null },
+]
+let edges = [
+  { id: 'e1', source: 'grid', target: 'consumer_unit', direction: 'out', kw: 3.2 },
+]
+let nodeIdCounter = 10
+
+// ── Viewport (pan/zoom not implemented — fixed offset for demo) ──────────────
+function viewCenter() {
+  const r = wrap.getBoundingClientRect()
+  return { cx: r.width / 2, cy: r.height / 2 }
+}
+
+function toScreen(x, y) {
+  const { cx, cy } = viewCenter()
+  return { sx: cx + x, sy: cy + y }
+}
+
+function toGraph(sx, sy) {
+  const { cx, cy } = viewCenter()
+  return { x: sx - cx, y: sy - cy }
+}
+
+// ── Chevron animation ─────────────────────────────────────────────────────────
+const SPACING = 30, SPEED = 80
+function measureSVGPath(d) {
+  const p = document.createElementNS('http://www.w3.org/2000/svg','path')
+  p.setAttribute('d', d); return p.getTotalLength()
+}
+
+// ── Rendering ─────────────────────────────────────────────────────────────────
+let highlightedEdge = null
+
+function bezier(sx, sy, tx, ty) {
+  const dx = Math.abs(tx - sx), dy = Math.abs(ty - sy)
+  const cx = Math.max(50, dx * .5)
+  const cy = Math.max(50, dy * .5)
+  const isSideways = dx > dy
+  const c1x = isSideways ? sx + cx : sx
+  const c1y = isSideways ? sy : sy + cy
+  const c2x = isSideways ? tx - cx : tx
+  const c2y = isSideways ? ty : ty - cy
+  return `M${sx},${sy} C${c1x},${c1y} ${c2x},${c2y} ${tx},${ty}`
+}
+
+function render() {
+  const { cx, cy } = viewCenter()
+  svg.innerHTML = ''
+
+  // edges
+  edges.forEach(edge => {
+    const src = nodes.find(n => n.id === edge.source)
+    const tgt = nodes.find(n => n.id === edge.target)
+    if (!src || !tgt) return
+
+    const { sx: x1, sy: y1 } = toScreen(src.x, src.y)
+    const { sx: x2, sy: y2 } = toScreen(tgt.x, tgt.y)
+    const isOut = edge.direction === 'out'
+    const isIdle = edge.kw === 0
+    const isHL = highlightedEdge === edge.id
+
+    const fwdPath = bezier(x1, y1, x2, y2)
+    const animPath = isOut ? bezier(x2, y2, x1, y1) : fwdPath
+
+    const lineColor = isHL ? (isOut ? 'rgba(99,153,34,.7)' : 'rgba(226,75,74,.7)')
+                           : isIdle ? 'rgba(148,163,184,.4)'
+                           : isOut ? 'rgba(99,153,34,.3)' : 'rgba(226,75,74,.3)'
+    const chevColor = isOut ? 'rgba(99,153,34,.85)' : 'rgba(226,75,74,.85)'
+    const len = measureSVGPath(fwdPath)
+    const count = Math.max(1, Math.round(len / SPACING))
+    const dur = len / SPEED
+
+    // wide invisible hit area
+    const hit = document.createElementNS('http://www.w3.org/2000/svg','path')
+    hit.setAttribute('d', fwdPath)
+    hit.setAttribute('fill', 'none')
+    hit.setAttribute('stroke', 'transparent')
+    hit.setAttribute('stroke-width', '20')
+    hit.setAttribute('data-edge', edge.id)
+    hit.style.cursor = 'crosshair'
+    svg.appendChild(hit)
+
+    // visible line
+    const line = document.createElementNS('http://www.w3.org/2000/svg','path')
+    line.setAttribute('d', fwdPath)
+    line.setAttribute('fill', 'none')
+    line.setAttribute('stroke', isHL ? (isOut ? 'rgba(99,153,34,.6)' : 'rgba(226,75,74,.6)') : lineColor)
+    line.setAttribute('stroke-width', isHL ? '3' : '2.5')
+    line.setAttribute('stroke-linecap', 'round')
+    svg.appendChild(line)
+
+    if (!isIdle) {
+      // label
+      const lx = (x1+x2)/2, ly = (y1+y2)/2 - 14
+      const fo = document.createElementNS('http://www.w3.org/2000/svg','foreignObject')
+      fo.setAttribute('x', lx - 28); fo.setAttribute('y', ly - 10)
+      fo.setAttribute('width', 56); fo.setAttribute('height', 22)
+      fo.innerHTML = `<div xmlns="http://www.w3.org/1999/xhtml" style="
+        background:${isOut?'#EAF3DE':'#FCEBEB'};color:${isOut?'#3B6D11':'#A32D2D'};
+        border:1px solid ${isOut?'#97C459':'#F09595'};border-radius:5px;
+        padding:2px 6px;font-size:11px;font-weight:500;text-align:center;
+        white-space:nowrap;">${edge.kw} kW</div>`
+      svg.appendChild(fo)
+
+      // chevrons
+      for (let i = 0; i < count; i++) {
+        const size = 6 + (edge.kw / 10) * 6
+        const poly = document.createElementNS('http://www.w3.org/2000/svg','polyline')
+        poly.setAttribute('points', `-${size},-${(size*.7).toFixed(1)} 0,0 -${size},${(size*.7).toFixed(1)}`)
+        poly.setAttribute('fill', 'none')
+        poly.setAttribute('stroke', chevColor)
+        poly.setAttribute('stroke-width', '2')
+        poly.setAttribute('stroke-linecap', 'round')
+        poly.setAttribute('stroke-linejoin', 'round')
+        const am = document.createElementNS('http://www.w3.org/2000/svg','animateMotion')
+        am.setAttribute('dur', `${dur}s`)
+        am.setAttribute('begin', `${-(i/count)*dur}s`)
+        am.setAttribute('repeatCount', 'indefinite')
+        am.setAttribute('path', animPath)
+        am.setAttribute('rotate', 'auto')
+        poly.appendChild(am)
+        svg.appendChild(poly)
+      }
+    }
+
+    // edge-insert indicator when highlighted
+    if (isHL) {
+      const midX = (x1+x2)/2, midY = (y1+y2)/2
+      const circ = document.createElementNS('http://www.w3.org/2000/svg','circle')
+      circ.setAttribute('cx', midX); circ.setAttribute('cy', midY)
+      circ.setAttribute('r', '10')
+      circ.setAttribute('fill', '#fff')
+      circ.setAttribute('stroke', '#16a34a')
+      circ.setAttribute('stroke-width', '2')
+      svg.appendChild(circ)
+      const plus = document.createElementNS('http://www.w3.org/2000/svg','text')
+      plus.setAttribute('x', midX); plus.setAttribute('y', midY + 4.5)
+      plus.setAttribute('text-anchor', 'middle')
+      plus.setAttribute('font-size', '13')
+      plus.setAttribute('fill', '#16a34a')
+      plus.setAttribute('font-weight', '600')
+      plus.textContent = '+'
+      svg.appendChild(plus)
+    }
+  })
+
+  // nodes
+  nodes.forEach(node => {
+    const { sx, sy } = toScreen(node.x, node.y)
+
+    const g = document.createElementNS('http://www.w3.org/2000/svg','g')
+    g.setAttribute('transform', `translate(${sx},${sy})`)
+
+    const W = 120, H = 36
+    const rect = document.createElementNS('http://www.w3.org/2000/svg','rect')
+    rect.setAttribute('x', -W/2); rect.setAttribute('y', -H/2)
+    rect.setAttribute('width', W); rect.setAttribute('height', H)
+    rect.setAttribute('rx', '7')
+    rect.setAttribute('fill', '#fff')
+    rect.setAttribute('stroke', node.highlight ? '#2563eb' : '#e2e8f0')
+    rect.setAttribute('stroke-width', node.highlight ? '2' : '1.5')
+    if (node.highlight) {
+      const shadow = document.createElementNS('http://www.w3.org/2000/svg','rect')
+      shadow.setAttribute('x', -W/2-3); shadow.setAttribute('y', -H/2-3)
+      shadow.setAttribute('width', W+6); shadow.setAttribute('height', H+6)
+      shadow.setAttribute('rx', '9'); shadow.setAttribute('fill', 'rgba(37,99,235,.08)')
+      g.appendChild(shadow)
+    }
+
+    const icon = { grid: '🔌', consumer_unit: '🏠', solar: '☀️', load: '🔌', sensor: '⚡' }
+    const nodeIcon = icon[node.id] || icon[node.type] || '📦'
+
+    g.appendChild(rect)
+
+    const txt = document.createElementNS('http://www.w3.org/2000/svg','text')
+    txt.setAttribute('text-anchor', 'middle')
+    txt.setAttribute('y', '4.5')
+    txt.setAttribute('font-size', '12')
+    txt.setAttribute('font-weight', '500')
+    txt.setAttribute('fill', '#1e293b')
+    txt.setAttribute('font-family', 'system-ui,-apple-system,sans-serif')
+    txt.textContent = `${nodeIcon} ${node.label}`
+    g.appendChild(txt)
+
+    svg.appendChild(g)
+  })
+}
+
+// ── Drag and drop ─────────────────────────────────────────────────────────────
+const ghost = document.getElementById('ghost')
+const tooltip = document.getElementById('edge-tooltip')
+let dragging = null
+
+document.querySelectorAll('.device-item').forEach(item => {
+  item.addEventListener('dragstart', e => {
+    dragging = { type: item.dataset.type, drop: item.dataset.drop, label: item.querySelector('.name').textContent }
+    ghost.textContent = dragging.label
+    ghost.style.display = 'block'
+    e.dataTransfer.effectAllowed = 'copy'
+    e.dataTransfer.setDragImage(document.createElement('div'), 0, 0)
+  })
+  item.addEventListener('dragend', () => {
+    dragging = null
+    ghost.style.display = 'none'
+    tooltip.style.display = 'none'
+    highlightedEdge = null
+    wrap.classList.remove('drag-canvas-over')
+    nodes.forEach(n => n.highlight = false)
+    render()
+  })
+})
+
+document.addEventListener('dragover', e => {
+  if (!dragging) return
+  ghost.style.left = (e.clientX + 14) + 'px'
+  ghost.style.top  = (e.clientY + 10) + 'px'
+})
+
+wrap.addEventListener('dragover', e => {
+  e.preventDefault()
+  if (!dragging) return
+
+  if (dragging.drop === 'canvas') {
+    wrap.classList.add('drag-canvas-over')
+    highlightedEdge = null
+  } else if (dragging.drop === 'edge') {
+    wrap.classList.remove('drag-canvas-over')
+    // check proximity to edge paths
+    const r = wrap.getBoundingClientRect()
+    const mx = e.clientX - r.left, my = e.clientY - r.top
+    let found = null
+    svg.querySelectorAll('path[data-edge]').forEach(p => {
+      const len = p.getTotalLength()
+      for (let t = 0; t <= len; t += 4) {
+        const pt = p.getPointAtLength(t)
+        if (Math.hypot(pt.x - mx, pt.y - my) < 14) { found = p.dataset.edge; break }
+      }
+    })
+    if (found !== highlightedEdge) {
+      highlightedEdge = found
+      render()
+    }
+    if (found) {
+      tooltip.style.display = 'block'
+      tooltip.style.left = (e.clientX + 14) + 'px'
+      tooltip.style.top  = (e.clientY - 28) + 'px'
+      tooltip.textContent = 'Drop to insert into wire'
+    } else {
+      tooltip.style.display = 'none'
+    }
+  }
+})
+
+wrap.addEventListener('dragleave', () => {
+  wrap.classList.remove('drag-canvas-over')
+  if (dragging?.drop === 'canvas') { highlightedEdge = null; render() }
+})
+
+wrap.addEventListener('drop', e => {
+  e.preventDefault()
+  if (!dragging) return
+  const r = wrap.getBoundingClientRect()
+  const mx = e.clientX - r.left, my = e.clientY - r.top
+  const { x, y } = toGraph(mx, my)
+
+  if (dragging.drop === 'canvas') {
+    // Add as new node
+    const id = 'node_' + (++nodeIdCounter)
+    nodes.push({ id, label: dragging.label, x, y, type: dragging.type, highlight: true })
+    setTimeout(() => { const n = nodes.find(n=>n.id===id); if(n) n.highlight=false; render() }, 1200)
+  } else if (dragging.drop === 'edge' && highlightedEdge) {
+    // Insert into edge
+    const edge = edges.find(e2 => e2.id === highlightedEdge)
+    if (edge) {
+      const id = 'node_' + (++nodeIdCounter)
+      nodes.push({ id, label: dragging.label, x, y, type: 'sensor', highlight: true })
+      const newE1 = { id: 'e' + (++nodeIdCounter), source: edge.source, target: id,       direction: edge.direction, kw: edge.kw }
+      const newE2 = { id: 'e' + (++nodeIdCounter), source: id,          target: edge.target, direction: edge.direction, kw: edge.kw }
+      edges = edges.filter(e2 => e2.id !== highlightedEdge)
+      edges.push(newE1, newE2)
+      setTimeout(() => { const n = nodes.find(n=>n.id===id); if(n) n.highlight=false; render() }, 1200)
+    }
+  }
+
+  wrap.classList.remove('drag-canvas-over')
+  highlightedEdge = null
+  tooltip.style.display = 'none'
+  dragging = null
+  ghost.style.display = 'none'
+  render()
+})
+
+// ── Initial render ────────────────────────────────────────────────────────────
+window.addEventListener('resize', () => { drawDots(); render() })
+render()
+</script>
+</body>
+</html>

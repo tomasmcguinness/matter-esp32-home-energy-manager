@@ -436,6 +436,53 @@ static esp_err_t node_put_handler(httpd_req_t *req)
     return httpd_resp_sendstr(req, "{}");
 }
 
+static esp_err_t node_settings_put_handler(httpd_req_t *req)
+{
+    // URI is /api/nodes/<id>/settings
+    const char *p = req->uri + strlen("/api/nodes/");
+    const char *slash = strchr(p, '/');
+    if (!slash) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid URI");
+        return ESP_FAIL;
+    }
+    char node_id[64];
+    size_t id_len = (size_t)(slash - p);
+    if (id_len == 0 || id_len >= sizeof(node_id)) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid node id");
+        return ESP_FAIL;
+    }
+    memcpy(node_id, p, id_len);
+    node_id[id_len] = '\0';
+
+    if (req->content_len <= 0 || req->content_len > MAX_POST_BODY) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid body");
+        return ESP_FAIL;
+    }
+    char body[MAX_POST_BODY + 1];
+    int received = 0;
+    while (received < (int)req->content_len) {
+        int r = httpd_req_recv(req, body + received, req->content_len - received);
+        if (r <= 0) {
+            httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Recv failed");
+            return ESP_FAIL;
+        }
+        received += r;
+    }
+    body[received] = '\0';
+
+    esp_err_t err = node_config_manager_update_settings(node_id, body);
+    if (err == ESP_ERR_INVALID_ARG) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid JSON");
+        return ESP_FAIL;
+    }
+    if (err != ESP_OK) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Persist failed");
+        return ESP_FAIL;
+    }
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_sendstr(req, "{}");
+}
+
 static esp_err_t static_get_handler(httpd_req_t *req)
 {
     char fs_path[FS_PATH_MAX];
@@ -474,7 +521,7 @@ esp_err_t web_server_start(void)
     config.lru_purge_enable = true;
     config.uri_match_fn    = httpd_uri_match_wildcard;
     config.stack_size      = 12288;
-    config.max_uri_handlers = 14;
+    config.max_uri_handlers = 15;
 
     httpd_handle_t server = NULL;
     err = httpd_start(&server, &config);
@@ -493,6 +540,7 @@ esp_err_t web_server_start(void)
     const httpd_uri_t device_interrogate = { .uri = "/api/devices/*/interrogate", .method = HTTP_POST, .handler = device_interrogate_post_handler };
     const httpd_uri_t factory_reset      = { .uri = "/api/factory-reset",         .method = HTTP_POST, .handler = factory_reset_post_handler       };
     const httpd_uri_t nodes_get          = { .uri = "/api/nodes",                 .method = HTTP_GET,  .handler = nodes_get_handler                };
+    const httpd_uri_t node_settings_put  = { .uri = "/api/nodes/*/settings",      .method = HTTP_PUT,  .handler = node_settings_put_handler        };
     const httpd_uri_t node_put           = { .uri = "/api/nodes/*",               .method = HTTP_PUT,  .handler = node_put_handler                 };
     const httpd_uri_t static_files       = { .uri = "/*",                         .method = HTTP_GET,  .handler = static_get_handler               };
 
@@ -506,6 +554,7 @@ esp_err_t web_server_start(void)
     httpd_register_uri_handler(server, &device_interrogate);
     httpd_register_uri_handler(server, &factory_reset);
     httpd_register_uri_handler(server, &nodes_get);
+    httpd_register_uri_handler(server, &node_settings_put);
     httpd_register_uri_handler(server, &node_put);
     httpd_register_uri_handler(server, &static_files);
 

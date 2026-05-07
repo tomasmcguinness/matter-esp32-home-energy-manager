@@ -1,38 +1,108 @@
-import { ReactFlow, Background, BackgroundVariant, useNodesState, type Node, type Edge, type ReactFlowInstance } from '@xyflow/react'
+import { ReactFlow, Background, BackgroundVariant, useNodesState, useEdgesState, type Node, type Edge, type ReactFlowInstance } from '@xyflow/react'
 import '@xyflow/react/dist/style.css'
-import { useCallback } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { PowerFlowEdge } from './PowerFlowEdge'
 import { GridModal } from './GridModal'
-import { useState } from 'react'
 
 const edgeTypes = { powerFlow: PowerFlowEdge }
 
 type SavedNodeConfig = { id: string; x: number; y: number; settings: Record<string, unknown> }
+
+type DeviceSpec = {
+  type: string
+  label: string
+  desc: string
+  icon: string
+  iconBg: string
+  dropTarget: 'canvas' | 'edge'
+  badge: 'node' | 'edge'
+}
+
+type ApiEndpoint = {
+  endpointId: number
+  label: string
+  included: boolean
+  deviceTypes: number[]
+}
+
+type ApiDevice = {
+  nodeId: number
+  vendorName: string
+  productName: string
+  endpoints: ApiEndpoint[]
+}
+
+// Matter device-type IDs that are bridge infrastructure — skip in the panel
+const SYSTEM_DEVICE_TYPES = new Set([0x000e, 0x0013]) // Aggregator, Bridged Node
+
+type DeviceTypeProfile = {
+  icon: string
+  iconBg: string
+  dropTarget: 'canvas' | 'edge'
+  badge: 'node' | 'edge'
+  section: string
+  defaultLabel: string
+}
+
+const DEVICE_TYPE_PROFILES: Record<number, DeviceTypeProfile> = {
+  0x0017: { icon: '☀️', iconBg: '#fef9c3', dropTarget: 'canvas', badge: 'node', section: 'Generators', defaultLabel: 'Solar Power' },
+  0x0510: { icon: '⚡', iconBg: '#f0fdf4', dropTarget: 'edge',   badge: 'edge', section: 'Sensors',    defaultLabel: 'Electrical Sensor' },
+}
+
+const FALLBACK_PROFILE: DeviceTypeProfile = {
+  icon: '📦', iconBg: '#f1f5f9', dropTarget: 'canvas', badge: 'node', section: 'Devices', defaultLabel: 'Device',
+}
+
+function endpointToSpec(device: ApiDevice, ep: ApiEndpoint): DeviceSpec | null {
+  // Skip endpoints whose types are all infrastructure
+  const nonSystem = ep.deviceTypes.filter(dt => !SYSTEM_DEVICE_TYPES.has(dt))
+  if (nonSystem.length === 0) return null
+
+  const profile = nonSystem.reduce<DeviceTypeProfile | null>((found, dt) => found ?? (DEVICE_TYPE_PROFILES[dt] ?? null), null) ?? FALLBACK_PROFILE
+  const label = ep.label.trim() || device.productName || profile.defaultLabel
+  const desc = device.vendorName || ''
+
+  return { type: profile.section.toLowerCase(), label, desc, icon: profile.icon, iconBg: profile.iconBg, dropTarget: profile.dropTarget, badge: profile.badge }
+}
+
+function buildPalette(devices: ApiDevice[]): { section: string; items: DeviceSpec[] }[] {
+  const groups = new Map<string, DeviceSpec[]>()
+  for (const device of devices) {
+    for (const ep of device.endpoints) {
+      const spec = endpointToSpec(device, ep)
+      if (!spec) continue
+      if (!groups.has(spec.type)) groups.set(spec.type, [])
+      groups.get(spec.type)!.push(spec)
+    }
+  }
+  // Ordered sections
+  const ORDER = ['generators', 'sensors', 'devices']
+  const sections: { section: string; items: DeviceSpec[] }[] = []
+  for (const key of ORDER) {
+    if (groups.has(key)) {
+      const items = groups.get(key)!
+      sections.push({ section: items[0].type.charAt(0).toUpperCase() + items[0].type.slice(1), items })
+      groups.delete(key)
+    }
+  }
+  for (const [, items] of groups) {
+    sections.push({ section: items[0].type.charAt(0).toUpperCase() + items[0].type.slice(1), items })
+  }
+  return sections
+}
 
 const initialNodes: Node[] = [
   {
     id: 'grid',
     position: { x: 0, y: -200 },
     draggable: true,
-    data: { label: 'Grid' },
+    data: { label: '⚡Grid' },
   },
   {
     id: 'consumer_unit',
     position: { x: 0, y: 0 },
     draggable: true,
     data: { label: 'Consumer Unit' },
-  },
-  {
-    id: 'appliance_1',
-    position: { x: 110, y: 110 },
-    draggable: true,
-    data: { label: 'Appliance 1' },
-  },
-  {
-    id: 'inverter',
-    position: { x: 110, y: 310 },
-    draggable: true,
-    data: { label: 'Solax Inverter' },
   },
 ]
 
@@ -42,27 +112,51 @@ const initialEdges: Edge[] = [
     source: 'grid',
     target: 'consumer_unit',
     type: 'powerFlow',
-    data: { direction: 'out', kw: 3.2 },
+    data: { direction: 'out', kw: 0 }
   },
-  {
-    id: 'consumer_unit-appliance_0',
-    source: 'consumer_unit',
-    target: 'appliance_1',
-    type: 'powerFlow',
-    data: { direction: 'in', kw: 0 },
-  },
-  {
-    id: 'inverter-consumer_unit',
-    source: 'inverter',
-    target: 'consumer_unit',
-    type: 'powerFlow',
-    data: { direction: '  ', kw: 2.8 },
-  }
 ]
 
 function Home() {
   const [nodes, setNodes, onNodesChange] = useNodesState(initialNodes)
+  const [edges, , onEdgesChange] = useEdgesState(initialEdges)
   const [gridModalOpen, setGridModalOpen] = useState(false)
+  const [palette, setPalette] = useState<{ section: string; items: DeviceSpec[] }[]>([])
+  const [paletteLoading, setPaletteLoading] = useState(true)
+  const reactFlowInstance = useRef<ReactFlowInstance | null>(null)
+  const nodeIdCounter = useRef(10)
+
+  useEffect(() => {
+    fetch('/api/devices')
+      .then(r => r.ok ? r.json() : Promise.reject())
+      .then((data: { devices: ApiDevice[] }) => setPalette(buildPalette(data.devices)))
+      .catch(() => {})
+      .finally(() => setPaletteLoading(false))
+  }, [])
+
+  const onDragStart = (e: React.DragEvent, device: DeviceSpec) => {
+    e.dataTransfer.setData('application/reactflow', JSON.stringify(device))
+    e.dataTransfer.effectAllowed = 'copy'
+  }
+
+  const onDragOver = useCallback((e: React.DragEvent) => {
+    e.preventDefault()
+    e.dataTransfer.dropEffect = 'copy'
+  }, [])
+
+  const onDrop = useCallback((e: React.DragEvent) => {
+    e.preventDefault()
+    const raw = e.dataTransfer.getData('application/reactflow')
+    if (!raw || !reactFlowInstance.current) return
+    const device: DeviceSpec = JSON.parse(raw)
+    if (device.dropTarget !== 'canvas') return
+
+    const position = reactFlowInstance.current.screenToFlowPosition({ x: e.clientX, y: e.clientY })
+    const id = `node_${++nodeIdCounter.current}`
+    setNodes(prev => [
+      ...prev,
+      { id, position, draggable: true, data: { label: `${device.icon} ${device.label}` } },
+    ])
+  }, [setNodes])
 
   const onNodeDoubleClick = useCallback((_: React.MouseEvent, node: Node) => {
     if (node.id === 'grid') setGridModalOpen(true)
@@ -77,6 +171,7 @@ function Home() {
   }, [])
 
   const onInit = useCallback((instance: ReactFlowInstance) => {
+    reactFlowInstance.current = instance
     fetch('/api/nodes')
       .then(r => r.ok ? r.json() : Promise.reject())
       .then((data: { nodes: SavedNodeConfig[] }) => {
@@ -105,20 +200,72 @@ function Home() {
   }, [setNodes])
 
   return (
-    <div style={{ height: 'calc(100vh - 60px)' }}>
-      <ReactFlow
-        nodes={nodes}
-        onNodesChange={onNodesChange}
-        edges={initialEdges}
-        edgeTypes={edgeTypes}
-        onInit={onInit}
-        onNodeDoubleClick={onNodeDoubleClick}
-        onNodeDragStop={onNodeDragStop}
-        nodesDraggable={true}
-        nodesConnectable={true}
-      >
-        <Background variant={BackgroundVariant.Dots} color="#cbd5e1" gap={24} size={1.5} />
-      </ReactFlow>
+    <div style={{ display: 'flex', height: 'calc(100vh - 60px)' }}>
+      <aside style={{ width: 240, flexShrink: 0, background: '#fff', borderRight: '1px solid #e2e8f0', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+        <div style={{ padding: '12px 14px', borderBottom: '1px solid #e2e8f0' }}>
+          <h2 style={{ fontSize: 12, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '.06em', color: '#94a3b8', margin: 0 }}>Available Devices</h2>
+        </div>
+        <div style={{ flex: 1, overflowY: 'auto', padding: '8px 0' }}>
+          {paletteLoading && (
+            <div style={{ fontSize: 12, color: '#94a3b8', padding: '16px 14px' }}>Loading devices…</div>
+          )}
+          {!paletteLoading && palette.length === 0 && (
+            <div style={{ fontSize: 12, color: '#94a3b8', padding: '16px 14px' }}>No devices found</div>
+          )}
+          {palette.map(group => (
+            <div key={group.section}>
+              <div style={{ fontSize: 11, fontWeight: 600, color: '#94a3b8', textTransform: 'uppercase', letterSpacing: '.05em', padding: '10px 14px 4px' }}>
+                {group.section}
+              </div>
+              {group.items.map(device => (
+                <div
+                  key={device.label}
+                  draggable
+                  onDragStart={e => onDragStart(e, device)}
+                  style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 14px', cursor: 'grab', userSelect: 'none', transition: 'background .12s' }}
+                  onMouseEnter={e => (e.currentTarget.style.background = '#f1f5f9')}
+                  onMouseLeave={e => (e.currentTarget.style.background = '')}
+                >
+                  <div style={{ width: 32, height: 32, borderRadius: 8, background: device.iconBg, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 16, flexShrink: 0 }}>
+                    {device.icon}
+                  </div>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontSize: 13, fontWeight: 500, color: '#1e293b' }}>{device.label}</div>
+                    <div style={{ fontSize: 11, color: '#94a3b8', marginTop: 1 }}>{device.desc}</div>
+                  </div>
+                  <span style={{
+                    fontSize: 10, padding: '2px 6px', borderRadius: 4, fontWeight: 500, flexShrink: 0,
+                    ...(device.badge === 'node'
+                      ? { background: '#eff6ff', color: '#2563eb' }
+                      : { background: '#f0fdf4', color: '#16a34a' })
+                  }}>
+                    {device.badge}
+                  </span>
+                </div>
+              ))}
+            </div>
+          ))}
+        </div>
+      </aside>
+
+      <div style={{ flex: 1 }} onDrop={onDrop} onDragOver={onDragOver}>
+        <ReactFlow
+          style={{ height: '100%' }}
+          nodes={nodes}
+          onNodesChange={onNodesChange}
+          edges={edges}
+          onEdgesChange={onEdgesChange}
+          edgeTypes={edgeTypes}
+          onInit={onInit}
+          onNodeDoubleClick={onNodeDoubleClick}
+          onNodeDragStop={onNodeDragStop}
+          nodesDraggable={true}
+          nodesConnectable={true}
+        >
+          <Background variant={BackgroundVariant.Lines} color="#cbd5e1" gap={24} size={1.5} />
+        </ReactFlow>
+      </div>
+
       {gridModalOpen && (
         <GridModal
           onSave={() => setGridModalOpen(false)}

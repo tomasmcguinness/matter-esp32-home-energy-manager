@@ -16,10 +16,17 @@ let devices: Device[] = [
     vendorName: 'Modbus',
     productName: 'TCP Adapter',
     endpoints: [
-      { endpointId: 1, label: 'Boiler Flow Temp',   included: false, deviceTypes: [770] },
-      { endpointId: 2, label: 'Boiler Return Temp',  included: false, deviceTypes: [770] },
-      { endpointId: 3, label: 'DHW Temperature',     included: true,  deviceTypes: [770] },
-      { endpointId: 4, label: 'Flow Rate',           included: false, deviceTypes: [774] },
+      { endpointId: 1, label: 'Solax Inverter',   included: false, deviceTypes: [0x0017] },
+      { endpointId: 2, label: 'FeedIn CT Clamp',  included: false, deviceTypes: [0x0510] },
+    ],
+  },
+  {
+    nodeId: 20001,
+    vendorName: 'Shelly',
+    productName: 'Pro 3EM',
+    endpoints: [
+      { endpointId: 1, label: 'Grid Meter',        included: true,  deviceTypes: [1296] },
+      { endpointId: 2, label: 'Solar Feed',         included: false, deviceTypes: [1296] },
     ],
   },
 ]
@@ -69,6 +76,18 @@ export const handlers = [
       existing.y = body.y
     } else {
       nodeConfigs.push({ id, x: body.x, y: body.y, settings: {} })
+    }
+    return HttpResponse.json({})
+  }),
+
+  http.put('/api/nodes/:nodeId/settings', async ({ params, request }) => {
+    const id = params.nodeId as string
+    const body = (await request.json()) as Record<string, unknown>
+    const existing = nodeConfigs.find(n => n.id === id)
+    if (existing) {
+      existing.settings = { ...existing.settings, ...body }
+    } else {
+      nodeConfigs.push({ id, x: 0, y: 0, settings: body })
     }
     return HttpResponse.json({})
   }),

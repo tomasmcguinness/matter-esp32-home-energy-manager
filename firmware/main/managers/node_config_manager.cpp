@@ -137,6 +137,30 @@ esp_err_t node_config_manager_upsert(const char *node_id, float x, float y)
     return node_config_manager_persist();
 }
 
+esp_err_t node_config_manager_update_settings(const char *node_id, const char *settings_json)
+{
+    if (!node_id || !settings_json) return ESP_ERR_INVALID_ARG;
+    cJSON *parsed = cJSON_Parse(settings_json);
+    if (!parsed) return ESP_ERR_INVALID_ARG;
+    char *canonical = cJSON_PrintUnformatted(parsed);
+    cJSON_Delete(parsed);
+    if (!canonical) return ESP_ERR_NO_MEM;
+
+    xSemaphoreTake(s_mutex, portMAX_DELAY);
+    auto *nc = find_node(node_id);
+    if (nc) {
+        nc->settings_json = canonical;
+    } else {
+        node_config_t n;
+        n.id = node_id;
+        n.settings_json = canonical;
+        s_nodes.push_back(n);
+    }
+    xSemaphoreGive(s_mutex);
+    free(canonical);
+    return node_config_manager_persist();
+}
+
 char *node_config_manager_get_all_json(void)
 {
     xSemaphoreTake(s_mutex, portMAX_DELAY);
