@@ -215,7 +215,7 @@ function Home() {
   }, [setNodes])
 
   const onNodeDoubleClick = useCallback((_: React.MouseEvent, node: Node) => {
-    if (node.id === 'grid') setGridModalOpen(true)
+    if (node.id === 'meter') setGridModalOpen(true)
   }, [])
 
   const onNodeDragStop = useCallback((_: React.MouseEvent, node: Node) => {

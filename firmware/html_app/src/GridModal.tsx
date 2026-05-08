@@ -1,7 +1,8 @@
 import { useEffect, useState } from 'react'
 import type { Device } from './Devices'
 
-const ELECTRICAL_SENSOR_TYPE = 1296 // 0x0510
+const ELECTRICAL_SENSOR_DEVICE_TYPE_ID = 0x0510
+const METER_REFERENCE_POINT_DEVICE_TYPE_ID = 0x0512
 
 type NodeConfig = { id: string; x: number; y: number; settings: Record<string, unknown> }
 
@@ -31,7 +32,7 @@ export function GridModal({ onSave, onCancel }: Props) {
         const options: SensorOption[] = []
         for (const dev of devicesData.devices) {
           for (const ep of dev.endpoints) {
-            if (ep.deviceTypes.includes(ELECTRICAL_SENSOR_TYPE)) {
+            if (ep.deviceTypes.includes(METER_REFERENCE_POINT_DEVICE_TYPE_ID)) {
               const label = ep.label.trim() || `${dev.vendorName} ${dev.productName} EP${ep.endpointId}`
               options.push({ nodeId: dev.nodeId, endpointId: ep.endpointId, label })
             }
@@ -39,7 +40,7 @@ export function GridModal({ onSave, onCancel }: Props) {
         }
         setSensors(options)
 
-        const gridNode = nodesData.nodes.find(n => n.id === 'grid')
+        const gridNode = nodesData.nodes.find(n => n.id === 'meter')
         const nid = gridNode?.settings?.gridSensorNodeId
         const eid = gridNode?.settings?.gridSensorEndpointId
         if (typeof nid === 'number' && typeof eid === 'number' && nid !== 0) {
@@ -78,9 +79,9 @@ export function GridModal({ onSave, onCancel }: Props) {
             </div>
             <div className="modal-body">
               <div className="mb-3">
-                <label htmlFor="gridSensor" className="form-label">Power Sensor</label>
+                <label htmlFor="gridSensor" className="form-label">Electrial Meter Device</label>
                 {loading ? (
-                  <p className="text-muted small mb-0">Loading sensors…</p>
+                  <p className="text-muted small mb-0">Loading devices...</p>
                 ) : (
                   <select
                     id="gridSensor"
