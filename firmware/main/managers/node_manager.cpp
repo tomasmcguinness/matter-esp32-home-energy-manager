@@ -1,4 +1,4 @@
-#include "node_config_manager.h"
+#include "node_manager.h"
 
 #include <stdio.h>
 #include <unistd.h>
@@ -97,7 +97,7 @@ static void load_from_disk(void)
     ESP_LOGI(TAG, "Loaded %u node config(s)", (unsigned)s_nodes.size());
 }
 
-esp_err_t node_config_manager_init(void)
+esp_err_t node_manager_init(void)
 {
     s_mutex = xSemaphoreCreateMutex();
     if (!s_mutex) return ESP_ERR_NO_MEM;
@@ -119,7 +119,7 @@ esp_err_t node_config_manager_init(void)
     return ESP_OK;
 }
 
-esp_err_t node_config_manager_upsert(const char *node_id, float x, float y)
+esp_err_t node_manager_upsert(const char *node_id, float x, float y)
 {
     xSemaphoreTake(s_mutex, portMAX_DELAY);
     auto *nc = find_node(node_id);
@@ -134,10 +134,10 @@ esp_err_t node_config_manager_upsert(const char *node_id, float x, float y)
         s_nodes.push_back(n);
     }
     xSemaphoreGive(s_mutex);
-    return node_config_manager_persist();
+    return node_manager_persist();
 }
 
-esp_err_t node_config_manager_update_settings(const char *node_id, const char *settings_json)
+esp_err_t node_manager_update_settings(const char *node_id, const char *settings_json)
 {
     if (!node_id || !settings_json) return ESP_ERR_INVALID_ARG;
     cJSON *parsed = cJSON_Parse(settings_json);
@@ -158,10 +158,10 @@ esp_err_t node_config_manager_update_settings(const char *node_id, const char *s
     }
     xSemaphoreGive(s_mutex);
     free(canonical);
-    return node_config_manager_persist();
+    return node_manager_persist();
 }
 
-char *node_config_manager_get_all_json(void)
+char *node_manager_get_all_json(void)
 {
     xSemaphoreTake(s_mutex, portMAX_DELAY);
     cJSON *root = build_json();
@@ -171,7 +171,7 @@ char *node_config_manager_get_all_json(void)
     return text;
 }
 
-esp_err_t node_config_manager_persist(void)
+esp_err_t node_manager_persist(void)
 {
     xSemaphoreTake(s_mutex, portMAX_DELAY);
     cJSON *root = build_json();

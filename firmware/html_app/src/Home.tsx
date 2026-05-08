@@ -3,6 +3,7 @@ import '@xyflow/react/dist/style.css'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { PowerFlowEdge } from './PowerFlowEdge'
 import { GridModal } from './GridModal'
+import { useWebSocket, type WsMessage } from './useWebSocket'
 
 const edgeTypes = { powerFlow: PowerFlowEdge }
 
@@ -93,10 +94,10 @@ function buildPalette(devices: ApiDevice[]): { section: string; items: DeviceSpe
 
 const initialNodes: Node[] = [
   {
-    id: 'grid',
+    id: 'meter',
     position: { x: 0, y: -200 },
     draggable: true,
-    data: { label: '⚡Grid' },
+    data: { label: '⚡Meter' },
   },
   {
     id: 'consumer_unit',
@@ -108,13 +109,45 @@ const initialNodes: Node[] = [
 
 const initialEdges: Edge[] = [
   {
-    id: 'grid-consumer_unit',
-    source: 'grid',
+    id: 'meter-consumer_unit',
+    source: 'meter',
     target: 'consumer_unit',
     type: 'powerFlow',
     data: { direction: 'out', kw: 0 }
   },
 ]
+
+const WS_DOT: Record<string, { color: string; title: string }> = {
+  open:       { color: '#22c55e', title: 'Live' },
+  connecting: { color: '#f59e0b', title: 'Connecting…' },
+  closed:     { color: '#94a3b8', title: 'Disconnected' },
+}
+
+function WsStatusDot({ state }: { state: string }) {
+  const { color, title } = WS_DOT[state] ?? WS_DOT.closed
+  return (
+    <div title={title} style={{ position: 'absolute', bottom: 12, right: 12, zIndex: 10, display: 'flex', alignItems: 'center', gap: 6, background: 'rgba(255,255,255,.85)', borderRadius: 8, padding: '4px 8px', fontSize: 11, color: '#64748b', backdropFilter: 'blur(4px)', boxShadow: '0 1px 4px rgba(0,0,0,.08)' }}>
+      <span style={{ width: 8, height: 8, borderRadius: '50%', background: color, display: 'inline-block' }} />
+      {title}
+    </div>
+  )
+}
+
+type Toast = { id: number; message: string }
+
+function ToastStack({ toasts, onDismiss }: { toasts: Toast[]; onDismiss: (id: number) => void }) {
+  return (
+    <div style={{ position: 'fixed', bottom: 48, left: '50%', transform: 'translateX(-50%)', zIndex: 100, display: 'flex', flexDirection: 'column', gap: 8, alignItems: 'center', pointerEvents: 'none' }}>
+      {toasts.map(t => (
+        <div key={t.id} style={{ display: 'flex', alignItems: 'center', gap: 10, background: '#1e293b', color: '#f8fafc', borderRadius: 10, padding: '10px 16px', fontSize: 13, boxShadow: '0 4px 16px rgba(0,0,0,.18)', pointerEvents: 'auto', minWidth: 260, maxWidth: 400 }}>
+          <span style={{ fontSize: 16 }}>🔌</span>
+          <span style={{ flex: 1 }}>{t.message}</span>
+          <button onClick={() => onDismiss(t.id)} style={{ background: 'none', border: 'none', color: '#94a3b8', cursor: 'pointer', fontSize: 16, lineHeight: 1, padding: 0 }}>×</button>
+        </div>
+      ))}
+    </div>
+  )
+}
 
 function Home() {
   const [nodes, setNodes, onNodesChange] = useNodesState(initialNodes)
@@ -122,8 +155,31 @@ function Home() {
   const [gridModalOpen, setGridModalOpen] = useState(false)
   const [palette, setPalette] = useState<{ section: string; items: DeviceSpec[] }[]>([])
   const [paletteLoading, setPaletteLoading] = useState(true)
+  const [toasts, setToasts] = useState<Toast[]>([])
   const reactFlowInstance = useRef<ReactFlowInstance | null>(null)
   const nodeIdCounter = useRef(10)
+  const toastIdCounter = useRef(0)
+
+  const dismissToast = useCallback((id: number) => {
+    setToasts(prev => prev.filter(t => t.id !== id))
+  }, [])
+
+  const addToast = useCallback((message: string) => {
+    const id = ++toastIdCounter.current
+    setToasts(prev => [...prev, { id, message }])
+    setTimeout(() => dismissToast(id), 5000)
+  }, [dismissToast])
+
+  const handleWsMessage = useCallback((msg: WsMessage) => {
+    console.log('[ws]', msg)
+    if (msg.type === 'device_commissioned') {
+      const d = msg.data as { productName?: string; vendorName?: string }
+      const name = [d.vendorName, d.productName].filter(Boolean).join(' ')
+      addToast(`New device commissioned: ${name || 'Unknown device'}`)
+    }
+  }, [addToast])
+
+  const wsState = useWebSocket(handleWsMessage)
 
   useEffect(() => {
     fetch('/api/devices')
@@ -248,7 +304,7 @@ function Home() {
         </div>
       </aside>
 
-      <div style={{ flex: 1 }} onDrop={onDrop} onDragOver={onDragOver}>
+      <div style={{ flex: 1, position: 'relative' }} onDrop={onDrop} onDragOver={onDragOver}>
         <ReactFlow
           style={{ height: '100%' }}
           nodes={nodes}
@@ -264,6 +320,7 @@ function Home() {
         >
           <Background variant={BackgroundVariant.Lines} color="#cbd5e1" gap={24} size={1.5} />
         </ReactFlow>
+        <WsStatusDot state={wsState} />
       </div>
 
       {gridModalOpen && (
@@ -272,6 +329,8 @@ function Home() {
           onCancel={() => setGridModalOpen(false)}
         />
       )}
+
+      <ToastStack toasts={toasts} onDismiss={dismissToast} />
     </div>
   )
 }

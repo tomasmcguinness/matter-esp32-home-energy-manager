@@ -22,9 +22,15 @@ type DevicesResponse = {
 function deviceTypeName(id: number): string {
   const names: Record<number, string> = {
     14: 'Aggregator',
-    19: 'Root Node',
+    18: 'OTA Requestor',
+    0x11: 'Power Source',
+    0x13: 'Bridged Node',
+    22: 'Root Node',
     23: 'Solar Power',
+    1298: 'Meter Reference Point',
     1296: 'Electrical Sensor',
+    1300: 'Electrical Meter',
+
   }
   return names[id] ?? `0x${id.toString(16).toUpperCase()}`
 }
@@ -82,7 +88,7 @@ function Devices() {
               {dev.endpoints.length > 0 && (
                 <div className="mt-2">
                   {dev.endpoints.map((ep) => (
-                    <span key={ep.endpointId} className="badge bg-secondary me-1">
+                    <span key={ep.endpointId} className="badge bg-primary me-1">
                       {ep.label || `EP${ep.endpointId}`}
                       {ep.deviceTypes.map((dt) => (
                         <span key={dt} className="ms-1 opacity-75">({deviceTypeName(dt)})</span>

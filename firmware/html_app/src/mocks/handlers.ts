@@ -1,4 +1,4 @@
-import { http, HttpResponse } from 'msw'
+import { http, HttpResponse, ws } from 'msw'
 import type { Device } from '../Devices'
 
 export type Settings = {
@@ -30,6 +30,8 @@ let devices: Device[] = [
     ],
   },
 ]
+
+const powerWs = ws.link('ws://*/ws')
 
 export const handlers = [
   http.get('/api/settings', () => {
@@ -90,5 +92,33 @@ export const handlers = [
       nodeConfigs.push({ id, x: 0, y: 0, settings: body })
     }
     return HttpResponse.json({})
+  }),
+
+  powerWs.addEventListener('connection', ({ client }) => {
+    console.log('Connected!');
+
+    const interval = setInterval(() => {
+      const kw = parseFloat((Math.random() * 1 + 2).toFixed(2))
+      console.log("Sending " + kw);
+
+      client.send(JSON.stringify({
+        type: 'power_update',
+        data: { nodeId: 10000, endpointId: 2, kw },
+      }))
+    }, 5000)
+
+    // Simulate a device being commissioned 8 seconds after connection
+    const commissionTimer = setTimeout(() => {
+      client.send(JSON.stringify({
+        type: 'device_commissioned',
+        data: { nodeId: 30001, vendorName: 'Shelly', productName: 'Pro 1PM' },
+      }))
+    }, 8000)
+
+    client.addEventListener('close', () => {
+      console.log('Closing connection...')
+      clearInterval(interval)
+      clearTimeout(commissionTimer)
+    })
   }),
 ]

@@ -10,8 +10,8 @@
 #include "ethernet_init.h"
 #include "mdns.h"
 
-#include "settings_store.h"
 #include "managers/device_manager.h"
+#include "managers/node_manager.h"
 #include "matter_controller.h"
 #include "web_server.h"
 
@@ -61,7 +61,7 @@ extern "C" void app_main(void)
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
 
-    //ESP_ERROR_CHECK(settings_store_init());
+    ESP_ERROR_CHECK(node_manager_init());
     ESP_ERROR_CHECK(device_manager_init());
 
     uint8_t eth_port_cnt = 0;

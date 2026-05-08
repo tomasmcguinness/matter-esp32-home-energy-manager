@@ -1,10 +1,10 @@
 idf_component_register(SRCS
         "main.cpp"
         "web_server.c"
-        "settings_store.c"
+        "ws_server.c"
         "matter_controller.cpp"
         "managers/device_manager.cpp"
-        "managers/node_config_manager.cpp"
+        "managers/node_manager.cpp"
     INCLUDE_DIRS "."
     PRIV_INCLUDE_DIRS  "." "${ESP_MATTER_PATH}/examples/common/utils"
     LDFRAGMENTS "linker.lf"    
