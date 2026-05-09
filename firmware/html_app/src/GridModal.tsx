@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import type { Device } from './Devices'
 
-const ELECTRICAL_SENSOR_DEVICE_TYPE_ID = 0x0510
+//const ELECTRICAL_SENSOR_DEVICE_TYPE_ID = 0x0510
 const METER_REFERENCE_POINT_DEVICE_TYPE_ID = 0x0512
 
 type NodeConfig = { id: string; x: number; y: number; settings: Record<string, unknown> }

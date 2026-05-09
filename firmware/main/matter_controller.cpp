@@ -10,8 +10,10 @@
 #include <esp_matter_controller_credentials_issuer.h>
 #include <esp_matter_controller_pairing_command.h>
 #include <esp_matter_controller_read_command.h>
+#include <esp_matter_controller_subscribe_command.h>
 
 #include "managers/device_manager.h"
+#include "ws_server.h"
 
 #include <app/server/Dnssd.h>
 #include <controller/CHIPDeviceController.h>
@@ -28,6 +30,9 @@
 #include <setup_payload/ManualSetupPayloadParser.h>
 #include <setup_payload/QRCodeSetupPayloadParser.h>
 #include <setup_payload/SetupPayload.h>
+
+using namespace chip;
+using namespace chip::app::Clusters;
 
 static const char *TAG = "matter_controller";
 
@@ -245,8 +250,12 @@ static void interrogate_node(uint64_t node_id)
 
     chip::DeviceLayer::PlatformMgr().LockChipStack();
     auto *cmd = new esp_matter::controller::read_command(
-        node_id, std::move(attr_paths), std::move(event_paths),
-        on_interrogation_attr, on_interrogation_done, nullptr);
+        node_id, 
+        std::move(attr_paths), 
+        std::move(event_paths),
+        on_interrogation_attr, 
+        on_interrogation_done, 
+        nullptr);
     if (cmd)
         cmd->send_command();
     chip::DeviceLayer::PlatformMgr().UnlockChipStack();
@@ -378,8 +387,6 @@ esp_err_t matter_controller_start(void)
     esp_matter::console::init();
 #endif
 
-    // esp_matter::controller::set_custom_credentials_issuer(&s_credentials_issuer);
-
     esp_err_t err = esp_matter::start(app_event_cb);
     if (err != ESP_OK)
     {
@@ -406,7 +413,97 @@ esp_err_t matter_controller_start(void)
 
     chip::DeviceLayer::PlatformMgr().UnlockChipStack();
 
-    ESP_LOGI(TAG, "Matter commissioner started");
+    ESP_LOGI(TAG, "Matter controller started");
+    return ESP_OK;
+}
+
+// ---------------------------------------------------------------------------
+// Subscriptions
+// ---------------------------------------------------------------------------
+
+void node_subscription_established_cb(uint64_t remote_node_id, uint32_t subscription_id)
+{
+    ESP_LOGI(TAG, "Successfully subscribed, node 0x%016llX, subscription id 0x%08X", remote_node_id, subscription_id);
+}
+
+void node_subscription_terminated_cb(uint64_t remote_node_id, uint32_t subscription_id)
+{
+    ESP_LOGI(TAG, "Subscription terminated, node 0x%016llX, subscription id 0x%08X", remote_node_id, subscription_id);
+}
+
+void node_subscribe_failed_cb(void *ctx, const chip::ScopedNodeId& node_id, int err)
+{
+    ESP_LOGE(TAG, "Failed to subscribe (context: %p)", ctx);
+}
+
+static void on_attribute_data_cb(uint64_t node_id,
+                                 const chip::app::ConcreteDataAttributePath &path,
+                                 chip::TLV::TLVReader *data,
+                                 const chip::app::StatusIB &status)
+{
+    using namespace chip::Protocols::InteractionModel;
+    if (!data || status.mStatus != Status::Success) return;
+    if (path.mClusterId != ElectricalPowerMeasurement::Id || path.mAttributeId != ElectricalPowerMeasurement::Attributes::ActivePower::Id) return;
+    if (data->GetType() == chip::TLV::kTLVType_Null) return;
+
+    int64_t raw_mw = 0;
+    if (data->Get(raw_mw) != CHIP_NO_ERROR) return;
+
+    double kw = (double)raw_mw / 1000000.0;
+
+    char json[128];
+    snprintf(json, sizeof(json),
+             "{\"type\":\"power_update\",\"data\":{\"nodeId\":%llu,\"endpointId\":%u,\"kw\":%.3f}}",
+             (unsigned long long)node_id, (unsigned)path.mEndpointId, kw);
+    
+    //ws_server_broadcast(json, strlen(json));
+}
+
+esp_err_t matter_controller_subscribe(void)
+{
+    static constexpr size_t kMaxSensors = 32;
+    uint64_t node_ids[kMaxSensors];
+    uint16_t endpoint_ids[kMaxSensors];
+    size_t count = device_manager_get_electrical_sensor_endpoints(node_ids, endpoint_ids, kMaxSensors);
+
+    ESP_LOGI(TAG, "Subscribing to Active Power on %u electrical sensor endpoint(s)", (unsigned)count);
+
+    for (size_t i = 0; i < count; i++) {
+
+        uint64_t node_id = node_ids[i];
+        uint16_t endpoint_id = endpoint_ids[i];
+
+        auto *args = new std::tuple<uint64_t, uint16_t>(node_id, endpoint_id);
+        
+        chip::DeviceLayer::PlatformMgr().ScheduleWork([](intptr_t arg) {
+
+            auto *args = reinterpret_cast<std::tuple<uint64_t, uint16_t> *>(arg);
+
+            ScopedMemoryBufferWithSize<AttributePathParams> attr_paths;
+            attr_paths.Alloc(1);
+
+            attr_paths[0] = AttributePathParams(ElectricalPowerMeasurement::Id, ElectricalPowerMeasurement::Attributes::ActivePower::Id);
+            
+            ScopedMemoryBufferWithSize<EventPathParams> event_paths;
+            event_paths.Alloc(0);
+
+            // This might be an ICD device??
+            auto *cmd = chip::Platform::New<esp_matter::controller::subscribe_command>(std::get<0>(*args),
+                std::move(attr_paths), 
+                std::move(event_paths), 
+                5, 
+                30, 
+                false, // <--- Keep Subscriptions
+                on_attribute_data_cb,
+                nullptr,
+                node_subscription_established_cb,
+                node_subscription_terminated_cb,
+                nullptr,
+                false);
+        
+            cmd->send_command();
+        }, reinterpret_cast<intptr_t>(args));
+    }
     return ESP_OK;
 }
 

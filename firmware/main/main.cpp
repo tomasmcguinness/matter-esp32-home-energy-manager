@@ -83,6 +83,8 @@ extern "C" void app_main(void)
     ESP_LOGI(TAG, "Waiting for IPv6 link-local address...");
     xEventGroupWaitBits(s_net_event_group, IPV6_READY_BIT, pdFALSE, pdTRUE, pdMS_TO_TICKS(15000));
 
+    // TODO Wait for some updates from esp-matter to ensure the P4 works 
+    // correctly before trying to use the Platform mDNS.
     //ESP_ERROR_CHECK(mdns_init());
     //mdns_hostname_set("home-energy-manager");
     //mdns_instance_name_set("Home Energy Manager");
@@ -91,4 +93,5 @@ extern "C" void app_main(void)
     ESP_ERROR_CHECK(web_server_start());
 
     ESP_ERROR_CHECK(matter_controller_start());
+    ESP_ERROR_CHECK(matter_controller_subscribe());
 }

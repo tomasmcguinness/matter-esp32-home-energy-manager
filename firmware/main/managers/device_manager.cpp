@@ -267,6 +267,27 @@ static constexpr uint32_t kDevTypeBridgedNode     = 0x0013;
 static constexpr uint32_t kDevTypeSolarPower      = 0x0017;
 static constexpr uint32_t kDevTypeElectricalSensor = 0x0510;
 
+size_t device_manager_get_electrical_sensor_endpoints(uint64_t *node_ids, uint16_t *endpoint_ids, size_t max)
+{
+    xSemaphoreTake(s_mutex, portMAX_DELAY);
+    size_t count = 0;
+    for (const auto &dev : s_devices) {
+        for (const auto &ep : dev.endpoints) {
+            if (count >= max) break;
+            for (auto dt : ep.device_types) {
+                if (dt == kDevTypeElectricalSensor) {
+                    node_ids[count]     = dev.node_id;
+                    endpoint_ids[count] = ep.endpoint_id;
+                    count++;
+                    break;
+                }
+            }
+        }
+    }
+    xSemaphoreGive(s_mutex);
+    return count;
+}
+
 void device_manager_log_structure(uint64_t node_id)
 {
     xSemaphoreTake(s_mutex, portMAX_DELAY);
