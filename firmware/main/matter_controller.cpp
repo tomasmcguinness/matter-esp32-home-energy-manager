@@ -449,14 +449,14 @@ static void on_attribute_data_cb(uint64_t node_id,
     int64_t raw_mw = 0;
     if (data->Get(raw_mw) != CHIP_NO_ERROR) return;
 
-    double kw = (double)raw_mw / 1000000.0;
+    double mw = (double)raw_mw / 1000000.0;
 
     char json[128];
     snprintf(json, sizeof(json),
-             "{\"type\":\"power_update\",\"data\":{\"nodeId\":%llu,\"endpointId\":%u,\"kw\":%.3f}}",
-             (unsigned long long)node_id, (unsigned)path.mEndpointId, kw);
+             "{\"type\":\"power_update\",\"data\":{\"nodeId\":%llu,\"endpointId\":%u,\"mw\":%.3f}}",
+             (unsigned long long)node_id, (unsigned)path.mEndpointId, mw);
     
-    //ws_server_broadcast(json, strlen(json));
+    ws_server_broadcast(json, strlen(json));
 }
 
 esp_err_t matter_controller_subscribe(void)

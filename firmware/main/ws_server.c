@@ -74,6 +74,7 @@ esp_err_t ws_server_init(httpd_handle_t server)
         .is_websocket       = true,
         .handle_ws_control_frames = false,
     };
+    
     return httpd_register_uri_handler(server, &ws_uri);
 }
 

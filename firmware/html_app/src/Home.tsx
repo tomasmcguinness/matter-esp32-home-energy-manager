@@ -113,7 +113,7 @@ const initialEdges: Edge[] = [
     source: 'meter',
     target: 'consumer_unit',
     type: 'powerFlow',
-    data: { direction: 'out', kw: 0 }
+    data: { kw: 0 }
   },
 ]
 
@@ -151,7 +151,7 @@ function ToastStack({ toasts, onDismiss }: { toasts: Toast[]; onDismiss: (id: nu
 
 function Home() {
   const [nodes, setNodes, onNodesChange] = useNodesState(initialNodes)
-  const [edges, , onEdgesChange] = useEdgesState(initialEdges)
+  const [edges, setEdges, onEdgesChange] = useEdgesState(initialEdges)
   const [gridModalOpen, setGridModalOpen] = useState(false)
   const [palette, setPalette] = useState<{ section: string; items: DeviceSpec[] }[]>([])
   const [paletteLoading, setPaletteLoading] = useState(true)
@@ -176,6 +176,14 @@ function Home() {
       const d = msg.data as { productName?: string; vendorName?: string }
       const name = [d.vendorName, d.productName].filter(Boolean).join(' ')
       addToast(`New device commissioned: ${name || 'Unknown device'}`)
+    } else if(msg.type === 'power_update') {
+      const d = msg.data as { nodeId: number; endpointId: number; mw: number }
+      setEdges(prev => prev.map(e => {
+        if (e.source === 'meter' && e.target === 'consumer_unit' && e.type === 'powerFlow') {
+          return { ...e, data: { ...e.data, kw: d.mw } }
+        }
+        return e
+      }))
     }
   }, [addToast])
 

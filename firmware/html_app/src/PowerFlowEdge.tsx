@@ -14,7 +14,7 @@ function kwToChevronSize(kw: number | undefined): number {
   return MIN_SIZE + t * (MAX_SIZE - MIN_SIZE)
 }
 
-type PowerFlowData = { direction?: 'in' | 'out'; kw?: number }
+type PowerFlowData = { kw?: number }
 
 function measurePath(d: string): number {
   const el = document.createElementNS('http://www.w3.org/2000/svg', 'path')
@@ -28,9 +28,10 @@ export function PowerFlowEdge({
 }: EdgeProps) {
   const [edgePath, labelX, labelY] = getBezierPath({ sourceX, sourceY, sourcePosition, targetX, targetY, targetPosition })
 
-  const { direction, kw } = (data ?? {}) as PowerFlowData
-  const isOut = direction === 'out'
+  const { kw } = (data ?? {}) as PowerFlowData
   const isIdle = kw === 0
+  const isOut = kw < 0;
+  const formattedkw = kw?.toFixed(1);
 
   // For 'out', animate along the geometrically reversed path so chevrons travel
   // target → source. Swapping source ↔ target with their handle positions gives
@@ -91,7 +92,7 @@ export function PowerFlowEdge({
       {kw !== undefined && !isIdle && (
         <EdgeLabelRenderer>
           <div style={labelStyle} className="nodrag nopan">
-            {kw} kW
+            {formattedkw} kW
           </div>
         </EdgeLabelRenderer>
       )}

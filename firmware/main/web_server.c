@@ -503,9 +503,10 @@ esp_err_t web_server_start(void)
     httpd_register_uri_handler(server, &nodes_get);
     httpd_register_uri_handler(server, &node_settings_put);
     httpd_register_uri_handler(server, &node_put);
-    httpd_register_uri_handler(server, &static_files);
 
     ws_server_init(server);
+
+    httpd_register_uri_handler(server, &static_files);
 
     ESP_LOGI(TAG, "Web server started on port 80");
     return ESP_OK;
