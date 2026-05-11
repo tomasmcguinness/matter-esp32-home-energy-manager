@@ -1,3 +1,5 @@
 dependencies:
   joltwallet/littlefs: ^1.10.0
   espressif/mdns: '*'
+  esp_bsp_generic: 
+    version: "^3"

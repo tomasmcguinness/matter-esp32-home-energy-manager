@@ -251,6 +251,31 @@ static esp_err_t controller_unpair_post_handler(httpd_req_t *req)
     return ESP_OK;
 }
 
+static esp_err_t device_delete_handler(httpd_req_t *req)
+{
+    uint64_t node_id = 0;
+    if (sscanf(req->uri, "/api/devices/%" SCNu64, &node_id) != 1) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid URI");
+        return ESP_FAIL;
+    }
+
+    esp_err_t err = matter_controller_remove_node(node_id);
+    if (err != ESP_OK && err != ESP_ERR_NOT_FOUND) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Unpair failed");
+        return ESP_FAIL;
+    }
+
+    err = device_manager_remove_device(node_id);
+    if (err != ESP_OK) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Remove failed");
+        return ESP_FAIL;
+    }
+
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, "{}");
+    return ESP_OK;
+}
+
 static esp_err_t debug_mdns_get_handler(httpd_req_t *req)
 {
     mdns_result_t *results = NULL;
@@ -433,6 +458,24 @@ static esp_err_t node_settings_put_handler(httpd_req_t *req)
     return httpd_resp_sendstr(req, "{}");
 }
 
+static esp_err_t node_delete_handler(httpd_req_t *req)
+{
+    const char *last_slash = strrchr(req->uri, '/');
+    if (!last_slash || *(last_slash + 1) == '\0') {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid URI");
+        return ESP_FAIL;
+    }
+    const char *node_id = last_slash + 1;
+
+    esp_err_t err = node_manager_delete(node_id);
+    if (err != ESP_OK) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Delete failed");
+        return ESP_FAIL;
+    }
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_sendstr(req, "{}");
+}
+
 static esp_err_t static_get_handler(httpd_req_t *req)
 {
     char fs_path[FS_PATH_MAX];
@@ -471,7 +514,7 @@ esp_err_t web_server_start(void)
     config.lru_purge_enable = true;
     config.uri_match_fn     = httpd_uri_match_wildcard;
     config.stack_size       = 12288;
-    config.max_uri_handlers = 15;
+    config.max_uri_handlers = 16;
     config.max_resp_headers = 20;
 
     httpd_handle_t server = NULL;
@@ -481,19 +524,22 @@ esp_err_t web_server_start(void)
         return err;
     }
 
-    const httpd_uri_t devices_get       = { .uri = "/api/devices",               .method = HTTP_GET, .handler = devices_get_handler            };
-    const httpd_uri_t endpoint_put      = { .uri = "/api/devices/*/endpoints/*", .method = HTTP_PUT, .handler = device_endpoint_put_handler    };
+    const httpd_uri_t devices_get       = { .uri = "/api/devices",               .method = HTTP_GET,    .handler = devices_get_handler           };
+    const httpd_uri_t device_delete     = { .uri = "/api/devices/*",             .method = HTTP_DELETE, .handler = device_delete_handler         };
+    const httpd_uri_t endpoint_put      = { .uri = "/api/devices/*/endpoints/*", .method = HTTP_PUT,    .handler = device_endpoint_put_handler   };
     const httpd_uri_t commission_post   = { .uri = "/controller/commission", .method = HTTP_POST, .handler = controller_commission_post_handler };
     const httpd_uri_t unpair_post       = { .uri = "/controller/unpair",    .method = HTTP_POST, .handler = controller_unpair_post_handler     };
     const httpd_uri_t debug_mdns        = { .uri = "/debug/mdns",           .method = HTTP_GET,  .handler = debug_mdns_get_handler            };
     const httpd_uri_t device_interrogate = { .uri = "/api/devices/*/interrogate", .method = HTTP_POST, .handler = device_interrogate_post_handler };
     const httpd_uri_t factory_reset      = { .uri = "/api/factory-reset",         .method = HTTP_POST, .handler = factory_reset_post_handler       };
     const httpd_uri_t nodes_get          = { .uri = "/api/nodes",                 .method = HTTP_GET,  .handler = nodes_get_handler                };
-    const httpd_uri_t node_settings_put  = { .uri = "/api/nodes/*/settings",      .method = HTTP_PUT,  .handler = node_settings_put_handler        };
-    const httpd_uri_t node_put           = { .uri = "/api/nodes/*",               .method = HTTP_PUT,  .handler = node_put_handler                 };
+    const httpd_uri_t node_settings_put  = { .uri = "/api/nodes/*/settings",      .method = HTTP_PUT,    .handler = node_settings_put_handler      };
+    const httpd_uri_t node_put           = { .uri = "/api/nodes/*",               .method = HTTP_PUT,    .handler = node_put_handler               };
+    const httpd_uri_t node_delete        = { .uri = "/api/nodes/*",               .method = HTTP_DELETE, .handler = node_delete_handler            };
     const httpd_uri_t static_files       = { .uri = "/*",                         .method = HTTP_GET,  .handler = static_get_handler               };
 
     httpd_register_uri_handler(server, &devices_get);
+    httpd_register_uri_handler(server, &device_delete);
     httpd_register_uri_handler(server, &endpoint_put);
     httpd_register_uri_handler(server, &commission_post);
     httpd_register_uri_handler(server, &unpair_post);
@@ -503,6 +549,7 @@ esp_err_t web_server_start(void)
     httpd_register_uri_handler(server, &nodes_get);
     httpd_register_uri_handler(server, &node_settings_put);
     httpd_register_uri_handler(server, &node_put);
+    httpd_register_uri_handler(server, &node_delete);
 
     ws_server_init(server);
 

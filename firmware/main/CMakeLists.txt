@@ -5,9 +5,11 @@ idf_component_register(SRCS
         "matter_controller.cpp"
         "managers/device_manager.cpp"
         "managers/node_manager.cpp"
+        "sd_card.c"
     INCLUDE_DIRS "."
     PRIV_INCLUDE_DIRS  "." "${ESP_MATTER_PATH}/examples/common/utils"
-    LDFRAGMENTS "linker.lf"    
+    PRIV_REQUIRES fatfs sdmmc driver json esp_eth ethernet_init nvs_flash button esp_matter esp_matter_controller esp_http_server
+    LDFRAGMENTS "linker.lf"
 )
 
 if(CONFIG_SPIFFS_ATTESTATION_TRUST_STORE)

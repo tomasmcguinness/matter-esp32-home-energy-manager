@@ -16,8 +16,8 @@ let devices: Device[] = [
     vendorName: 'Modbus',
     productName: 'TCP Adapter',
     endpoints: [
-      { endpointId: 1, label: 'Solax Inverter',   included: false, deviceTypes: [0x0017] },
-      { endpointId: 2, label: 'FeedIn CT Clamp',  included: false, deviceTypes: [0x0510] },
+      { endpointId: 1, label: 'Solax Inverter',   included: false, deviceTypes: [0x0017], parts:[] },
+      { endpointId: 2, label: 'FeedIn CT Clamp',  included: false, deviceTypes: [0x0510], parts:[] },
     ],
   },
   {
@@ -25,8 +25,8 @@ let devices: Device[] = [
     vendorName: 'Shelly',
     productName: 'Pro 3EM',
     endpoints: [
-      { endpointId: 1, label: 'Grid Meter',        included: true,  deviceTypes: [1296] },
-      { endpointId: 2, label: 'Solar Feed',         included: false, deviceTypes: [1296] },
+      { endpointId: 1, label: 'Grid Meter',        included: true,  deviceTypes: [1296], parts:[] },
+      { endpointId: 2, label: 'Solar Feed',         included: false, deviceTypes: [1296], parts:[] },
     ],
   },
 ]

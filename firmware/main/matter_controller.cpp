@@ -41,12 +41,12 @@ static constexpr char kNodeListKey[] = "HEM_NodeList";
 static constexpr size_t kMaxNodes = 32;
 static constexpr uint64_t kFirstDeviceNodeId = 1;
 
-static constexpr uint32_t kDescriptorCluster        = 0x001D;
-static constexpr uint32_t kDescriptorDeviceTypeList  = 0x0000;
-static constexpr uint32_t kDescriptorPartsList       = 0x0003;
-static constexpr uint32_t kBasicInfoCluster          = 0x0028;
-static constexpr uint32_t kBasicInfoVendorName       = 0x0002;
-static constexpr uint32_t kBasicInfoProductName      = 0x0004;
+static constexpr uint32_t kDescriptorCluster = 0x001D;
+static constexpr uint32_t kDescriptorDeviceTypeList = 0x0000;
+static constexpr uint32_t kDescriptorPartsList = 0x0003;
+static constexpr uint32_t kBasicInfoCluster = 0x0028;
+static constexpr uint32_t kBasicInfoVendorName = 0x0002;
+static constexpr uint32_t kBasicInfoProductName = 0x0004;
 
 uint64_t matter_controller_allocate_node_id(void)
 {
@@ -178,12 +178,16 @@ static void on_interrogation_attr(uint64_t node_id,
         if (path.mAttributeId == kDescriptorPartsList)
         {
             chip::TLV::TLVType outer;
-            if (data->EnterContainer(outer) != CHIP_NO_ERROR) return;
+            if (data->EnterContainer(outer) != CHIP_NO_ERROR)
+                return;
             while (data->Next() == CHIP_NO_ERROR)
             {
                 uint16_t ep_id = 0;
                 if (data->Get(ep_id) == CHIP_NO_ERROR)
+                {
                     device_manager_add_endpoint(node_id, ep_id);
+                    device_manager_add_endpoint_part(node_id, path.mEndpointId, ep_id);
+                }
             }
             data->ExitContainer(outer);
         }
@@ -191,11 +195,13 @@ static void on_interrogation_attr(uint64_t node_id,
         {
             device_manager_add_endpoint(node_id, path.mEndpointId);
             chip::TLV::TLVType list_type;
-            if (data->EnterContainer(list_type) != CHIP_NO_ERROR) return;
+            if (data->EnterContainer(list_type) != CHIP_NO_ERROR)
+                return;
             while (data->Next() == CHIP_NO_ERROR)
             {
                 chip::TLV::TLVType struct_type;
-                if (data->EnterContainer(struct_type) != CHIP_NO_ERROR) continue;
+                if (data->EnterContainer(struct_type) != CHIP_NO_ERROR)
+                    continue;
                 uint32_t device_type = 0;
                 while (data->Next() == CHIP_NO_ERROR)
                 {
@@ -212,7 +218,8 @@ static void on_interrogation_attr(uint64_t node_id,
     else if (path.mClusterId == kBasicInfoCluster)
     {
         chip::CharSpan str;
-        if (data->Get(str) != CHIP_NO_ERROR) return;
+        if (data->Get(str) != CHIP_NO_ERROR)
+            return;
         if (path.mAttributeId == kBasicInfoVendorName)
             device_manager_set_vendor_name(node_id, str.data(), str.size());
         else if (path.mAttributeId == kBasicInfoProductName)
@@ -250,11 +257,11 @@ static void interrogate_node(uint64_t node_id)
 
     chip::DeviceLayer::PlatformMgr().LockChipStack();
     auto *cmd = new esp_matter::controller::read_command(
-        node_id, 
-        std::move(attr_paths), 
+        node_id,
+        std::move(attr_paths),
         std::move(event_paths),
-        on_interrogation_attr, 
-        on_interrogation_done, 
+        on_interrogation_attr,
+        on_interrogation_done,
         nullptr);
     if (cmd)
         cmd->send_command();
@@ -431,7 +438,7 @@ void node_subscription_terminated_cb(uint64_t remote_node_id, uint32_t subscript
     ESP_LOGI(TAG, "Subscription terminated, node 0x%016llX, subscription id 0x%08X", remote_node_id, subscription_id);
 }
 
-void node_subscribe_failed_cb(void *ctx, const chip::ScopedNodeId& node_id, int err)
+void node_subscribe_failed_cb(void *ctx, const chip::ScopedNodeId &node_id, int err)
 {
     ESP_LOGE(TAG, "Failed to subscribe (context: %p)", ctx);
 }
@@ -442,12 +449,16 @@ static void on_attribute_data_cb(uint64_t node_id,
                                  const chip::app::StatusIB &status)
 {
     using namespace chip::Protocols::InteractionModel;
-    if (!data || status.mStatus != Status::Success) return;
-    if (path.mClusterId != ElectricalPowerMeasurement::Id || path.mAttributeId != ElectricalPowerMeasurement::Attributes::ActivePower::Id) return;
-    if (data->GetType() == chip::TLV::kTLVType_Null) return;
+    if (!data || status.mStatus != Status::Success)
+        return;
+    if (path.mClusterId != ElectricalPowerMeasurement::Id || path.mAttributeId != ElectricalPowerMeasurement::Attributes::ActivePower::Id)
+        return;
+    if (data->GetType() == chip::TLV::kTLVType_Null)
+        return;
 
     int64_t raw_mw = 0;
-    if (data->Get(raw_mw) != CHIP_NO_ERROR) return;
+    if (data->Get(raw_mw) != CHIP_NO_ERROR)
+        return;
 
     double mw = (double)raw_mw / 1000000.0;
 
@@ -455,7 +466,7 @@ static void on_attribute_data_cb(uint64_t node_id,
     snprintf(json, sizeof(json),
              "{\"type\":\"power_update\",\"data\":{\"nodeId\":%llu,\"endpointId\":%u,\"mw\":%.3f}}",
              (unsigned long long)node_id, (unsigned)path.mEndpointId, mw);
-    
+
     ws_server_broadcast(json, strlen(json));
 }
 
@@ -466,16 +477,18 @@ esp_err_t matter_controller_subscribe(void)
     uint16_t endpoint_ids[kMaxSensors];
     size_t count = device_manager_get_electrical_sensor_endpoints(node_ids, endpoint_ids, kMaxSensors);
 
-    ESP_LOGI(TAG, "Subscribing to Active Power on %u electrical sensor endpoint(s)", (unsigned)count);
+    if (count > 0)
+    {
+        ESP_LOGI(TAG, "Subscribing to Active Power on %u electrical sensor endpoint(s)", (unsigned)count);
 
-    for (size_t i = 0; i < count; i++) {
+        for (size_t i = 0; i < count; i++)
+        {
+            uint64_t node_id = node_ids[i];
+            uint16_t endpoint_id = endpoint_ids[i];
 
-        uint64_t node_id = node_ids[i];
-        uint16_t endpoint_id = endpoint_ids[i];
+            auto *args = new std::tuple<uint64_t, uint16_t>(node_id, endpoint_id);
 
-        auto *args = new std::tuple<uint64_t, uint16_t>(node_id, endpoint_id);
-        
-        chip::DeviceLayer::PlatformMgr().ScheduleWork([](intptr_t arg) {
+            chip::DeviceLayer::PlatformMgr().ScheduleWork([](intptr_t arg)
 
             auto *args = reinterpret_cast<std::tuple<uint64_t, uint16_t> *>(arg);
 
@@ -501,9 +514,14 @@ esp_err_t matter_controller_subscribe(void)
                 nullptr,
                 false);
         
-            cmd->send_command();
-        }, reinterpret_cast<intptr_t>(args));
+            cmd->send_command(); }, reinterpret_cast<intptr_t>(args));
+        }
     }
+    else
+    {
+        ESP_LOGI(TAG, "No electrical sensor endpoints found to subscribe to");
+    }
+
     return ESP_OK;
 }
 

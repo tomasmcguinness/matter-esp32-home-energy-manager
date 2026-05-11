@@ -25,6 +25,7 @@ struct endpoint_entry_t {
     std::string label;
     bool included;
     std::vector<uint32_t> device_types;
+    std::vector<uint16_t> parts;
 };
 
 struct device_entry_t {
@@ -108,6 +109,13 @@ static void load_from_disk(void)
             cJSON_ArrayForEach(dt_json, dts) {
                 if (cJSON_IsNumber(dt_json)) {
                     ep.device_types.push_back((uint32_t)dt_json->valueint);
+                }
+            }
+            cJSON *parts = cJSON_GetObjectItemCaseSensitive(ep_json, "parts");
+            cJSON *part_json = nullptr;
+            cJSON_ArrayForEach(part_json, parts) {
+                if (cJSON_IsNumber(part_json)) {
+                    ep.parts.push_back((uint16_t)part_json->valueint);
                 }
             }
             dev.endpoints.push_back(ep);
@@ -250,6 +258,10 @@ char *device_manager_get_all_json(void)
             for (auto dt : ep.device_types) {
                 cJSON_AddItemToArray(dts, cJSON_CreateNumber((double)dt));
             }
+            cJSON *parts = cJSON_AddArrayToObject(eobj, "parts");
+            for (auto p : ep.parts) {
+                cJSON_AddItemToArray(parts, cJSON_CreateNumber((double)p));
+            }
             cJSON_AddItemToArray(eps, eobj);
         }
         cJSON_AddItemToArray(arr, dobj);
@@ -338,6 +350,32 @@ void device_manager_log_structure(uint64_t node_id)
     xSemaphoreGive(s_mutex);
 }
 
+esp_err_t device_manager_add_endpoint_part(uint64_t node_id, uint16_t parent_endpoint_id, uint16_t child_endpoint_id)
+{
+    xSemaphoreTake(s_mutex, portMAX_DELAY);
+    auto *dev = find_device(node_id);
+    auto *ep  = find_endpoint(dev, parent_endpoint_id);
+    if (ep) {
+        bool found = false;
+        for (auto p : ep->parts) { if (p == child_endpoint_id) { found = true; break; } }
+        if (!found) ep->parts.push_back(child_endpoint_id);
+    }
+    xSemaphoreGive(s_mutex);
+    return ep ? ESP_OK : ESP_ERR_NOT_FOUND;
+}
+
+esp_err_t device_manager_remove_device(uint64_t node_id)
+{
+    xSemaphoreTake(s_mutex, portMAX_DELAY);
+    auto it = s_devices.begin();
+    while (it != s_devices.end()) {
+        if (it->node_id == node_id) { it = s_devices.erase(it); break; }
+        ++it;
+    }
+    xSemaphoreGive(s_mutex);
+    return device_manager_persist();
+}
+
 esp_err_t device_manager_clear_device_endpoints(uint64_t node_id)
 {
     xSemaphoreTake(s_mutex, portMAX_DELAY);
@@ -379,6 +417,10 @@ esp_err_t device_manager_persist(void)
             cJSON *dts = cJSON_AddArrayToObject(eobj, "deviceTypes");
             for (auto dt : ep.device_types) {
                 cJSON_AddItemToArray(dts, cJSON_CreateNumber((double)dt));
+            }
+            cJSON *parts = cJSON_AddArrayToObject(eobj, "parts");
+            for (auto p : ep.parts) {
+                cJSON_AddItemToArray(parts, cJSON_CreateNumber((double)p));
             }
             cJSON_AddItemToArray(eps, eobj);
         }

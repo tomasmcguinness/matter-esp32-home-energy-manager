@@ -137,6 +137,19 @@ esp_err_t node_manager_upsert(const char *node_id, float x, float y)
     return node_manager_persist();
 }
 
+esp_err_t node_manager_delete(const char *node_id)
+{
+    if (!node_id) return ESP_ERR_INVALID_ARG;
+    xSemaphoreTake(s_mutex, portMAX_DELAY);
+    auto it = s_nodes.begin();
+    while (it != s_nodes.end()) {
+        if (it->id == node_id) { it = s_nodes.erase(it); break; }
+        ++it;
+    }
+    xSemaphoreGive(s_mutex);
+    return node_manager_persist();
+}
+
 esp_err_t node_manager_update_settings(const char *node_id, const char *settings_json)
 {
     if (!node_id || !settings_json) return ESP_ERR_INVALID_ARG;

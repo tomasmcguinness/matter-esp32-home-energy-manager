@@ -30,7 +30,7 @@ export function PowerFlowEdge({
 
   const { kw } = (data ?? {}) as PowerFlowData
   const isIdle = kw === 0
-  const isOut = kw < 0;
+  const isOut = kw && kw < 0;
   const formattedkw = kw?.toFixed(1);
 
   // For 'out', animate along the geometrically reversed path so chevrons travel
