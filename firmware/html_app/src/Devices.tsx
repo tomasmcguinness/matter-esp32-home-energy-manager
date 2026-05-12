@@ -159,7 +159,7 @@ function Devices() {
       <hr />
       {error && <div className="alert alert-danger">{error}</div>}
       {devices.length === 0 ? (
-        <p className="text-muted">No devices in fabric yet.</p>
+        <div className="alert alert-info">No devices have been paired. Please add a device using the companion app.</div>
       ) : (
         <div className="d-flex flex-column gap-3">
           {devices.map((dev) => {

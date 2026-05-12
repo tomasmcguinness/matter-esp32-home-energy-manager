@@ -13,6 +13,7 @@
 #include <esp_matter_controller_subscribe_command.h>
 
 #include "managers/device_manager.h"
+#include "managers/node_manager.h"
 #include "ws_server.h"
 
 #include <app/server/Dnssd.h>
@@ -47,6 +48,10 @@ static constexpr uint32_t kDescriptorPartsList = 0x0003;
 static constexpr uint32_t kBasicInfoCluster = 0x0028;
 static constexpr uint32_t kBasicInfoVendorName = 0x0002;
 static constexpr uint32_t kBasicInfoProductName = 0x0004;
+
+void processElectralPowerMeasurementUpdate(uint64_t node_id,
+                                           const chip::app::ConcreteDataAttributePath &path,
+                                           chip::TLV::TLVReader *data);
 
 uint64_t matter_controller_allocate_node_id(void)
 {
@@ -233,6 +238,7 @@ static void on_interrogation_done(uint64_t node_id,
 {
     ESP_LOGI(TAG, "Interrogation complete for node 0x%llx", (unsigned long long)node_id);
     device_manager_log_structure(node_id);
+    device_manager_resolve_parents(node_id);
     device_manager_persist();
 }
 
@@ -297,7 +303,7 @@ static void on_commissioning_failure_callback(ScopedNodeId peer_id,
     xSemaphoreGive(s_commission_ctx.done);
 }
 
-esp_err_t matter_controller_commission_on_network(const char *onboarding_payload)
+esp_err_t matter_controller_commission_on_network(const char *onboarding_payload, uint64_t *node_id_out)
 {
     chip::SetupPayload payload;
     CHIP_ERROR parse_err;
@@ -352,6 +358,8 @@ esp_err_t matter_controller_commission_on_network(const char *onboarding_payload
 
     if (result == CHIP_NO_ERROR)
     {
+        if (node_id_out)
+            *node_id_out = (uint64_t)node_id;
         node_list_add(node_id);
         interrogate_node(node_id);
         return ESP_OK;
@@ -451,8 +459,14 @@ static void on_attribute_data_cb(uint64_t node_id,
     using namespace chip::Protocols::InteractionModel;
     if (!data || status.mStatus != Status::Success)
         return;
-    if (path.mClusterId != ElectricalPowerMeasurement::Id || path.mAttributeId != ElectricalPowerMeasurement::Attributes::ActivePower::Id)
-        return;
+
+    // Process ElectrialPowerMeasurement updates.
+    if (path.mClusterId == ElectricalPowerMeasurement::Id) {
+        processElectralPowerMeasurementUpdate(node_id, path, data);
+    }
+     
+    return;
+
     if (data->GetType() == chip::TLV::kTLVType_Null)
         return;
 
@@ -466,6 +480,41 @@ static void on_attribute_data_cb(uint64_t node_id,
     snprintf(json, sizeof(json),
              "{\"type\":\"power_update\",\"data\":{\"nodeId\":%llu,\"endpointId\":%u,\"mw\":%.3f}}",
              (unsigned long long)node_id, (unsigned)path.mEndpointId, mw);
+
+    ws_server_broadcast(json, strlen(json));
+}
+
+void processElectralPowerMeasurementUpdate(uint64_t node_id,
+                                           const chip::app::ConcreteDataAttributePath &path,
+                                           chip::TLV::TLVReader *data)
+{
+    if (path.mClusterId != ElectricalPowerMeasurement::Id) {
+        return;
+    }
+
+    // For simplicity, we assume the attribute value is always ActivePower in mW.
+    if (path.mAttributeId != ElectricalPowerMeasurement::Attributes::ActivePower::Id) {
+        return;
+    }
+
+    if (data->GetType() == chip::TLV::kTLVType_Null) {
+        return;
+    }
+
+    // We need to decided how to "AI" this data at this point.
+    // At this point, all we know is that an Electrial Power Measurement cluster has sent some data.
+    //
+
+    int64_t raw_value = 0;
+    if (data->Get(raw_value) != CHIP_NO_ERROR) {
+        return;
+    }
+
+    double value = (double)raw_value / 1000000.0;
+
+    char json[128];
+
+    snprintf(json, sizeof(json), "{\"nodeId\":%llu,\"endpointId\":%u, \"clusterId\":%u, \"attributeId\":%u, \"value\":%.3f}", (unsigned long long)node_id, (unsigned)path.mEndpointId, path.mClusterId, path.mAttributeId, value);
 
     ws_server_broadcast(json, strlen(json));
 }
@@ -489,32 +538,37 @@ esp_err_t matter_controller_subscribe(void)
             auto *args = new std::tuple<uint64_t, uint16_t>(node_id, endpoint_id);
 
             chip::DeviceLayer::PlatformMgr().ScheduleWork([](intptr_t arg)
+                                                          {
+                auto *args = reinterpret_cast<std::tuple<uint64_t, uint16_t> *>(arg);
 
-            auto *args = reinterpret_cast<std::tuple<uint64_t, uint16_t> *>(arg);
+                ScopedMemoryBufferWithSize<AttributePathParams> attr_paths;
+                attr_paths.Alloc(3);
 
-            ScopedMemoryBufferWithSize<AttributePathParams> attr_paths;
-            attr_paths.Alloc(1);
+                attr_paths[0] = AttributePathParams(ElectricalPowerMeasurement::Id, ElectricalPowerMeasurement::Attributes::Voltage::Id);
+                attr_paths[1] = AttributePathParams(ElectricalPowerMeasurement::Id, ElectricalPowerMeasurement::Attributes::ActiveCurrent::Id);
+                attr_paths[2] = AttributePathParams(ElectricalPowerMeasurement::Id, ElectricalPowerMeasurement::Attributes::ActivePower::Id);
+                
+                ScopedMemoryBufferWithSize<EventPathParams> event_paths;
+                event_paths.Alloc(0);
 
-            attr_paths[0] = AttributePathParams(ElectricalPowerMeasurement::Id, ElectricalPowerMeasurement::Attributes::ActivePower::Id);
-            
-            ScopedMemoryBufferWithSize<EventPathParams> event_paths;
-            event_paths.Alloc(0);
-
-            // This might be an ICD device??
-            auto *cmd = chip::Platform::New<esp_matter::controller::subscribe_command>(std::get<0>(*args),
-                std::move(attr_paths), 
-                std::move(event_paths), 
-                5, 
-                30, 
-                false, // <--- Keep Subscriptions
-                on_attribute_data_cb,
-                nullptr,
-                node_subscription_established_cb,
-                node_subscription_terminated_cb,
-                nullptr,
-                false);
+                // This might be an ICD device??
+                auto *cmd = chip::Platform::New<esp_matter::controller::subscribe_command>(std::get<0>(*args),
+                    std::move(attr_paths), 
+                    std::move(event_paths), 
+                    5, 
+                    30, 
+                    false, // <--- Keep Subscriptions
+                    on_attribute_data_cb,
+                    nullptr,
+                    node_subscription_established_cb,
+                    node_subscription_terminated_cb,
+                    nullptr,
+                    false);
         
-            cmd->send_command(); }, reinterpret_cast<intptr_t>(args));
+                delete args;
+                
+                cmd->send_command(); 
+            }, reinterpret_cast<intptr_t>(args));
         }
     }
     else
@@ -532,6 +586,7 @@ esp_err_t matter_controller_subscribe(void)
 esp_err_t matter_factory_reset(void)
 {
     device_manager_clear();
+    node_manager_clear();
 
     chip::DeviceLayer::PlatformMgr().LockChipStack();
     chip::Server::GetInstance().ScheduleFactoryReset();

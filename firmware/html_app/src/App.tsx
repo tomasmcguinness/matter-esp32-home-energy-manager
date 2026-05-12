@@ -2,6 +2,9 @@ import { NavLink, Routes, Route } from 'react-router'
 import './App.css'
 import Home from './Home.tsx'
 import Devices from './Devices.tsx'
+import Settings from './Settings.tsx'
+
+import '@xyflow/react/dist/style.css';
 
 function App() {
   return (
@@ -20,6 +23,9 @@ function App() {
               <li className="nav-item">
                 <NavLink className="nav-link" to="/devices">Devices</NavLink>
               </li>
+              <li className="nav-item">
+                <NavLink className="nav-link" to="/settings">Settings</NavLink>
+              </li>
             </ul>
           </div>
         </div>
@@ -27,6 +33,7 @@ function App() {
       <Routes>
         <Route path="/" element={<Home />} />
         <Route path="/devices" element={<div className="container"><Devices /></div>} />
+        <Route path="/settings" element={<div className="container"><Settings /></div>} />
       </Routes>
     </>
   )

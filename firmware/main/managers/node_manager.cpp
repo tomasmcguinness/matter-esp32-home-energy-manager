@@ -24,7 +24,16 @@ struct node_config_t {
     std::string settings_json = "{}";
 };
 
+struct edge_config_t {
+    std::string id;
+    std::string source;
+    std::string target;
+    std::string source_handle;
+    std::string target_handle;
+};
+
 static std::vector<node_config_t> s_nodes;
+static std::vector<edge_config_t> s_edges;
 static SemaphoreHandle_t s_mutex = nullptr;
 
 static node_config_t *find_node(const char *id)
@@ -47,6 +56,16 @@ static cJSON *build_json(void)
         cJSON *settings = cJSON_Parse(nc.settings_json.c_str());
         cJSON_AddItemToObject(obj, "settings", settings ? settings : cJSON_CreateObject());
         cJSON_AddItemToArray(arr, obj);
+    }
+    cJSON *edges = cJSON_AddArrayToObject(root, "edges");
+    for (const auto &ec : s_edges) {
+        cJSON *obj = cJSON_CreateObject();
+        cJSON_AddStringToObject(obj, "id", ec.id.c_str());
+        cJSON_AddStringToObject(obj, "source", ec.source.c_str());
+        cJSON_AddStringToObject(obj, "target", ec.target.c_str());
+        if (!ec.source_handle.empty()) cJSON_AddStringToObject(obj, "sourceHandle", ec.source_handle.c_str());
+        if (!ec.target_handle.empty()) cJSON_AddStringToObject(obj, "targetHandle", ec.target_handle.c_str());
+        cJSON_AddItemToArray(edges, obj);
     }
     return root;
 }
@@ -93,8 +112,26 @@ static void load_from_disk(void)
         }
         s_nodes.push_back(nc);
     }
+    cJSON *edges = cJSON_GetObjectItemCaseSensitive(root, "edges");
+    cJSON *edge_item = nullptr;
+    cJSON_ArrayForEach(edge_item, edges) {
+        cJSON *eid = cJSON_GetObjectItemCaseSensitive(edge_item, "id");
+        if (!cJSON_IsString(eid)) continue;
+        edge_config_t ec;
+        ec.id = eid->valuestring;
+        cJSON *src = cJSON_GetObjectItemCaseSensitive(edge_item, "source");
+        if (cJSON_IsString(src)) ec.source = src->valuestring;
+        cJSON *tgt = cJSON_GetObjectItemCaseSensitive(edge_item, "target");
+        if (cJSON_IsString(tgt)) ec.target = tgt->valuestring;
+        cJSON *sh = cJSON_GetObjectItemCaseSensitive(edge_item, "sourceHandle");
+        if (cJSON_IsString(sh)) ec.source_handle = sh->valuestring;
+        cJSON *th = cJSON_GetObjectItemCaseSensitive(edge_item, "targetHandle");
+        if (cJSON_IsString(th)) ec.target_handle = th->valuestring;
+        s_edges.push_back(ec);
+    }
+
     cJSON_Delete(root);
-    ESP_LOGI(TAG, "Loaded %u node config(s)", (unsigned)s_nodes.size());
+    ESP_LOGI(TAG, "Loaded %u node config(s), %u edge(s)", (unsigned)s_nodes.size(), (unsigned)s_edges.size());
 }
 
 esp_err_t node_manager_init(void)
@@ -116,21 +153,48 @@ esp_err_t node_manager_init(void)
     }
 
     load_from_disk();
+
+    if (!find_node("consumer_unit")) {
+        node_config_t nc;
+        nc.id            = "consumer_unit";
+        nc.x             = 0.0f;
+        nc.y             = 0.0f;
+        nc.settings_json = "{\"label\":\"🏠 Consumer Unit\",\"type\":\"consumerUnit\",\"deletable\":false}";
+        s_nodes.push_back(nc);
+        node_manager_persist();
+    }
+
     return ESP_OK;
 }
 
-esp_err_t node_manager_upsert(const char *node_id, float x, float y)
+esp_err_t node_manager_upsert(const char *node_id, float x, float y, const char *settings_json)
 {
     xSemaphoreTake(s_mutex, portMAX_DELAY);
     auto *nc = find_node(node_id);
     if (nc) {
         nc->x = x;
         nc->y = y;
+        if (settings_json) {
+            cJSON *parsed = cJSON_Parse(settings_json);
+            if (parsed) {
+                char *canonical = cJSON_PrintUnformatted(parsed);
+                cJSON_Delete(parsed);
+                if (canonical) { nc->settings_json = canonical; free(canonical); }
+            }
+        }
     } else {
         node_config_t n;
         n.id = node_id;
         n.x  = x;
         n.y  = y;
+        if (settings_json) {
+            cJSON *parsed = cJSON_Parse(settings_json);
+            if (parsed) {
+                char *canonical = cJSON_PrintUnformatted(parsed);
+                cJSON_Delete(parsed);
+                if (canonical) { n.settings_json = canonical; free(canonical); }
+            }
+        }
         s_nodes.push_back(n);
     }
     xSemaphoreGive(s_mutex);
@@ -141,6 +205,17 @@ esp_err_t node_manager_delete(const char *node_id)
 {
     if (!node_id) return ESP_ERR_INVALID_ARG;
     xSemaphoreTake(s_mutex, portMAX_DELAY);
+    auto *nc = find_node(node_id);
+    if (nc) {
+        cJSON *settings = cJSON_Parse(nc->settings_json.c_str());
+        cJSON *deletable_j = settings ? cJSON_GetObjectItemCaseSensitive(settings, "deletable") : nullptr;
+        bool locked = cJSON_IsFalse(deletable_j);
+        cJSON_Delete(settings);
+        if (locked) {
+            xSemaphoreGive(s_mutex);
+            return ESP_ERR_NOT_SUPPORTED;
+        }
+    }
     auto it = s_nodes.begin();
     while (it != s_nodes.end()) {
         if (it->id == node_id) { it = s_nodes.erase(it); break; }
@@ -171,6 +246,53 @@ esp_err_t node_manager_update_settings(const char *node_id, const char *settings
     }
     xSemaphoreGive(s_mutex);
     free(canonical);
+    return node_manager_persist();
+}
+
+esp_err_t node_manager_upsert_edge(const char *id, const char *source, const char *target,
+                                    const char *source_handle, const char *target_handle)
+{
+    if (!id || !source || !target) return ESP_ERR_INVALID_ARG;
+    xSemaphoreTake(s_mutex, portMAX_DELAY);
+    edge_config_t *found = nullptr;
+    for (auto &ec : s_edges) {
+        if (ec.id == id) { found = &ec; break; }
+    }
+    if (found) {
+        found->source        = source;
+        found->target        = target;
+        found->source_handle = source_handle ? source_handle : "";
+        found->target_handle = target_handle ? target_handle : "";
+    } else {
+        edge_config_t ec;
+        ec.id            = id;
+        ec.source        = source;
+        ec.target        = target;
+        ec.source_handle = source_handle ? source_handle : "";
+        ec.target_handle = target_handle ? target_handle : "";
+        s_edges.push_back(ec);
+    }
+    xSemaphoreGive(s_mutex);
+    return node_manager_persist();
+}
+
+esp_err_t node_manager_delete_edge(const char *id)
+{
+    if (!id) return ESP_ERR_INVALID_ARG;
+    xSemaphoreTake(s_mutex, portMAX_DELAY);
+    for (auto it = s_edges.begin(); it != s_edges.end(); ++it) {
+        if (it->id == id) { s_edges.erase(it); break; }
+    }
+    xSemaphoreGive(s_mutex);
+    return node_manager_persist();
+}
+
+esp_err_t node_manager_clear(void)
+{
+    xSemaphoreTake(s_mutex, portMAX_DELAY);
+    s_nodes.clear();
+    s_edges.clear();
+    xSemaphoreGive(s_mutex);
     return node_manager_persist();
 }
 

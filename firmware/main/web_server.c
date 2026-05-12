@@ -184,8 +184,9 @@ static esp_err_t controller_commission_post_handler(httpd_req_t *req)
 
     ESP_LOGI(TAG, "Payload: %s", payload);
 
-    esp_err_t err = matter_controller_commission_on_network(payload);
-    
+    uint64_t commissioned_node_id = 0;
+    esp_err_t err = matter_controller_commission_on_network(payload, &commissioned_node_id);
+
     if (err == ESP_ERR_INVALID_ARG) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid onboarding payload");
         return ESP_FAIL;
@@ -199,9 +200,9 @@ static esp_err_t controller_commission_post_handler(httpd_req_t *req)
         return ESP_FAIL;
     }
 
-    httpd_resp_set_type(req, "application/json");
-    httpd_resp_sendstr(req, "{}");
-    return ESP_OK;
+    cJSON *resp = cJSON_CreateObject();
+    cJSON_AddNumberToObject(resp, "nodeId", (double)commissioned_node_id);
+    return send_json(req, resp, 200);
 }
 
 static esp_err_t controller_unpair_post_handler(httpd_req_t *req)
@@ -400,9 +401,15 @@ static esp_err_t node_put_handler(httpd_req_t *req)
     }
     float x = (float)xj->valuedouble;
     float y = (float)yj->valuedouble;
+
+    char *settings_str = NULL;
+    cJSON *settings_j = cJSON_GetObjectItemCaseSensitive(root, "settings");
+    if (cJSON_IsObject(settings_j))
+        settings_str = cJSON_PrintUnformatted(settings_j);
     cJSON_Delete(root);
 
-    esp_err_t err = node_manager_upsert(node_id, x, y);
+    esp_err_t err = node_manager_upsert(node_id, x, y, settings_str);
+    free(settings_str);
     if (err != ESP_OK) {
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Persist failed");
         return ESP_FAIL;
@@ -468,12 +475,136 @@ static esp_err_t node_delete_handler(httpd_req_t *req)
     const char *node_id = last_slash + 1;
 
     esp_err_t err = node_manager_delete(node_id);
+    if (err == ESP_ERR_NOT_SUPPORTED) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Node cannot be deleted");
+        return ESP_FAIL;
+    }
     if (err != ESP_OK) {
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Delete failed");
         return ESP_FAIL;
     }
     httpd_resp_set_type(req, "application/json");
     return httpd_resp_sendstr(req, "{}");
+}
+
+static esp_err_t device_name_put_handler(httpd_req_t *req)
+{
+    uint64_t node_id = 0;
+    if (sscanf(req->uri, "/api/devices/%" SCNu64 "/name", &node_id) != 1) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid URI");
+        return ESP_FAIL;
+    }
+
+    if (req->content_len <= 0 || req->content_len > MAX_POST_BODY) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid body");
+        return ESP_FAIL;
+    }
+    char body[MAX_POST_BODY + 1];
+    int received = 0;
+    while (received < (int)req->content_len) {
+        int r = httpd_req_recv(req, body + received, req->content_len - received);
+        if (r <= 0) {
+            httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Recv failed");
+            return ESP_FAIL;
+        }
+        received += r;
+    }
+    body[received] = '\0';
+
+    cJSON *root = cJSON_Parse(body);
+    if (!root) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Bad JSON");
+        return ESP_FAIL;
+    }
+    cJSON *name_json = cJSON_GetObjectItemCaseSensitive(root, "name");
+    if (!cJSON_IsString(name_json)) {
+        cJSON_Delete(root);
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Missing name");
+        return ESP_FAIL;
+    }
+    const char *name = name_json->valuestring;
+    esp_err_t err = device_manager_set_device_name(node_id, name, strlen(name));
+    cJSON_Delete(root);
+
+    if (err == ESP_ERR_NOT_FOUND) {
+        httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "Device not found");
+        return ESP_FAIL;
+    }
+    if (err != ESP_OK) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Update failed");
+        return ESP_FAIL;
+    }
+    device_manager_persist();
+
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, "{}");
+    return ESP_OK;
+}
+
+static esp_err_t edge_post_handler(httpd_req_t *req)
+{
+    if (req->content_len <= 0 || req->content_len > MAX_POST_BODY) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid body");
+        return ESP_FAIL;
+    }
+    char body[MAX_POST_BODY + 1];
+    int received = 0;
+    while (received < (int)req->content_len) {
+        int r = httpd_req_recv(req, body + received, req->content_len - received);
+        if (r <= 0) {
+            httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Recv failed");
+            return ESP_FAIL;
+        }
+        received += r;
+    }
+    body[received] = '\0';
+
+    cJSON *root = cJSON_Parse(body);
+    if (!root) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Bad JSON");
+        return ESP_FAIL;
+    }
+    cJSON *id_j  = cJSON_GetObjectItemCaseSensitive(root, "id");
+    cJSON *src_j = cJSON_GetObjectItemCaseSensitive(root, "source");
+    cJSON *tgt_j = cJSON_GetObjectItemCaseSensitive(root, "target");
+    if (!cJSON_IsString(id_j) || !cJSON_IsString(src_j) || !cJSON_IsString(tgt_j)) {
+        cJSON_Delete(root);
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Missing id/source/target");
+        return ESP_FAIL;
+    }
+    cJSON *sh_j = cJSON_GetObjectItemCaseSensitive(root, "sourceHandle");
+    cJSON *th_j = cJSON_GetObjectItemCaseSensitive(root, "targetHandle");
+
+    esp_err_t err = node_manager_upsert_edge(
+        id_j->valuestring, src_j->valuestring, tgt_j->valuestring,
+        cJSON_IsString(sh_j) ? sh_j->valuestring : NULL,
+        cJSON_IsString(th_j) ? th_j->valuestring : NULL);
+    cJSON_Delete(root);
+
+    if (err != ESP_OK) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Persist failed");
+        return ESP_FAIL;
+    }
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, "{}");
+    return ESP_OK;
+}
+
+static esp_err_t edge_delete_handler(httpd_req_t *req)
+{
+    const char *id = req->uri + strlen("/api/edges/");
+    if (!*id) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Missing edge id");
+        return ESP_FAIL;
+    }
+    esp_err_t err = node_manager_delete_edge(id);
+    if (err != ESP_OK) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Delete failed");
+        return ESP_FAIL;
+    }
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, "{}");
+    return ESP_OK;
 }
 
 static esp_err_t static_get_handler(httpd_req_t *req)
@@ -514,7 +645,7 @@ esp_err_t web_server_start(void)
     config.lru_purge_enable = true;
     config.uri_match_fn     = httpd_uri_match_wildcard;
     config.stack_size       = 12288;
-    config.max_uri_handlers = 16;
+    config.max_uri_handlers = 19;
     config.max_resp_headers = 20;
 
     httpd_handle_t server = NULL;
@@ -526,6 +657,7 @@ esp_err_t web_server_start(void)
 
     const httpd_uri_t devices_get       = { .uri = "/api/devices",               .method = HTTP_GET,    .handler = devices_get_handler           };
     const httpd_uri_t device_delete     = { .uri = "/api/devices/*",             .method = HTTP_DELETE, .handler = device_delete_handler         };
+    const httpd_uri_t device_name_put   = { .uri = "/api/devices/*/name",        .method = HTTP_PUT,    .handler = device_name_put_handler       };
     const httpd_uri_t endpoint_put      = { .uri = "/api/devices/*/endpoints/*", .method = HTTP_PUT,    .handler = device_endpoint_put_handler   };
     const httpd_uri_t commission_post   = { .uri = "/controller/commission", .method = HTTP_POST, .handler = controller_commission_post_handler };
     const httpd_uri_t unpair_post       = { .uri = "/controller/unpair",    .method = HTTP_POST, .handler = controller_unpair_post_handler     };
@@ -536,10 +668,13 @@ esp_err_t web_server_start(void)
     const httpd_uri_t node_settings_put  = { .uri = "/api/nodes/*/settings",      .method = HTTP_PUT,    .handler = node_settings_put_handler      };
     const httpd_uri_t node_put           = { .uri = "/api/nodes/*",               .method = HTTP_PUT,    .handler = node_put_handler               };
     const httpd_uri_t node_delete        = { .uri = "/api/nodes/*",               .method = HTTP_DELETE, .handler = node_delete_handler            };
+    const httpd_uri_t edge_post          = { .uri = "/api/edges",                 .method = HTTP_POST,   .handler = edge_post_handler              };
+    const httpd_uri_t edge_delete        = { .uri = "/api/edges/*",               .method = HTTP_DELETE, .handler = edge_delete_handler            };
     const httpd_uri_t static_files       = { .uri = "/*",                         .method = HTTP_GET,  .handler = static_get_handler               };
 
     httpd_register_uri_handler(server, &devices_get);
     httpd_register_uri_handler(server, &device_delete);
+    httpd_register_uri_handler(server, &device_name_put);
     httpd_register_uri_handler(server, &endpoint_put);
     httpd_register_uri_handler(server, &commission_post);
     httpd_register_uri_handler(server, &unpair_post);
@@ -550,6 +685,8 @@ esp_err_t web_server_start(void)
     httpd_register_uri_handler(server, &node_settings_put);
     httpd_register_uri_handler(server, &node_put);
     httpd_register_uri_handler(server, &node_delete);
+    httpd_register_uri_handler(server, &edge_post);
+    httpd_register_uri_handler(server, &edge_delete);
 
     ws_server_init(server);
 

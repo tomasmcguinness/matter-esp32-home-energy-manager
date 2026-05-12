@@ -15,12 +15,14 @@ uint64_t  device_manager_next_node_id(void);
 esp_err_t device_manager_add_device(uint64_t node_id);
 esp_err_t device_manager_set_vendor_name(uint64_t node_id, const char *name, size_t len);
 esp_err_t device_manager_set_product_name(uint64_t node_id, const char *name, size_t len);
+esp_err_t device_manager_set_device_name(uint64_t node_id, const char *name, size_t len);
 
 esp_err_t device_manager_add_endpoint(uint64_t node_id, uint16_t endpoint_id);
 esp_err_t device_manager_add_device_type(uint64_t node_id, uint16_t endpoint_id, uint32_t device_type_id);
 esp_err_t device_manager_set_endpoint_label(uint64_t node_id, uint16_t endpoint_id, const char *label, size_t len);
 esp_err_t device_manager_set_endpoint_included(uint64_t node_id, uint16_t endpoint_id, bool included);
 esp_err_t device_manager_add_endpoint_part(uint64_t node_id, uint16_t parent_endpoint_id, uint16_t child_endpoint_id);
+esp_err_t device_manager_resolve_parents(uint64_t node_id);
 
 char     *device_manager_get_all_json(void); // caller must free
 size_t    device_manager_get_electrical_sensor_endpoints(uint64_t *node_ids, uint16_t *endpoint_ids, size_t max);

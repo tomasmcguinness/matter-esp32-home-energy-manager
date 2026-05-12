@@ -1,58 +1,70 @@
-import { ReactFlow, Background, BackgroundVariant, useNodesState, useEdgesState, type Node, type Edge, type ReactFlowInstance, addEdge } from '@xyflow/react'
-import '@xyflow/react/dist/style.css'
+import { ReactFlow, ReactFlowProvider, Background, BackgroundVariant, useNodesState, useEdgesState, type Node, type Edge, type EdgeChange, type ReactFlowInstance, addEdge, useReactFlow, Handle, Position } from '@xyflow/react'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { PowerFlowEdge } from './PowerFlowEdge'
 import { GridModal } from './GridModal'
 import { useWebSocket, type WsMessage } from './useWebSocket'
+import { DnDProvider, useDnD } from './DnDContext';
 
 const edgeTypes = { powerFlow: PowerFlowEdge }
 
+function attributeKey(clusterId: number, attributeId: number): 'voltage' | 'current' | 'power' | null {
+  if (clusterId === 0x0090) {   // Electrical Power Measurement
+    if (attributeId === 0x0004) return 'voltage'
+    if (attributeId === 0x0005) return 'current'
+    if (attributeId === 0x0008) return 'power'
+  }
+  return null
+}
+
+function fmt(value: number | undefined, unit: string): string {
+  return value === undefined ? '—' : `${value.toFixed(2)} ${unit}`
+}
+
+function ConsumerUnitNode({ data }: { data: { label: string } }) {
+  return (
+    <div style={{ border: '1px solid #e2e8f0', borderRadius: 6, background: '#fff', overflow: 'hidden' }}>
+      <Handle type="target" position={Position.Left} id="power-in" />
+      <div style={{ padding: '5px 12px', fontSize: 13, fontWeight: 500, color: '#1e293b', whiteSpace: 'nowrap' }}>
+        {data.label}
+      </div>
+      <Handle type="source" position={Position.Right} id="power-out" />
+    </div>
+  )
+}
+
+type DeviceNodeData = { label: string; nodeId?: number; endpointId?: number; voltage?: number; current?: number; power?: number }
+
+function DeviceNode({ data }: { data: DeviceNodeData }) {
+  return (
+    <div style={{ border: '1px solid #e2e8f0', borderRadius: 6, background: '#fff', overflow: 'hidden', minWidth: 148 }}>
+      <Handle type="target" position={Position.Left} id="power-in" />
+      <div style={{ padding: '4px 10px', background: '#f1f5f9', borderBottom: '1px solid #e2e8f0', fontSize: 12, fontWeight: 600, color: '#1e293b', whiteSpace: 'nowrap' }}>
+        {data.label}
+      </div>
+      <div style={{ padding: '5px 10px', display: 'grid', gridTemplateColumns: 'auto 1fr', columnGap: 8, rowGap: 2, fontSize: 12 }}>
+        <span style={{ color: '#94a3b8' }}>V</span><span>{fmt(data.voltage, 'V')}</span>
+        <span style={{ color: '#94a3b8' }}>I</span><span>{fmt(data.current, 'A')}</span>
+        <span style={{ color: '#94a3b8' }}>P</span><span>{fmt(data.power, 'W')}</span>
+      </div>
+      <Handle type="source" position={Position.Right} id="power-out" />
+    </div>
+  )
+}
+
+const nodeTypes = { consumerUnit: ConsumerUnitNode, device: DeviceNode }
+
 type SavedNodeConfig = { id: string; x: number; y: number; settings: Record<string, unknown> }
+type SavedEdgeConfig = { id: string; source: string; target: string; sourceHandle?: string; targetHandle?: string }
 
 type DeviceSpec = {
   nodeId: number,
-  type: string
+  endpointId: number,
   label: string
-  desc: string
-  icon: string
-  iconBg: string
-  dropTarget: 'canvas' | 'edge'
-  badge: 'node' | 'edge'
 }
 
-type ApiEndpoint = {
-  endpointId: number
-  label: string
-  included: boolean
-  deviceTypes: number[]
-}
+const initialNodes: Node[] = []
 
-type ApiDevice = {
-  nodeId: number
-  vendorName: string
-  productName: string
-  endpoints: ApiEndpoint[]
-}
-
-const initialNodes: Node[] = [
-  {
-    id: 'consumer_unit',
-    position: { x: 0, y: 0 },
-    draggable: true,
-    deletable: false,
-    data: { label: '🏠 Consumer Unit' },
-  },
-]
-
-const initialEdges: Edge[] = [
-  //   {
-  //     id: 'meter-consumer_unit',
-  //     source: 'meter',
-  //     target: 'consumer_unit',
-  //     type: 'powerFlow',
-  //     data: { kw: 0 }
-  //   },
-]
+const initialEdges: Edge[] = []
 
 const WS_DOT: Record<string, { color: string; title: string }> = {
   open: { color: '#22c55e', title: 'Live' },
@@ -88,7 +100,7 @@ function ToastStack({ toasts, onDismiss }: { toasts: Toast[]; onDismiss: (id: nu
 
 function Home() {
   const [nodes, setNodes, onNodesChange] = useNodesState(initialNodes)
-  const [edges, setEdges, onEdgesChange] = useEdgesState(initialEdges)
+  const [edges, setEdges, onEdgesChangeBase] = useEdgesState(initialEdges)
   const [gridModalOpen, setGridModalOpen] = useState(false)
   const [palette, setPalette] = useState<DeviceSpec[]>([])
   const [paletteLoading, setPaletteLoading] = useState(true)
@@ -96,6 +108,8 @@ function Home() {
   const reactFlowInstance = useRef<ReactFlowInstance | null>(null)
   const nodeIdCounter = useRef(10)
   const toastIdCounter = useRef(0)
+  const { screenToFlowPosition } = useReactFlow();
+  const [type] = useDnD();
 
   const dismissToast = useCallback((id: number) => {
     setToasts(prev => prev.filter(t => t.id !== id))
@@ -109,18 +123,22 @@ function Home() {
 
   const handleWsMessage = useCallback((msg: WsMessage) => {
     console.log('[ws]', msg)
+
     if (msg.type === 'device_commissioned') {
+      console.log('Handling device_commissioned message')
       const d = msg.data as { productName?: string; vendorName?: string }
       const name = [d.vendorName, d.productName].filter(Boolean).join(' ')
       addToast(`New device commissioned: ${name || 'Unknown device'}`)
     } else if (msg.type === 'power_update') {
-      const d = msg.data as { nodeId: number; endpointId: number; mw: number }
-      setEdges(prev => prev.map(e => {
-        if (e.source === 'meter' && e.target === 'consumer_unit' && e.type === 'powerFlow') {
-          return { ...e, data: { ...e.data, kw: d.mw } }
-        }
-        return e
-      }))
+      const d = msg.data as { nodeId: number; endpointId: number; clusterId: number; attributeId: number; value: number }
+      const key = attributeKey(d.clusterId, d.attributeId)
+      if (key) {
+        setNodes(nds => nds.map(n =>
+          n.data.nodeId === d.nodeId && n.data.endpointId === d.endpointId
+            ? { ...n, data: { ...n.data, [key]: d.value } }
+            : n
+        ))
+      }
     }
   }, [addToast])
 
@@ -148,7 +166,12 @@ function Home() {
   useEffect(() => {
     fetch('/api/devices')
       .then(r => r.ok ? r.json() : Promise.reject())
-      .then((data: { devices: ApiDevice[] }) => setPalette(data.devices))
+      .then((data: { devices: DeviceSpec[] }) => {
+        data.devices.forEach(d => {
+          d.label = "Meter Reference Point"
+        })
+        setPalette(data.devices)
+      })
       .catch(() => { })
       .finally(() => setPaletteLoading(false))
   }, [])
@@ -163,25 +186,64 @@ function Home() {
     e.dataTransfer.dropEffect = 'copy'
   }, [])
 
-  const onDrop = useCallback((e: React.DragEvent) => {
-    e.preventDefault()
-    const raw = e.dataTransfer.getData('application/reactflow')
-    if (!raw || !reactFlowInstance.current) return
-    const device: DeviceSpec = JSON.parse(raw)
-    //if (device.dropTarget !== 'canvas') return
+  // const onDrop = useCallback((e: React.DragEvent) => {
+  //   e.preventDefault()
+  //   const raw = e.dataTransfer.getData('application/reactflow')
+  //   if (!raw || !reactFlowInstance.current) return
+  //   const device: DeviceSpec = JSON.parse(raw)
+  //   //if (device.dropTarget !== 'canvas') return
 
-    const position = reactFlowInstance.current.screenToFlowPosition({ x: e.clientX, y: e.clientY })
-    const id = `node_${++nodeIdCounter.current}`
-    setNodes(prev => [
-      ...prev,
-      { id, position, draggable: true, data: { label: `${device.icon} ${device.label}` } },
-    ])
-    fetch(`/api/nodes/${id}`, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ x: position.x, y: position.y }),
-    }).catch(() => { })
-  }, [setNodes])
+  //   const position = reactFlowInstance.current.screenToFlowPosition({ x: e.clientX, y: e.clientY })
+  //   const id = `node_${++nodeIdCounter.current}`
+  //   setNodes(prev => [
+  //     ...prev,
+  //     { id, position, draggable: true, data: { label: `${device.icon} ${device.label}` } },
+  //   ])
+  //   fetch(`/api/nodes/${id}`, {
+  //     method: 'PUT',
+  //     headers: { 'Content-Type': 'application/json' },
+  //     body: JSON.stringify({ x: position.x, y: position.y }),
+  //   }).catch(() => { })
+  // }, [setNodes])
+
+  const onDrop = useCallback(
+    (e: React.DragEvent) => {
+      e.preventDefault();
+
+      const raw = e.dataTransfer.getData('application/reactflow')
+      if (!raw || !reactFlowInstance.current) return
+      const device: DeviceSpec = JSON.parse(raw)
+
+      const position = screenToFlowPosition({
+        x: e.clientX,
+        y: e.clientY,
+      });
+
+      const id = `node_${++nodeIdCounter.current}`
+
+      const newNode: Node = {
+        id,
+        type: 'device',
+        position,
+        draggable: true,
+        data: { label: device.label, nodeId: device.nodeId, endpointId: device.endpointId },
+      }
+
+      fetch(`/api/nodes/${id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          x: position.x,
+          y: position.y,
+          settings: { label: device.label, type: 'device', nodeId: device.nodeId, endpointId: device.endpointId },
+        }),
+      }).catch(() => { })
+
+      setNodes(prev => [...prev, newNode])
+
+    },
+    [screenToFlowPosition, type, setNodes],
+  );
 
   const onNodeDoubleClick = useCallback((_: React.MouseEvent, node: Node) => {
     if (node.id === 'meter') setGridModalOpen(true)
@@ -195,59 +257,72 @@ function Home() {
     }).catch(() => { })
   }, [])
 
+  const onEdgesChange = useCallback((changes: EdgeChange[]) => {
+    changes.filter(c => c.type === 'remove').forEach(c => {
+      fetch(`/api/edges/${(c as { id: string }).id}`, { method: 'DELETE' }).catch(() => { })
+    })
+    onEdgesChangeBase(changes)
+  }, [onEdgesChangeBase])
+
   const onConnect = useCallback((params: any) => {
-    setEdges((eds) => addEdge({ ...params, type: 'powerFlow', data: { kw: 0 } }, eds))
-  },
-    [],
-  );
+    const edgeId = [params.source, params.sourceHandle, params.target, params.targetHandle].filter(Boolean).join('-')
+    const newEdge = { ...params, id: edgeId, type: 'powerFlow', data: { kw: 0 } }
+    setEdges(eds => addEdge(newEdge, eds))
+    fetch('/api/edges', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        id: edgeId,
+        source: params.source,
+        target: params.target,
+        sourceHandle: params.sourceHandle ?? null,
+        targetHandle: params.targetHandle ?? null,
+      }),
+    }).catch(() => { })
+  }, [setEdges]);
 
   const onInit = useCallback((instance: ReactFlowInstance) => {
     reactFlowInstance.current = instance
     fetch('/api/nodes')
       .then(r => r.ok ? r.json() : Promise.reject())
-      .then((data: { nodes: SavedNodeConfig[] }) => {
-        setNodes(prev => {
-          const existingIds = new Set(prev.map(n => n.id))
-          const updated = prev.map(node => {
-            const saved = data.nodes.find(n => n.id === node.id)
-            return saved ? { ...node, position: { x: saved.x, y: saved.y } } : node
-          })
-          const added = data.nodes
-            .filter(n => !existingIds.has(n.id) && typeof n.settings?.label === 'string')
-            .map(n => ({
-              id: n.id,
-              position: { x: n.x, y: n.y },
-              draggable: true,
-              data: { label: n.settings.label as string },
-            }))
+      .then((data: { nodes: SavedNodeConfig[]; edges?: SavedEdgeConfig[] }) => {
+        const restoredNodes: Node[] = data.nodes.map(n => ({
+          id: n.id,
+          type: typeof n.settings?.type === 'string' ? n.settings.type as string : undefined,
+          position: { x: n.x, y: n.y },
+          draggable: true,
+          deletable: n.settings?.deletable !== false,
+          data: {
+            label: (n.settings?.label as string) ?? n.id,
+            nodeId: n.settings?.nodeId as number | undefined,
+            endpointId: n.settings?.endpointId as number | undefined,
+          },
+        }))
 
-          // Keep nodeIdCounter ahead of any restored node_N ids
-          for (const n of added) {
-            const m = n.id.match(/^node_(\d+)$/)
-            if (m) nodeIdCounter.current = Math.max(nodeIdCounter.current, parseInt(m[1]))
-          }
-          return [...updated, ...added]
-        })
+        for (const n of restoredNodes) {
+          const m = n.id.match(/^node_(\d+)$/)
+          if (m) nodeIdCounter.current = Math.max(nodeIdCounter.current, parseInt(m[1]))
+        }
+
+        setNodes(restoredNodes)
+
+        if (data.edges?.length) {
+          setEdges(data.edges.map(e => ({
+            id: e.id,
+            source: e.source,
+            target: e.target,
+            sourceHandle: e.sourceHandle,
+            targetHandle: e.targetHandle,
+            type: 'powerFlow',
+            data: { kw: 0 },
+          })))
+        }
+
         const cu = data.nodes.find(n => n.id === 'consumer_unit')
-        const refNode = instance.getNode('consumer_unit')
-        const w = refNode?.measured?.width ?? 150
-        const h = refNode?.measured?.height ?? 36
-        const x = (cu?.x ?? refNode?.position.x ?? 0) + w / 2
-        const y = (cu?.y ?? refNode?.position.y ?? 0) + h / 2
-        instance.setCenter(x, y, { zoom: 1 })
+        instance.setCenter((cu?.x ?? 0) + 75, (cu?.y ?? 0) + 18, { zoom: 1 })
       })
-      .catch(() => {
-        console.log('Failed to load saved node positions, using defaults')
-        const refNode = instance.getNode('consumer_unit')
-        const w = refNode?.measured?.width ?? 150
-        const h = refNode?.measured?.height ?? 36
-        instance.setCenter(
-          (refNode?.position.x ?? 0) + w / 2,
-          (refNode?.position.y ?? 0) + h / 2,
-          { zoom: 1 },
-        )
-      })
-  }, [setNodes])
+      .catch(() => console.log('Failed to load nodes from API'))
+  }, [setNodes, setEdges])
 
   return (
     <div style={{ display: 'flex', height: 'calc(100vh - 60px)' }}>
@@ -272,14 +347,14 @@ function Home() {
               onMouseLeave={e => (e.currentTarget.style.background = '')}
             >
               <div style={{ flex: 1, minWidth: 0 }}>
-                <div style={{ fontWeight: 500, color: '#1e293b' }}>0x{device.nodeId}</div>
+                <div style={{ fontWeight: 500, color: '#1e293b' }}>{device.label}</div>
               </div>
             </div>
           ))}
         </div>
       </aside>
 
-      <div className="wrapper" style={{ flex: 1, position: 'relative' }} onDrop={onDrop} onDragOver={onDragOver}>
+      <div className="reactflow-wrapper" style={{ flex: 1, position: 'relative' }} onDragOver={onDragOver}>
         <ReactFlow
           style={{ height: '100%' }}
           nodes={nodes}
@@ -287,10 +362,12 @@ function Home() {
           edges={edges}
           onEdgesChange={onEdgesChange}
           onConnect={onConnect}
+          nodeTypes={nodeTypes}
           edgeTypes={edgeTypes}
           onInit={onInit}
           onNodeDoubleClick={onNodeDoubleClick}
           onNodeDragStop={onNodeDragStop}
+          onDrop={onDrop}
           nodesDraggable={true}
           nodesConnectable={true}
           fitViewOptions={{ padding: 2 }}
@@ -314,4 +391,10 @@ function Home() {
   )
 }
 
-export default Home
+export default () => (
+  <ReactFlowProvider>
+    <DnDProvider>
+      <Home />
+    </DnDProvider>
+  </ReactFlowProvider>
+);
