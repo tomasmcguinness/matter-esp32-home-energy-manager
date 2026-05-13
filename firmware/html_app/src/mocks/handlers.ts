@@ -16,8 +16,9 @@ let devices: Device[] = [
     vendorName: 'Modbus',
     productName: 'TCP Adapter',
     endpoints: [
-      { endpointId: 1, label: 'Solax Inverter',   included: false, deviceTypes: [0x0017], parts:[] },
-      { endpointId: 2, label: 'FeedIn CT Clamp',  included: false, deviceTypes: [0x0510], parts:[] },
+      { endpointId: 0, label: 'Root Node',        included: false, deviceTypes: [0x0016], parts: [1, 2] },
+      { endpointId: 1, label: 'Solax Inverter',   included: false, deviceTypes: [0x0017], parts: [] },
+      { endpointId: 2, label: 'FeedIn CT Clamp',  included: false, deviceTypes: [0x0510], parts: [] },
     ],
   },
   {
@@ -25,8 +26,19 @@ let devices: Device[] = [
     vendorName: 'Shelly',
     productName: 'Pro 3EM',
     endpoints: [
-      { endpointId: 1, label: 'Grid Meter',        included: true,  deviceTypes: [1296], parts:[] },
-      { endpointId: 2, label: 'Solar Feed',         included: false, deviceTypes: [1296], parts:[] },
+      { endpointId: 0, label: 'Root Node',   included: false, deviceTypes: [0x0016], parts: [1] },
+      { endpointId: 1, label: 'Grid Meter',  included: true,  deviceTypes: [0x0512], parts: [2] },
+      { endpointId: 2, label: 'Grid Sensor', included: false, deviceTypes: [0x0510], parts: [] },
+    ],
+  },
+  {
+    nodeId: 30001,
+    vendorName: 'Cold Bear',
+    productName: 'Smart Meter',
+    endpoints: [
+      { endpointId: 0, label: 'Root Node',   included: false, deviceTypes: [0x0016], parts: [1,2] },
+      { endpointId: 1, label: 'Meter Reference Point',  included: true,  deviceTypes: [0x0512], parts: [2] },
+      { endpointId: 2, label: 'Electrical Sensor', included: false, deviceTypes: [0x0514], parts: [] },
     ],
   },
 ]
@@ -46,6 +58,23 @@ export const handlers = [
 
   http.get('/api/devices', () => {
     return HttpResponse.json({ devices })
+  }),
+
+  http.get('/api/devices/simple', () => {
+    const ELECTRICAL_SENSOR_DT = 0x0510
+    const simpleDevices = devices.flatMap(d => {
+      const ep0 = d.endpoints.find(e => e.endpointId === 0)
+      const ep0Parts = ep0?.parts ?? []
+      const candidates = ep0Parts.length > 0
+        ? d.endpoints.filter(e => ep0Parts.includes(e.endpointId))
+        : d.endpoints.filter(e => e.endpointId !== 0)
+      return candidates.map(ep => {
+        const partEps = (ep.parts ?? []).map(id => d.endpoints.find(e => e.endpointId === id)).filter(Boolean)
+        const hasPowerMeasurement = [ep, ...partEps].some(e => e?.deviceTypes?.includes(ELECTRICAL_SENSOR_DT))
+        return { nodeId: d.nodeId, endpointId: ep.endpointId, label: ep.label || `EP${ep.endpointId}`, hasPowerMeasurement }
+      })
+    })
+    return HttpResponse.json({ devices: simpleDevices })
   }),
 
   http.put('/api/devices/:nodeId/endpoints/:endpointId', async ({ params, request }) => {

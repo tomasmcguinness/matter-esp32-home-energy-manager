@@ -39,7 +39,7 @@ function DeviceNode({ data }: { data: DeviceNodeData }) {
     <div style={{ border: '1px solid #e2e8f0', borderRadius: 6, background: '#fff', overflow: 'hidden', minWidth: 148 }}>
       <Handle type="target" position={Position.Left} id="power-in" />
       <div style={{ padding: '4px 10px', background: '#f1f5f9', borderBottom: '1px solid #e2e8f0', fontSize: 12, fontWeight: 600, color: '#1e293b', whiteSpace: 'nowrap' }}>
-        {data.label}
+        0x{data.nodeId?.toString(16).toUpperCase()}
       </div>
       <div style={{ padding: '5px 10px', display: 'grid', gridTemplateColumns: 'auto 1fr', columnGap: 8, rowGap: 2, fontSize: 12 }}>
         <span style={{ color: '#94a3b8' }}>V</span><span>{fmt(data.voltage, 'V')}</span>
@@ -59,7 +59,8 @@ type SavedEdgeConfig = { id: string; source: string; target: string; sourceHandl
 type DeviceSpec = {
   nodeId: number,
   endpointId: number,
-  label: string
+  label: string,
+  hasPowerMeasurement: boolean,
 }
 
 const initialNodes: Node[] = []
@@ -129,7 +130,7 @@ function Home() {
       const d = msg.data as { productName?: string; vendorName?: string }
       const name = [d.vendorName, d.productName].filter(Boolean).join(' ')
       addToast(`New device commissioned: ${name || 'Unknown device'}`)
-    } else if (msg.type === 'power_update') {
+    } else {
       const d = msg.data as { nodeId: number; endpointId: number; clusterId: number; attributeId: number; value: number }
       const key = attributeKey(d.clusterId, d.attributeId)
       if (key) {
@@ -164,12 +165,9 @@ function Home() {
   }, [setNodes, setEdges])
 
   useEffect(() => {
-    fetch('/api/devices')
+    fetch('/api/devices/simple')
       .then(r => r.ok ? r.json() : Promise.reject())
       .then((data: { devices: DeviceSpec[] }) => {
-        data.devices.forEach(d => {
-          d.label = "Meter Reference Point"
-        })
         setPalette(data.devices)
       })
       .catch(() => { })
@@ -185,26 +183,6 @@ function Home() {
     e.preventDefault()
     e.dataTransfer.dropEffect = 'copy'
   }, [])
-
-  // const onDrop = useCallback((e: React.DragEvent) => {
-  //   e.preventDefault()
-  //   const raw = e.dataTransfer.getData('application/reactflow')
-  //   if (!raw || !reactFlowInstance.current) return
-  //   const device: DeviceSpec = JSON.parse(raw)
-  //   //if (device.dropTarget !== 'canvas') return
-
-  //   const position = reactFlowInstance.current.screenToFlowPosition({ x: e.clientX, y: e.clientY })
-  //   const id = `node_${++nodeIdCounter.current}`
-  //   setNodes(prev => [
-  //     ...prev,
-  //     { id, position, draggable: true, data: { label: `${device.icon} ${device.label}` } },
-  //   ])
-  //   fetch(`/api/nodes/${id}`, {
-  //     method: 'PUT',
-  //     headers: { 'Content-Type': 'application/json' },
-  //     body: JSON.stringify({ x: position.x, y: position.y }),
-  //   }).catch(() => { })
-  // }, [setNodes])
 
   const onDrop = useCallback(
     (e: React.DragEvent) => {
@@ -339,7 +317,7 @@ function Home() {
           )}
           {palette.map(device => (
             <div
-              key={device.nodeId}
+              key={`${device.nodeId}-${device.endpointId}`}
               draggable
               onDragStart={e => onDragStart(e, device)}
               style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 14px', cursor: 'grab', userSelect: 'none', transition: 'background .12s' }}
@@ -348,6 +326,10 @@ function Home() {
             >
               <div style={{ flex: 1, minWidth: 0 }}>
                 <div style={{ fontWeight: 500, color: '#1e293b' }}>{device.label}</div>
+                <div style={{ fontSize: 11, color: '#94a3b8', marginTop: 1 }}>
+                  EP {device.endpointId}
+                  {device.hasPowerMeasurement && <span style={{ marginLeft: 6, color: '#f59e0b' }}>⚡</span>}
+                </div>
               </div>
             </div>
           ))}
