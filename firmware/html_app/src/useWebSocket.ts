@@ -16,6 +16,9 @@ export function useWebSocket(onMessage: (msg: WsMessage) => void): WsReadyState 
   onMessageRef.current = onMessage
 
   const connect = useCallback(() => {
+
+    console.log('Connecting to WebSocket...')
+    
     const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
     const ws = new WebSocket(`${proto}//${window.location.host}/ws`)
     wsRef.current = ws

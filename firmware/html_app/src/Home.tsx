@@ -7,47 +7,44 @@ import { DnDProvider, useDnD } from './DnDContext';
 
 const edgeTypes = { powerFlow: PowerFlowEdge }
 
-function attributeKey(clusterId: number, attributeId: number): 'voltage' | 'current' | 'power' | null {
-  if (clusterId === 0x0090) {   // Electrical Power Measurement
-    if (attributeId === 0x0004) return 'voltage'
-    if (attributeId === 0x0005) return 'current'
-    if (attributeId === 0x0008) return 'power'
-  }
-  return null
-}
-
 function fmt(value: number | undefined, unit: string): string {
-  return value === undefined ? '—' : `${value.toFixed(2)} ${unit}`
+  return value === undefined ? '—' : `${(value/1000).toFixed(1)} ${unit}`
 }
 
 function ConsumerUnitNode({ data }: { data: { label: string } }) {
   return (
-    <div style={{ border: '1px solid #e2e8f0', borderRadius: 6, background: '#fff', overflow: 'hidden' }}>
-      <Handle type="target" position={Position.Left} id="power-in" />
+    <>
       <div style={{ padding: '5px 12px', fontSize: 13, fontWeight: 500, color: '#1e293b', whiteSpace: 'nowrap' }}>
         {data.label}
       </div>
-      <Handle type="source" position={Position.Right} id="power-out" />
-    </div>
+      <Handle type="target" position={Position.Left} id="grid" />
+      <Handle type="target" position={Position.Left} id="inverter" />
+      <Handle type="source" position={Position.Right} id="out" />
+    </>
   )
 }
 
-type DeviceNodeData = { label: string; nodeId?: number; endpointId?: number; voltage?: number; current?: number; power?: number }
+type PowerMeasurement = { voltage?: number, current?: number, power?: number }
+type DeviceNodeData = { label: string; nodeId?: number; endpointId?: number; power?: PowerMeasurement }
 
 function DeviceNode({ data }: { data: DeviceNodeData }) {
+  
+  console.log('Rendering DeviceNode with data:', data)
+
   return (
-    <div style={{ border: '1px solid #e2e8f0', borderRadius: 6, background: '#fff', overflow: 'hidden', minWidth: 148 }}>
+    <>
       <Handle type="target" position={Position.Left} id="power-in" />
       <div style={{ padding: '4px 10px', background: '#f1f5f9', borderBottom: '1px solid #e2e8f0', fontSize: 12, fontWeight: 600, color: '#1e293b', whiteSpace: 'nowrap' }}>
         0x{data.nodeId?.toString(16).toUpperCase()}
       </div>
+
       <div style={{ padding: '5px 10px', display: 'grid', gridTemplateColumns: 'auto 1fr', columnGap: 8, rowGap: 2, fontSize: 12 }}>
-        <span style={{ color: '#94a3b8' }}>V</span><span>{fmt(data.voltage, 'V')}</span>
-        <span style={{ color: '#94a3b8' }}>I</span><span>{fmt(data.current, 'A')}</span>
-        <span style={{ color: '#94a3b8' }}>P</span><span>{fmt(data.power, 'W')}</span>
+        <span style={{ color: '#94a3b8' }}>V</span><span>{fmt(data.power?.voltage, 'V')}</span>
+        <span style={{ color: '#94a3b8' }}>I</span><span>{fmt(data.power?.current, 'A')}</span>
+        <span style={{ color: '#94a3b8' }}>P</span><span>{fmt(data.power?.power, 'W')}</span>
       </div>
       <Handle type="source" position={Position.Right} id="power-out" />
-    </div>
+    </>
   )
 }
 
@@ -131,12 +128,30 @@ function Home() {
       const name = [d.vendorName, d.productName].filter(Boolean).join(' ')
       addToast(`New device commissioned: ${name || 'Unknown device'}`)
     } else {
+
+      console.log('[ws]', 'Handling attribute update message')
+
       const d = msg.data as { nodeId: number; endpointId: number; clusterId: number; attributeId: number; value: number }
-      const key = attributeKey(d.clusterId, d.attributeId)
-      if (key) {
+
+      let powerMeasurement: PowerMeasurement = {}
+
+      if (d.clusterId == 144) // Electrical Power Measurement
+      {
+        switch (d.attributeId) {
+          case 0x04:
+            powerMeasurement.voltage = d.value;
+            break;
+          case 0x05:
+            powerMeasurement.current = d.value;
+            break;
+          case 0x08:
+            powerMeasurement.power = d.value;
+            break;
+        }
+
         setNodes(nds => nds.map(n =>
-          n.data.nodeId === d.nodeId && n.data.endpointId === d.endpointId
-            ? { ...n, data: { ...n.data, [key]: d.value } }
+          n.data.nodeId === d.nodeId //&& n.data.endpointId === d.endpointId
+            ? { ...n, data: { ...n.data, power: { ...(n.data.power ?? {}), ...powerMeasurement } } }
             : n
         ))
       }

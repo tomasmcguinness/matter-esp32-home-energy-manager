@@ -457,6 +457,7 @@ static void on_attribute_data_cb(uint64_t node_id,
                                  const chip::app::StatusIB &status)
 {
     using namespace chip::Protocols::InteractionModel;
+
     if (!data || status.mStatus != Status::Success)
         return;
 
@@ -466,36 +467,23 @@ static void on_attribute_data_cb(uint64_t node_id,
     }
      
     return;
-
-    if (data->GetType() == chip::TLV::kTLVType_Null)
-        return;
-
-    int64_t raw_mw = 0;
-    if (data->Get(raw_mw) != CHIP_NO_ERROR)
-        return;
-
-    double mw = (double)raw_mw / 1000000.0;
-
-    char json[128];
-    snprintf(json, sizeof(json),
-             "{\"type\":\"power_update\",\"data\":{\"nodeId\":%llu,\"endpointId\":%u,\"mw\":%.3f}}",
-             (unsigned long long)node_id, (unsigned)path.mEndpointId, mw);
-
-    ws_server_broadcast(json, strlen(json));
 }
 
 void processElectralPowerMeasurementUpdate(uint64_t node_id,
                                            const chip::app::ConcreteDataAttributePath &path,
                                            chip::TLV::TLVReader *data)
 {
+    ESP_LOGI(TAG, "Received attribute update for node 0x%016llX, cluster 0x%04X, attribute 0x%04X", node_id, path.mClusterId, path.mAttributeId);
+
+    // Ignore anything that isn't from the ElectrialPowerMeasurement cluster.
+    //
     if (path.mClusterId != ElectricalPowerMeasurement::Id) {
         return;
     }
 
-    // For simplicity, we assume the attribute value is always ActivePower in mW.
-    if (path.mAttributeId != ElectricalPowerMeasurement::Attributes::ActivePower::Id) {
-        return;
-    }
+    // if (path.mAttributeId != ElectricalPowerMeasurement::Attributes::ActivePower::Id) {
+    //     return;
+    // }
 
     if (data->GetType() == chip::TLV::kTLVType_Null) {
         return;
@@ -504,17 +492,17 @@ void processElectralPowerMeasurementUpdate(uint64_t node_id,
     // We need to decided how to "AI" this data at this point.
     // At this point, all we know is that an Electrial Power Measurement cluster has sent some data.
     //
-
     int64_t raw_value = 0;
+
     if (data->Get(raw_value) != CHIP_NO_ERROR) {
         return;
     }
 
-    double value = (double)raw_value / 1000000.0;
+    ESP_LOGI(TAG, "Sending 'attribute_update' for node 0x%016llX, cluster 0x%04X, attribute 0x%04X", node_id, path.mClusterId, path.mAttributeId);
 
     char json[128];
 
-    snprintf(json, sizeof(json), "{\"nodeId\":%llu,\"endpointId\":%u, \"clusterId\":%u, \"attributeId\":%u, \"value\":%.3f}", (unsigned long long)node_id, (unsigned)path.mEndpointId, path.mClusterId, path.mAttributeId, value);
+    snprintf(json, sizeof(json), "{\"type\":\"attribute_update\",\"data\":{\"nodeId\":%llu,\"endpointId\":%u, \"clusterId\":%u, \"attributeId\":%u, \"value\":%lld}}", (unsigned long long)node_id, (unsigned)path.mEndpointId, path.mClusterId, path.mAttributeId, raw_value);
 
     ws_server_broadcast(json, strlen(json));
 }
