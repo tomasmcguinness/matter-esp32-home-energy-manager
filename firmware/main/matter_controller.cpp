@@ -543,8 +543,8 @@ esp_err_t matter_controller_subscribe(void)
                 auto *cmd = chip::Platform::New<esp_matter::controller::subscribe_command>(std::get<0>(*args),
                     std::move(attr_paths), 
                     std::move(event_paths), 
-                    5, 
-                    30, 
+                    1, // MinInterval 1 second 
+                    30, // MaxInterval 30 seconds
                     false, // <--- Keep Subscriptions
                     on_attribute_data_cb,
                     nullptr,

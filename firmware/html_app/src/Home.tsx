@@ -29,7 +29,7 @@ type DeviceNodeData = { label: string; nodeId?: number; endpointId?: number; pow
 
 function DeviceNode({ data }: { data: DeviceNodeData }) {
   
-  console.log('Rendering DeviceNode with data:', data)
+  //console.log('Rendering DeviceNode with data:', data)
 
   return (
     <>
@@ -106,7 +106,7 @@ function Home() {
   const reactFlowInstance = useRef<ReactFlowInstance | null>(null)
   const nodeIdCounter = useRef(10)
   const toastIdCounter = useRef(0)
-  const { screenToFlowPosition } = useReactFlow();
+  const { screenToFlowPosition, getNodes } = useReactFlow();
   const [type] = useDnD();
 
   const dismissToast = useCallback((id: number) => {
@@ -154,6 +154,15 @@ function Home() {
             ? { ...n, data: { ...n.data, power: { ...(n.data.power ?? {}), ...powerMeasurement } } }
             : n
         ))
+
+        const sourceNode = getNodes().find(n => n.data.nodeId === d.nodeId)
+        if (sourceNode && powerMeasurement.power !== undefined) {
+          setEdges(eds => eds.map(e =>
+            e.source === sourceNode.id
+              ? { ...e, data: { ...(e.data ?? {}), kw: powerMeasurement.power! / 1000000 } }
+              : e
+          ))
+        }
       }
     }
   }, [addToast])

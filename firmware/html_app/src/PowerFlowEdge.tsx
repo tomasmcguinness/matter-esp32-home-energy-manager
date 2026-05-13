@@ -82,7 +82,7 @@ export function PowerFlowEdge({
         >
           <animateMotion
             dur={`${duration}s`}
-            begin={`${-(i / chevronCount) * duration}s`}
+            begin={`${-((i + 0.5) / chevronCount) * duration}s`}
             repeatCount="indefinite"
             path={animPath}
             rotate="auto"
