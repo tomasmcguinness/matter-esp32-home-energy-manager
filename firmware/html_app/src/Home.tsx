@@ -38,10 +38,10 @@ function DeviceNode({ data }: { data: DeviceNodeData }) {
         0x{data.nodeId?.toString(16).toUpperCase()}
       </div>
 
-      <div style={{ padding: '5px 10px', display: 'grid', gridTemplateColumns: 'auto 1fr', columnGap: 8, rowGap: 2, fontSize: 12 }}>
-        <span style={{ color: '#94a3b8' }}>V</span><span>{fmt(data.power?.voltage, 'V')}</span>
-        <span style={{ color: '#94a3b8' }}>I</span><span>{fmt(data.power?.current, 'A')}</span>
-        <span style={{ color: '#94a3b8' }}>P</span><span>{fmt(data.power?.power, 'W')}</span>
+      <div style={{ minWidth: '100px', padding: '5px 10px', display: 'grid', gridTemplateColumns: 'auto 1fr', columnGap: 8, rowGap: 2, fontSize: 12 }}>
+        <span style={{ color: '#94a3b8' }}>V</span><span style={{textAlign: 'right'}}>{fmt(data.power?.voltage, 'V')}</span>
+        <span style={{ color: '#94a3b8' }}>I</span><span style={{textAlign: 'right'}}>{fmt(data.power?.current, 'A')}</span>
+        <span style={{ color: '#94a3b8' }}>P</span><span style={{textAlign: 'right'}}>{fmt(data.power?.power, 'W')}</span>
       </div>
       <Handle type="source" position={Position.Right} id="power-out" />
     </>
@@ -120,7 +120,7 @@ function Home() {
   }, [dismissToast])
 
   const handleWsMessage = useCallback((msg: WsMessage) => {
-    console.log('[ws]', msg)
+    //console.log('[ws]', msg)
 
     if (msg.type === 'device_commissioned') {
       console.log('Handling device_commissioned message')
@@ -129,7 +129,7 @@ function Home() {
       addToast(`New device commissioned: ${name || 'Unknown device'}`)
     } else {
 
-      console.log('[ws]', 'Handling attribute update message')
+      //console.log('[ws]', 'Handling attribute update message')
 
       const d = msg.data as { nodeId: number; endpointId: number; clusterId: number; attributeId: number; value: number }
 
@@ -156,6 +156,7 @@ function Home() {
         ))
 
         const sourceNode = getNodes().find(n => n.data.nodeId === d.nodeId)
+
         if (sourceNode && powerMeasurement.power !== undefined) {
           setEdges(eds => eds.map(e =>
             e.source === sourceNode.id

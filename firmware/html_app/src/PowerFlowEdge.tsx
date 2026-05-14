@@ -31,7 +31,7 @@ export function PowerFlowEdge({
   const { kw } = (data ?? {}) as PowerFlowData
   const isIdle = kw === 0
   const isOut = kw && kw < 0;
-  const formattedkw = kw?.toFixed(1);
+  const formattedkw = kw == undefined ? '' : Math.abs(kw!).toFixed(1);
 
   // For 'out', animate along the geometrically reversed path so chevrons travel
   // target → source. Swapping source ↔ target with their handle positions gives
@@ -42,7 +42,7 @@ export function PowerFlowEdge({
 
   const lineColor = isIdle ? 'rgba(148,163,184,0.4)' : isOut ? 'rgba(99,153,34,0.3)' : 'rgba(226,75,74,0.3)'
   const chevronColor = isOut ? 'rgba(99,153,34,0.8)' : 'rgba(226,75,74,0.8)'
-  const size = kwToChevronSize(kw)
+  const size = kwToChevronSize(Math.abs(kw!))
   const chevronPoints = `-${size},-${(size * 0.7).toFixed(1)} 0,0 -${size},${(size * 0.7).toFixed(1)}`
 
   const { chevronCount, duration } = useMemo(() => {
