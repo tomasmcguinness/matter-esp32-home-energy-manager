@@ -111,6 +111,28 @@ export const handlers = [
     return HttpResponse.json({})
   }),
 
+  http.put('/api/topology/grid', async ({ request }) => {
+    const body = (await request.json()) as { nodeId: number; endpointId: number; label: string }
+    const cu = nodeConfigs.find(n => n.id === 'consumer_unit')
+    const cuX = cu?.x ?? 0
+    const cuY = cu?.y ?? 0
+    const nodeX = cuX - 220
+    const nodeY = cuY
+    const nodeId = 'grid_meter'
+    const edgeId = 'grid_meter-power-out-consumer_unit-grid'
+    const settings = { label: body.label, type: 'device', nodeId: body.nodeId, endpointId: body.endpointId }
+    const existing = nodeConfigs.find(n => n.id === nodeId)
+    if (existing) {
+      existing.x = nodeX; existing.y = nodeY; existing.settings = settings
+    } else {
+      nodeConfigs.push({ id: nodeId, x: nodeX, y: nodeY, settings })
+    }
+    return HttpResponse.json({
+      node: { id: nodeId, x: nodeX, y: nodeY, settings },
+      edge: { id: edgeId, source: nodeId, sourceHandle: 'power-out', target: 'consumer_unit', targetHandle: 'grid' },
+    })
+  }),
+
   http.put('/api/nodes/:nodeId/settings', async ({ params, request }) => {
     const id = params.nodeId as string
     const body = (await request.json()) as Record<string, unknown>

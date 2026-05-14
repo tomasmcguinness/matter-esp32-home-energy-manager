@@ -146,7 +146,8 @@ static esp_err_t devices_simple_get_handler(httpd_req_t *req)
 
         cJSON *endpoints = cJSON_GetObjectItemCaseSensitive(dev, "endpoints");
 
-        bool has_power = false;
+        bool has_electrical_sensor = false;
+        uint16_t endpoint_id = 0;
 
         cJSON *ep;
         cJSON_ArrayForEach(ep, endpoints)
@@ -157,7 +158,8 @@ static esp_err_t devices_simple_get_handler(httpd_req_t *req)
             cJSON_ArrayForEach(deviceType, deviceTypes)
             {
                 if ((int)deviceType->valuedouble == 0x0510) {
-                    has_power = true;
+                    has_electrical_sensor = true;
+                    endpoint_id = (uint16_t)cJSON_GetObjectItemCaseSensitive(ep, "endpointId")->valuedouble;
                     break;
                 }
             }
@@ -165,7 +167,9 @@ static esp_err_t devices_simple_get_handler(httpd_req_t *req)
 
         cJSON *simple = cJSON_CreateObject();
         cJSON_AddNumberToObject(simple, "nodeId", (double)node_id);
-        cJSON_AddBoolToObject(simple, "hasPowerMeasurement", has_power);
+        cJSON_AddNumberToObject(simple, "endpointId", (double)endpoint_id);
+        cJSON_AddStringToObject(simple, "label", "device name");    
+        cJSON_AddBoolToObject(simple, "hasElectricalSensor", has_electrical_sensor);
         cJSON_AddItemToArray(out_arr, simple);
     }
     cJSON_Delete(full);
@@ -685,6 +689,124 @@ static esp_err_t device_name_put_handler(httpd_req_t *req)
     return ESP_OK;
 }
 
+static esp_err_t topology_grid_put_handler(httpd_req_t *req)
+{
+    if (req->content_len <= 0 || req->content_len > MAX_POST_BODY)
+    {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid body");
+        return ESP_FAIL;
+    }
+    char body[MAX_POST_BODY + 1];
+    int received = 0;
+    while (received < (int)req->content_len)
+    {
+        int r = httpd_req_recv(req, body + received, req->content_len - received);
+        if (r <= 0)
+        {
+            httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Recv failed");
+            return ESP_FAIL;
+        }
+        received += r;
+    }
+    body[received] = '\0';
+
+    cJSON *req_json = cJSON_Parse(body);
+    if (!req_json)
+    {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Bad JSON");
+        return ESP_FAIL;
+    }
+    cJSON *matter_node_id_j = cJSON_GetObjectItemCaseSensitive(req_json, "nodeId");
+    cJSON *matter_ep_id_j   = cJSON_GetObjectItemCaseSensitive(req_json, "endpointId");
+    cJSON *label_j          = cJSON_GetObjectItemCaseSensitive(req_json, "label");
+    if (!cJSON_IsNumber(matter_node_id_j) || !cJSON_IsNumber(matter_ep_id_j) || !cJSON_IsString(label_j))
+    {
+        cJSON_Delete(req_json);
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Missing nodeId/endpointId/label");
+        return ESP_FAIL;
+    }
+    double matter_node_id = matter_node_id_j->valuedouble;
+    double matter_ep_id   = matter_ep_id_j->valuedouble;
+    const char *label     = label_j->valuestring;
+
+    // Locate the consumer_unit node to derive the grid meter's position
+    float cu_x = 0.0f, cu_y = 0.0f;
+    char *all_json = node_manager_get_all_json();
+    if (all_json)
+    {
+        cJSON *all = cJSON_Parse(all_json);
+        free(all_json);
+        if (all)
+        {
+            cJSON *nodes_arr = cJSON_GetObjectItemCaseSensitive(all, "nodes");
+            cJSON *n;
+            cJSON_ArrayForEach(n, nodes_arr)
+            {
+                cJSON *id_j2 = cJSON_GetObjectItemCaseSensitive(n, "id");
+                if (cJSON_IsString(id_j2) && strcmp(id_j2->valuestring, "consumer_unit") == 0)
+                {
+                    cJSON *xj = cJSON_GetObjectItemCaseSensitive(n, "x");
+                    cJSON *yj = cJSON_GetObjectItemCaseSensitive(n, "y");
+                    if (cJSON_IsNumber(xj)) cu_x = (float)xj->valuedouble;
+                    if (cJSON_IsNumber(yj)) cu_y = (float)yj->valuedouble;
+                    break;
+                }
+            }
+            cJSON_Delete(all);
+        }
+    }
+
+    float node_x = cu_x - 220.0f;
+    float node_y = cu_y;
+
+    cJSON *settings = cJSON_CreateObject();
+    cJSON_AddStringToObject(settings, "label", label);
+    cJSON_AddStringToObject(settings, "type", "device");
+    cJSON_AddNumberToObject(settings, "nodeId", matter_node_id);
+    cJSON_AddNumberToObject(settings, "endpointId", matter_ep_id);
+    char *settings_str = cJSON_PrintUnformatted(settings);
+    cJSON_Delete(settings);
+
+    esp_err_t err = node_manager_upsert("grid_meter", node_x, node_y, settings_str);
+    free(settings_str);
+    if (err != ESP_OK)
+    {
+        cJSON_Delete(req_json);
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Node persist failed");
+        return ESP_FAIL;
+    }
+
+    const char *edge_id = "grid_meter-power-out-consumer_unit-grid";
+    err = node_manager_upsert_edge(edge_id, "grid_meter", "consumer_unit", "power-out", "grid");
+    cJSON_Delete(req_json);
+    if (err != ESP_OK)
+    {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Edge persist failed");
+        return ESP_FAIL;
+    }
+
+    cJSON *resp = cJSON_CreateObject();
+
+    cJSON *node_obj = cJSON_AddObjectToObject(resp, "node");
+    cJSON_AddStringToObject(node_obj, "id", "grid_meter");
+    cJSON_AddNumberToObject(node_obj, "x", node_x);
+    cJSON_AddNumberToObject(node_obj, "y", node_y);
+    cJSON *resp_settings = cJSON_AddObjectToObject(node_obj, "settings");
+    cJSON_AddStringToObject(resp_settings, "label", label);
+    cJSON_AddStringToObject(resp_settings, "type", "device");
+    cJSON_AddNumberToObject(resp_settings, "nodeId", matter_node_id);
+    cJSON_AddNumberToObject(resp_settings, "endpointId", matter_ep_id);
+
+    cJSON *edge_obj = cJSON_AddObjectToObject(resp, "edge");
+    cJSON_AddStringToObject(edge_obj, "id", edge_id);
+    cJSON_AddStringToObject(edge_obj, "source", "grid_meter");
+    cJSON_AddStringToObject(edge_obj, "sourceHandle", "power-out");
+    cJSON_AddStringToObject(edge_obj, "target", "consumer_unit");
+    cJSON_AddStringToObject(edge_obj, "targetHandle", "grid");
+
+    return send_json(req, resp, 200);
+}
+
 static esp_err_t edge_post_handler(httpd_req_t *req)
 {
     if (req->content_len <= 0 || req->content_len > MAX_POST_BODY)
@@ -845,7 +967,7 @@ esp_err_t web_server_start(void)
     config.lru_purge_enable = true;
     config.uri_match_fn = httpd_uri_match_wildcard;
     config.stack_size = 12288;
-    config.max_uri_handlers = 22;
+    config.max_uri_handlers = 23;
     config.max_resp_headers = 20;
 
     httpd_handle_t server = NULL;
@@ -870,6 +992,7 @@ esp_err_t web_server_start(void)
     const httpd_uri_t node_settings_put = {.uri = "/api/nodes/*/settings", .method = HTTP_PUT, .handler = node_settings_put_handler};
     const httpd_uri_t node_put = {.uri = "/api/nodes/*", .method = HTTP_PUT, .handler = node_put_handler};
     const httpd_uri_t node_delete = {.uri = "/api/nodes/*", .method = HTTP_DELETE, .handler = node_delete_handler};
+    const httpd_uri_t topology_grid_put = {.uri = "/api/topology/grid", .method = HTTP_PUT, .handler = topology_grid_put_handler};
     const httpd_uri_t edge_post = {.uri = "/api/edges", .method = HTTP_POST, .handler = edge_post_handler};
     const httpd_uri_t edge_delete = {.uri = "/api/edges/*", .method = HTTP_DELETE, .handler = edge_delete_handler};
     const httpd_uri_t debug_files_list = {.uri = "/debug/files", .method = HTTP_GET, .handler = debug_files_list_handler};
@@ -890,6 +1013,7 @@ esp_err_t web_server_start(void)
     httpd_register_uri_handler(server, &node_settings_put);
     httpd_register_uri_handler(server, &node_put);
     httpd_register_uri_handler(server, &node_delete);
+    httpd_register_uri_handler(server, &topology_grid_put);
     httpd_register_uri_handler(server, &edge_post);
     httpd_register_uri_handler(server, &edge_delete);
     httpd_register_uri_handler(server, &debug_files_list);

@@ -22,13 +22,13 @@ function fmt(value: number | undefined, unit: string): string {
 
 function ConsumerUnitNode({ data }: { data: { label: string } }) {
   return (
-    <div style={{ border: '1px solid #e2e8f0', borderRadius: 6, background: '#fff', overflow: 'hidden' }}>
-      <Handle type="target" position={Position.Left} id="power-in" />
+    <>
+      <Handle type="target" position={Position.Left} id="grid" />
+      <Handle type="source" position={Position.Right} id="solar" />
       <div style={{ padding: '5px 12px', fontSize: 13, fontWeight: 500, color: '#1e293b', whiteSpace: 'nowrap' }}>
         {data.label}
       </div>
-      <Handle type="source" position={Position.Right} id="power-out" />
-    </div>
+    </>
   )
 }
 
@@ -36,7 +36,7 @@ type DeviceNodeData = { label: string; nodeId?: number; endpointId?: number; vol
 
 function DeviceNode({ data }: { data: DeviceNodeData }) {
   return (
-    <div style={{ border: '1px solid #e2e8f0', borderRadius: 6, background: '#fff', overflow: 'hidden', minWidth: 148 }}>
+    <div style={{ minWidth: 148 }}>
       <Handle type="target" position={Position.Left} id="power-in" />
       <div style={{ padding: '4px 10px', background: '#f1f5f9', borderBottom: '1px solid #e2e8f0', fontSize: 12, fontWeight: 600, color: '#1e293b', whiteSpace: 'nowrap' }}>
         {data.label}
@@ -152,7 +152,11 @@ function Topology() {
           nds.filter(n => n.selected && n.deletable !== false).map(n => n.id)
         )
         if (deletedIds.size === 0) return nds
-        setEdges(eds => eds.filter(e => !deletedIds.has(e.source) && !deletedIds.has(e.target)))
+        setEdges(eds => {
+          const removed = eds.filter(e => deletedIds.has(e.source) || deletedIds.has(e.target))
+          removed.forEach(e => fetch(`/api/edges/${e.id}`, { method: 'DELETE' }).catch(() => { }))
+          return eds.filter(e => !deletedIds.has(e.source) && !deletedIds.has(e.target))
+        })
         for (const id of deletedIds) {
           fetch(`/api/nodes/${id}`, { method: 'DELETE' }).catch(() => { })
         }
