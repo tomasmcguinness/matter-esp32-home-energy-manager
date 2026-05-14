@@ -9,6 +9,7 @@
 #include "nvs_flash.h"
 #include "ethernet_init.h"
 #include "mdns.h"
+#include "esp_sntp.h"
 
 #include "managers/device_manager.h"
 #include "managers/node_manager.h"
@@ -20,7 +21,14 @@
 static const char *TAG = "main";
 
 static EventGroupHandle_t s_net_event_group;
-#define IPV6_READY_BIT BIT0
+#define IPV6_READY_BIT  BIT0
+#define SNTP_SYNCED_BIT BIT1
+
+static void time_sync_cb(struct timeval *tv)
+{
+    ESP_LOGI(TAG, "SNTP sync complete: %lld", (long long)tv->tv_sec);
+    xEventGroupSetBits(s_net_event_group, SNTP_SYNCED_BIT);
+}
 
 static void eth_event_handler(void *arg, esp_event_base_t event_base,
                               int32_t event_id, void *event_data)
@@ -51,10 +59,14 @@ static void got_ip_event_handler(void *arg, esp_event_base_t event_base,
     ip_event_got_ip_t *event = (ip_event_got_ip_t *)event_data;
     ESP_LOGI(TAG, "Got IP: " IPSTR, IP2STR(&event->ip_info.ip));
 
-    //mdns_init();
-    // mdns_hostname_set("home-energy-manager");
-    // mdns_instance_name_set("Home Energy Manager");
-    // mdns_service_add(NULL, "_http", "_tcp", 80, NULL, 0);
+    setenv("TZ", "GMT0BST,M3.5.0/1,M10.5.0", 1);
+    tzset();
+
+    sntp_set_time_sync_notification_cb(time_sync_cb);
+    esp_sntp_setoperatingmode(SNTP_OPMODE_POLL);
+    esp_sntp_setservername(0, "pool.ntp.org");
+    esp_sntp_init();
+    ESP_LOGI(TAG, "SNTP started");
 }
 
 extern "C" void app_main(void)
@@ -87,6 +99,11 @@ extern "C" void app_main(void)
 
     ESP_LOGI(TAG, "Waiting for IPv6 link-local address...");
     xEventGroupWaitBits(s_net_event_group, IPV6_READY_BIT, pdFALSE, pdTRUE, pdMS_TO_TICKS(15000));
+
+    ESP_LOGI(TAG, "Waiting for SNTP sync...");
+    xEventGroupWaitBits(s_net_event_group, SNTP_SYNCED_BIT, pdFALSE, pdTRUE, pdMS_TO_TICKS(10000));
+    if (!(xEventGroupGetBits(s_net_event_group) & SNTP_SYNCED_BIT))
+        ESP_LOGW(TAG, "SNTP sync timed out — time may be incorrect");
 
     // TODO Wait for some updates from esp-matter to ensure the P4 works 
     // correctly before trying to use the Platform mDNS.
