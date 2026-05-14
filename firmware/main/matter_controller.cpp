@@ -15,6 +15,8 @@
 #include "managers/device_manager.h"
 #include "managers/node_manager.h"
 #include "ws_server.h"
+#include "power_logger.h"
+#include "cJSON.h"
 
 #include <app/server/Dnssd.h>
 #include <controller/CHIPDeviceController.h>
@@ -469,6 +471,40 @@ static void on_attribute_data_cb(uint64_t node_id,
     return;
 }
 
+// Grid sensor identity, loaded once from the node manager when subscribing.
+static uint64_t s_grid_node_id     = 0;
+static uint16_t s_grid_endpoint_id = 0;
+
+static void load_grid_sensor_identity(void)
+{
+    char *json = node_manager_get_all_json();
+    if (!json) return;
+
+    cJSON *root = cJSON_Parse(json);
+    free(json);
+    if (!root) return;
+
+    cJSON *nodes = cJSON_GetObjectItemCaseSensitive(root, "nodes");
+    cJSON *n;
+    cJSON_ArrayForEach(n, nodes)
+    {
+        cJSON *id_j = cJSON_GetObjectItemCaseSensitive(n, "id");
+        if (!cJSON_IsString(id_j) || strcmp(id_j->valuestring, "grid_meter") != 0)
+            continue;
+        cJSON *settings = cJSON_GetObjectItemCaseSensitive(n, "settings");
+        cJSON *nid_j    = cJSON_GetObjectItemCaseSensitive(settings, "nodeId");
+        cJSON *eid_j    = cJSON_GetObjectItemCaseSensitive(settings, "endpointId");
+        if (cJSON_IsNumber(nid_j) && cJSON_IsNumber(eid_j))
+        {
+            s_grid_node_id     = (uint64_t)nid_j->valuedouble;
+            s_grid_endpoint_id = (uint16_t)eid_j->valuedouble;
+            ESP_LOGI(TAG, "Grid sensor: node 0x%llx EP %u", (unsigned long long)s_grid_node_id, s_grid_endpoint_id);
+        }
+        break;
+    }
+    cJSON_Delete(root);
+}
+
 void processElectralPowerMeasurementUpdate(uint64_t node_id,
                                            const chip::app::ConcreteDataAttributePath &path,
                                            chip::TLV::TLVReader *data)
@@ -498,6 +534,14 @@ void processElectralPowerMeasurementUpdate(uint64_t node_id,
         return;
     }
 
+    if (node_id == s_grid_node_id &&
+        path.mEndpointId == s_grid_endpoint_id &&
+        path.mAttributeId == ElectricalPowerMeasurement::Attributes::ActivePower::Id)
+    {
+        ESP_LOGI(TAG, "Recording grid power value");
+        power_logger_sample((int32_t)raw_value);
+    }
+
     ESP_LOGI(TAG, "Sending 'attribute_update' for node 0x%016llX, cluster 0x%04X, attribute 0x%04X", node_id, path.mClusterId, path.mAttributeId);
 
     char json[128];
@@ -509,6 +553,8 @@ void processElectralPowerMeasurementUpdate(uint64_t node_id,
 
 esp_err_t matter_controller_subscribe(void)
 {
+    load_grid_sensor_identity();
+
     static constexpr size_t kMaxSensors = 32;
     uint64_t node_ids[kMaxSensors];
     uint16_t endpoint_ids[kMaxSensors];

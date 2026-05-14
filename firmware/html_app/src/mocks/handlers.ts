@@ -111,6 +111,28 @@ export const handlers = [
     return HttpResponse.json({})
   }),
 
+  http.get('/api/data/grid', ({ request }) => {
+    const url = new URL(request.url)
+    const date = url.searchParams.get('date') ?? new Date().toISOString().slice(0, 10)
+    const [year, month, day] = date.split('-').map(Number)
+    const startOfDay = Math.floor(new Date(year, month - 1, day).getTime() / 1000)
+    const endOfDay = startOfDay + 86400
+    const nowSec = Math.floor(Date.now() / 1000)
+    const endTime = Math.min(nowSec, endOfDay)
+    const records = []
+    for (let t = startOfDay; t < endTime; t += 60) {
+      const hour = (t - startOfDay) / 3600
+      const base = 400
+      const morning = hour >= 7 && hour < 9 ? 1800 * Math.sin(Math.PI * (hour - 7) / 2) : 0
+      const evening = hour >= 17 && hour < 21 ? 2500 * Math.sin(Math.PI * (hour - 17) / 4) : 0
+      const solar = hour >= 9 && hour < 17 ? 3000 * Math.sin(Math.PI * (hour - 9) / 8) : 0
+      const noise = (Math.random() - 0.5) * 150
+      // positive = import, negative = export
+      records.push({ minute: t, power_w: Math.round(base + morning + evening - solar + noise) })
+    }
+    return HttpResponse.json({ records })
+  }),
+
   http.put('/api/topology/grid', async ({ request }) => {
     const body = (await request.json()) as { nodeId: number; endpointId: number; label: string }
     const cu = nodeConfigs.find(n => n.id === 'consumer_unit')

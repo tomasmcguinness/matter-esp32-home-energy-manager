@@ -13,6 +13,7 @@
 
 #include "managers/device_manager.h"
 #include "managers/node_manager.h"
+#include "power_logger.h"
 #include "matter_controller.h"
 #include "ws_server.h"
 
@@ -689,6 +690,36 @@ static esp_err_t device_name_put_handler(httpd_req_t *req)
     return ESP_OK;
 }
 
+static esp_err_t data_grid_get_handler(httpd_req_t *req)
+{
+    char date[16] = {0};
+    size_t qlen = httpd_req_get_url_query_len(req);
+    if (qlen > 0 && qlen < 32)
+    {
+        char query[32];
+        if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK)
+            httpd_query_key_value(query, "date", date, sizeof(date));
+    }
+    if (!date[0])
+    {
+        time_t now = time(NULL);
+        struct tm tm_info;
+        localtime_r(&now, &tm_info);
+        strftime(date, sizeof(date), "%Y-%m-%d", &tm_info);
+    }
+
+    char *json = power_logger_day_json(date);
+    if (!json)
+    {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "OOM");
+        return ESP_FAIL;
+    }
+    httpd_resp_set_type(req, "application/json");
+    esp_err_t err = httpd_resp_sendstr(req, json);
+    free(json);
+    return err;
+}
+
 static esp_err_t topology_grid_put_handler(httpd_req_t *req)
 {
     if (req->content_len <= 0 || req->content_len > MAX_POST_BODY)
@@ -967,7 +998,7 @@ esp_err_t web_server_start(void)
     config.lru_purge_enable = true;
     config.uri_match_fn = httpd_uri_match_wildcard;
     config.stack_size = 12288;
-    config.max_uri_handlers = 23;
+    config.max_uri_handlers = 24;
     config.max_resp_headers = 20;
 
     httpd_handle_t server = NULL;
@@ -992,6 +1023,7 @@ esp_err_t web_server_start(void)
     const httpd_uri_t node_settings_put = {.uri = "/api/nodes/*/settings", .method = HTTP_PUT, .handler = node_settings_put_handler};
     const httpd_uri_t node_put = {.uri = "/api/nodes/*", .method = HTTP_PUT, .handler = node_put_handler};
     const httpd_uri_t node_delete = {.uri = "/api/nodes/*", .method = HTTP_DELETE, .handler = node_delete_handler};
+    const httpd_uri_t data_grid_get = {.uri = "/api/data/grid", .method = HTTP_GET, .handler = data_grid_get_handler};
     const httpd_uri_t topology_grid_put = {.uri = "/api/topology/grid", .method = HTTP_PUT, .handler = topology_grid_put_handler};
     const httpd_uri_t edge_post = {.uri = "/api/edges", .method = HTTP_POST, .handler = edge_post_handler};
     const httpd_uri_t edge_delete = {.uri = "/api/edges/*", .method = HTTP_DELETE, .handler = edge_delete_handler};
@@ -1013,6 +1045,7 @@ esp_err_t web_server_start(void)
     httpd_register_uri_handler(server, &node_settings_put);
     httpd_register_uri_handler(server, &node_put);
     httpd_register_uri_handler(server, &node_delete);
+    httpd_register_uri_handler(server, &data_grid_get);
     httpd_register_uri_handler(server, &topology_grid_put);
     httpd_register_uri_handler(server, &edge_post);
     httpd_register_uri_handler(server, &edge_delete);

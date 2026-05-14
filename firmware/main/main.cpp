@@ -15,6 +15,7 @@
 #include "matter_controller.h"
 #include "web_server.h"
 #include "sd_card.h"
+#include "power_logger.h"
 
 static const char *TAG = "main";
 
@@ -66,6 +67,7 @@ extern "C" void app_main(void)
 
     ESP_ERROR_CHECK(node_manager_init());
     ESP_ERROR_CHECK(device_manager_init());
+    ESP_ERROR_CHECK(power_logger_init());
 
     uint8_t eth_port_cnt = 0;
     esp_eth_handle_t *eth_handles;
