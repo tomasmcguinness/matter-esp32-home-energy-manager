@@ -1,12 +1,12 @@
 ---
 id: TASK-6
-title: Handle the pairing of a Bridge device and locate Solar Power devices
-status: In Progress
+title: Handle the pairing of a Bridge device
+status: Done
 assignee: []
 created_date: '2026-05-05 14:11'
-updated_date: '2026-05-07 05:37'
+updated_date: '2026-05-15 05:38'
 labels: []
-milestone: m-0
+milestone: m-2
 dependencies: []
 ---
 

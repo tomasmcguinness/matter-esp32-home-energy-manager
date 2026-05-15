@@ -62,6 +62,7 @@ export const handlers = [
 
   http.get('/api/devices/simple', () => {
     const ELECTRICAL_SENSOR_DT = 0x0510
+    const SOLAR_POWER_DT = 0x0017
     const simpleDevices = devices.flatMap(d => {
       const ep0 = d.endpoints.find(e => e.endpointId === 0)
       const ep0Parts = ep0?.parts ?? []
@@ -70,8 +71,9 @@ export const handlers = [
         : d.endpoints.filter(e => e.endpointId !== 0)
       return candidates.map(ep => {
         const partEps = (ep.parts ?? []).map(id => d.endpoints.find(e => e.endpointId === id)).filter(Boolean)
-        const hasPowerMeasurement = [ep, ...partEps].some(e => e?.deviceTypes?.includes(ELECTRICAL_SENSOR_DT))
-        return { nodeId: d.nodeId, endpointId: ep.endpointId, label: ep.label || `EP${ep.endpointId}`, hasPowerMeasurement }
+        const hasElectricalSensor = [ep, ...partEps].some(e => e?.deviceTypes?.includes(ELECTRICAL_SENSOR_DT))
+        const hasSolarPower = [ep, ...partEps].some(e => e?.deviceTypes?.includes(SOLAR_POWER_DT))
+        return { nodeId: d.nodeId, endpointId: ep.endpointId, label: ep.label || `EP${ep.endpointId}`, hasElectricalSensor, hasSolarPower }
       })
     })
     return HttpResponse.json({ devices: simpleDevices })
@@ -152,6 +154,28 @@ export const handlers = [
     return HttpResponse.json({
       node: { id: nodeId, x: nodeX, y: nodeY, settings },
       edge: { id: edgeId, source: nodeId, sourceHandle: 'power-out', target: 'consumer_unit', targetHandle: 'grid' },
+    })
+  }),
+
+  http.put('/api/topology/solar', async ({ request }) => {
+    const body = (await request.json()) as { nodeId: number; endpointId: number; label: string }
+    const cu = nodeConfigs.find(n => n.id === 'consumer_unit')
+    const cuX = cu?.x ?? 0
+    const cuY = cu?.y ?? 0
+    const nodeX = cuX + 220
+    const nodeY = cuY
+    const nodeId = 'solar_inverter'
+    const edgeId = 'solar_inverter-power-out-consumer_unit-solar_input'
+    const settings = { label: body.label, type: 'device', nodeId: body.nodeId, endpointId: body.endpointId }
+    const existing = nodeConfigs.find(n => n.id === nodeId)
+    if (existing) {
+      existing.x = nodeX; existing.y = nodeY; existing.settings = settings
+    } else {
+      nodeConfigs.push({ id: nodeId, x: nodeX, y: nodeY, settings })
+    }
+    return HttpResponse.json({
+      node: { id: nodeId, x: nodeX, y: nodeY, settings },
+      edge: { id: edgeId, source: nodeId, sourceHandle: 'power-out', target: 'consumer_unit', targetHandle: 'solar_input' },
     })
   }),
 

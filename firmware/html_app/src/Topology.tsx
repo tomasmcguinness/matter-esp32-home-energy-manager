@@ -15,7 +15,7 @@ function ConsumerUnitNode({ data }: { data: { label: string } }) {
   return (
     <>
       <Handle type="target" position={Position.Left} id="grid" />
-      <Handle type="source" position={Position.Right} id="solar" />
+      <Handle type="target" position={Position.Left} id="solar_input" />
       <div style={{ padding: '5px 12px', fontSize: 13, fontWeight: 500, color: '#1e293b', whiteSpace: 'nowrap' }}>
         {data.label}
       </div>
