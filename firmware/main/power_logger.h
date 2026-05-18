@@ -15,7 +15,9 @@ typedef struct {
 
 esp_err_t  power_logger_init(void);
 void       power_logger_sample(int32_t power_mw);
-char      *power_logger_day_json(const char *date_str); // caller must free
+char      *power_logger_day_json(const char *date_str);    // caller must free
+esp_err_t  power_logger_rollup_hourly(const char *date_str);
+char      *power_logger_hourly_json(const char *date_str); // caller must free
 
 #ifdef __cplusplus
 }

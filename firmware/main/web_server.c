@@ -976,7 +976,7 @@ static esp_err_t topology_solar_put_handler(httpd_req_t *req)
 static esp_err_t forecast_solar_fetch_handler(httpd_req_t *req)
 {
     cJSON *forecast = NULL;
-    esp_err_t err = solar_forecast_fetch_today(&forecast);
+    esp_err_t err = solar_forecast_fetch_tomorrow(&forecast);
     if (err != ESP_OK) {
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Forecast fetch failed");
         return ESP_FAIL;

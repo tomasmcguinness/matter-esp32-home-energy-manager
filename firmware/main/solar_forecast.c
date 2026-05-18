@@ -47,7 +47,7 @@ static esp_err_t http_event_handler(esp_http_client_event_t *evt)
     return ESP_OK;
 }
 
-esp_err_t solar_forecast_fetch_today(cJSON **out_json)
+esp_err_t solar_forecast_fetch_tomorrow(cJSON **out_json)
 {
     resp_buf_t buf = {
         .data = malloc(INITIAL_BUF_CAP + 1),
@@ -90,12 +90,18 @@ esp_err_t solar_forecast_fetch_today(cJSON **out_json)
         return ESP_FAIL;
     }
 
-    // Determine today's date string
+    // Determine tomorrow's date by normalising to today's midnight then advancing one day.
+    // Using mktime to normalise handles DST transitions correctly.
     time_t now = time(NULL);
     struct tm tm_info;
     localtime_r(&now, &tm_info);
-    char today[11];
-    strftime(today, sizeof(today), "%Y-%m-%d", &tm_info);
+    tm_info.tm_hour = 0;
+    tm_info.tm_min  = 0;
+    tm_info.tm_sec  = 0;
+    tm_info.tm_mday += 1;
+    mktime(&tm_info);
+    char tomorrow[11];
+    strftime(tomorrow, sizeof(tomorrow), "%Y-%m-%d", &tm_info);
 
     // Extract result.watts  — keys are "YYYY-MM-DD HH:MM:SS"
     cJSON *result  = cJSON_GetObjectItemCaseSensitive(raw, "result");
@@ -103,16 +109,17 @@ esp_err_t solar_forecast_fetch_today(cJSON **out_json)
     cJSON *wh_day  = cJSON_GetObjectItemCaseSensitive(result, "watt_hours_day");
 
     cJSON *out = cJSON_CreateObject();
-    cJSON_AddStringToObject(out, "date", today);
+    cJSON_AddStringToObject(out, "date", tomorrow);
 
     cJSON *estimates = cJSON_AddArrayToObject(out, "estimates");
 
     if (cJSON_IsObject(watts)) {
         cJSON *entry;
         cJSON_ArrayForEach(entry, watts) {
-            // Key format: "2024-01-15 09:00:00"
+            // Key format: "2024-01-15 09:00:00" — only include tomorrow's entries
             const char *key = entry->string;
             if (!key || strlen(key) < 16) continue;
+            if (strncmp(key, tomorrow, 10) != 0) continue;
 
             // Extract "HH:MM" from the key
             char time_str[6];
@@ -128,9 +135,9 @@ esp_err_t solar_forecast_fetch_today(cJSON **out_json)
 
     int total_wh = 0;
     if (cJSON_IsObject(wh_day)) {
-        cJSON *day_entry;
-        cJSON_ArrayForEach(day_entry, wh_day) {
-            total_wh += (int)day_entry->valuedouble;
+        cJSON *day_entry = cJSON_GetObjectItemCaseSensitive(wh_day, tomorrow);
+        if (day_entry) {
+            total_wh = (int)day_entry->valuedouble;
         }
     }
     cJSON_AddNumberToObject(out, "total_wh", total_wh);
