@@ -179,6 +179,16 @@ export const handlers = [
     })
   }),
 
+  http.delete('/api/nodes/:nodeId', ({ params }) => {
+    const id = params.nodeId as string
+    nodeConfigs = nodeConfigs.filter(n => n.id !== id)
+    return HttpResponse.json({})
+  }),
+
+  http.delete('/api/edges/:edgeId', () => {
+    return HttpResponse.json({})
+  }),
+
   http.put('/api/nodes/:nodeId/settings', async ({ params, request }) => {
     const id = params.nodeId as string
     const body = (await request.json()) as Record<string, unknown>
@@ -189,6 +199,19 @@ export const handlers = [
       nodeConfigs.push({ id, x: 0, y: 0, settings: body })
     }
     return HttpResponse.json({})
+  }),
+
+  http.post('/api/forecast/solar/fetch', () => {
+    const today = new Date().toISOString().slice(0, 10)
+    const estimates = []
+    for (let h = 6; h <= 20; h++) {
+      // Bell curve centred at solar noon (13:00), peak ~3500 W
+      const x = (h - 13) / 4
+      const watts = Math.max(0, Math.round(3500 * Math.exp(-x * x) + (Math.random() - 0.5) * 80))
+      estimates.push({ time: `${String(h).padStart(2, '0')}:00`, watts })
+    }
+    const total_wh = estimates.reduce((s, e) => s + e.watts, 0)
+    return HttpResponse.json({ date: today, estimates, total_wh })
   }),
 
   powerWs.addEventListener('connection', ({ client }) => {

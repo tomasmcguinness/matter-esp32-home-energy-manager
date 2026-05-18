@@ -4,6 +4,7 @@ import Home from './Home.tsx'
 import Topology from './Topology.tsx'
 import Devices from './Devices.tsx'
 import Data from './Data.tsx'
+import Forecast from './Forecast.tsx'
 import Settings from './Settings.tsx'
 
 import '@xyflow/react/dist/style.css';
@@ -29,6 +30,9 @@ function App() {
                 <NavLink className="nav-link" to="/data">Data</NavLink>
               </li>
               <li className="nav-item">
+                <NavLink className="nav-link" to="/forecast">Forecast</NavLink>
+              </li>
+              <li className="nav-item">
                 <NavLink className="nav-link" to="/devices">Devices</NavLink>
               </li>
               <li className="nav-item">
@@ -42,6 +46,7 @@ function App() {
         <Route path="/" element={<Home />} />
         <Route path="/topology" element={<Topology />} />
         <Route path="/data" element={<Data />} />
+        <Route path="/forecast" element={<Forecast />} />
         <Route path="/devices" element={<div className="container"><Devices /></div>} />
         <Route path="/settings" element={<div className="container"><Settings /></div>} />
       </Routes>

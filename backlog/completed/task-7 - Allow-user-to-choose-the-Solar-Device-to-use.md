@@ -1,10 +1,10 @@
 ---
 id: TASK-7
-title: Allow user to choose the Solar Device to user
-status: In Progress
+title: Allow user to choose the Solar Device to use
+status: Done
 assignee: []
 created_date: '2026-05-15 05:38'
-updated_date: '2026-05-15 05:39'
+updated_date: '2026-05-15 05:55'
 labels: []
 milestone: m-2
 dependencies: []

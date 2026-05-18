@@ -49,8 +49,20 @@ function UnconfiguredSlot({ label, description, onConfigure }: SlotProps) {
   )
 }
 
-function ConfiguredSlot({ label, device, onReconfigure }: { label: string; device: SimpleDevice; onReconfigure: () => void }) {
+function TrashIcon() {
+  return (
+    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <polyline points="3 6 5 6 21 6" />
+      <path d="M19 6l-1 14a2 2 0 01-2 2H8a2 2 0 01-2-2L5 6" />
+      <path d="M10 11v6M14 11v6" />
+      <path d="M9 6V4a1 1 0 011-1h4a1 1 0 011 1v2" />
+    </svg>
+  )
+}
+
+function ConfiguredSlot({ label, device, onReconfigure, onDelete }: { label: string; device: SimpleDevice; onReconfigure: () => void; onDelete: () => void }) {
   const [hovered, setHovered] = useState(false)
+  const [trashHovered, setTrashHovered] = useState(false)
   return (
     <div
       onMouseEnter={() => setHovered(true)}
@@ -58,6 +70,7 @@ function ConfiguredSlot({ label, device, onReconfigure }: { label: string; devic
       onClick={onReconfigure}
       style={{
         flex: 1,
+        position: 'relative',
         border: `2px solid ${hovered ? '#3b82f6' : '#86efac'}`,
         borderRadius: 10,
         padding: '20px 16px',
@@ -66,11 +79,34 @@ function ConfiguredSlot({ label, device, onReconfigure }: { label: string; devic
         alignItems: 'center',
         gap: 6,
         cursor: 'pointer',
-        background: hovered ? '#f0fdf4' : '#f0fdf4',
-        transition: 'border-color .15s, background .15s',
+        background: '#f0fdf4',
+        transition: 'border-color .15s',
         minWidth: 0,
       }}
     >
+      <button
+        onClick={e => { e.stopPropagation(); onDelete() }}
+        onMouseEnter={() => setTrashHovered(true)}
+        onMouseLeave={() => setTrashHovered(false)}
+        title="Remove"
+        style={{
+          position: 'absolute',
+          top: 8,
+          right: 8,
+          padding: 4,
+          border: 'none',
+          borderRadius: 4,
+          background: 'none',
+          cursor: 'pointer',
+          color: trashHovered ? '#ef4444' : '#cbd5e1',
+          transition: 'color .12s',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+        }}
+      >
+        <TrashIcon />
+      </button>
       <div style={{ fontSize: 10, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '.08em', color: '#16a34a' }}>{label}</div>
       <div style={{ fontWeight: 600, fontSize: 14, color: '#1e293b', textAlign: 'center' }}>{device.label}</div>
       <div style={{ fontSize: 12, color: '#64748b' }}>
@@ -323,6 +359,20 @@ function Home() {
     setSolarModalOpen(false)
   }
 
+  function handleGridDelete() {
+    fetch('/api/edges/grid_meter-power-out-consumer_unit-grid', { method: 'DELETE' })
+      .then(() => fetch('/api/nodes/grid_meter', { method: 'DELETE' }))
+      .then(() => setGridSensor(null))
+      .catch(() => { })
+  }
+
+  function handleSolarDelete() {
+    fetch('/api/edges/solar_inverter-power-out-consumer_unit-solar_input', { method: 'DELETE' })
+      .then(() => fetch('/api/nodes/solar_inverter', { method: 'DELETE' }))
+      .then(() => setSolarInverter(null))
+      .catch(() => { })
+  }
+
   return (
     <div style={{ padding: '32px 40px', maxWidth: 900, margin: '0 auto' }}>
       {gridModalOpen && (
@@ -345,7 +395,7 @@ function Home() {
         <SectionLabel>Inputs</SectionLabel>
         <div style={{ display: 'flex', gap: 16 }}>
           {gridSensor ? (
-            <ConfiguredSlot label="Grid" device={gridSensor} onReconfigure={() => setGridModalOpen(true)} />
+            <ConfiguredSlot label="Grid" device={gridSensor} onReconfigure={() => setGridModalOpen(true)} onDelete={handleGridDelete} />
           ) : (
             <UnconfiguredSlot
               label="Grid"
@@ -354,7 +404,7 @@ function Home() {
             />
           )}
           {solarInverter ? (
-            <ConfiguredSlot label="Solar Inverter" device={solarInverter} onReconfigure={() => setSolarModalOpen(true)} />
+            <ConfiguredSlot label="Solar Inverter" device={solarInverter} onReconfigure={() => setSolarModalOpen(true)} onDelete={handleSolarDelete} />
           ) : (
             <UnconfiguredSlot
               label="Solar Inverter"

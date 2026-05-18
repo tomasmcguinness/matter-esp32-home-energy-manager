@@ -14,6 +14,7 @@
 #include "managers/device_manager.h"
 #include "managers/node_manager.h"
 #include "power_logger.h"
+#include "solar_forecast.h"
 #include "matter_controller.h"
 #include "ws_server.h"
 
@@ -972,6 +973,17 @@ static esp_err_t topology_solar_put_handler(httpd_req_t *req)
     return send_json(req, resp, 200);
 }
 
+static esp_err_t forecast_solar_fetch_handler(httpd_req_t *req)
+{
+    cJSON *forecast = NULL;
+    esp_err_t err = solar_forecast_fetch_today(&forecast);
+    if (err != ESP_OK) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Forecast fetch failed");
+        return ESP_FAIL;
+    }
+    return send_json(req, forecast, 200);
+}
+
 static esp_err_t edge_post_handler(httpd_req_t *req)
 {
     if (req->content_len <= 0 || req->content_len > MAX_POST_BODY)
@@ -1162,6 +1174,7 @@ esp_err_t web_server_start(void)
     const httpd_uri_t topology_solar_put = {.uri = "/api/topology/solar", .method = HTTP_PUT, .handler = topology_solar_put_handler};
     const httpd_uri_t edge_post = {.uri = "/api/edges", .method = HTTP_POST, .handler = edge_post_handler};
     const httpd_uri_t edge_delete = {.uri = "/api/edges/*", .method = HTTP_DELETE, .handler = edge_delete_handler};
+    const httpd_uri_t forecast_solar_fetch = {.uri = "/api/forecast/solar/fetch", .method = HTTP_POST, .handler = forecast_solar_fetch_handler};
     const httpd_uri_t debug_files_list = {.uri = "/debug/files", .method = HTTP_GET, .handler = debug_files_list_handler};
     const httpd_uri_t debug_files_get = {.uri = "/debug/files/*", .method = HTTP_GET, .handler = debug_files_get_handler};
     const httpd_uri_t static_files = {.uri = "/*", .method = HTTP_GET, .handler = static_get_handler};
@@ -1185,6 +1198,7 @@ esp_err_t web_server_start(void)
     httpd_register_uri_handler(server, &topology_solar_put);
     httpd_register_uri_handler(server, &edge_post);
     httpd_register_uri_handler(server, &edge_delete);
+    httpd_register_uri_handler(server, &forecast_solar_fetch);
     httpd_register_uri_handler(server, &debug_files_list);
     httpd_register_uri_handler(server, &debug_files_get);
 
