@@ -34,6 +34,8 @@
 #include <setup_payload/QRCodeSetupPayloadParser.h>
 #include <setup_payload/SetupPayload.h>
 
+#include "commands/pairing_command.h"
+
 using namespace chip;
 using namespace chip::app::Clusters;
 
@@ -334,11 +336,11 @@ esp_err_t matter_controller_commission_on_network(const char *onboarding_payload
 
     chip::NodeId node_id = matter_controller_allocate_node_id();
 
-    esp_matter::controller::pairing_command_callbacks_t callbacks = {
+    home_energy_manager::controller::pairing_command_callbacks_t callbacks = {
         .commissioning_success_callback = on_commissioning_success_callback,
         .commissioning_failure_callback = on_commissioning_failure_callback};
 
-    esp_matter::controller::pairing_command::get_instance().set_callbacks(callbacks);
+    home_energy_manager::controller::pairing_command::get_instance().set_callbacks(callbacks);
 
     ESP_LOGI(TAG, "Attempting to commission node %llu", node_id);
     ESP_LOGI(TAG, "SetupCode %u", payload.setUpPINCode);
@@ -352,7 +354,8 @@ esp_err_t matter_controller_commission_on_network(const char *onboarding_payload
     }
 
     chip::DeviceLayer::PlatformMgr().LockChipStack();
-    esp_matter::controller::pairing_code(node_id, onboarding_payload);
+    //home_energy_manager::controller::pairing_command::get_instance().pairing_on_network(node_id, payload.setUpPINCode);
+    home_energy_manager::controller::pairing_command::get_instance().pairing_code(node_id, onboarding_payload);
     chip::DeviceLayer::PlatformMgr().UnlockChipStack();
 
     if (xSemaphoreTake(s_commission_ctx.done, pdMS_TO_TICKS(60000)) != pdTRUE)
