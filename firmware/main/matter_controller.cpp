@@ -342,7 +342,14 @@ esp_err_t matter_controller_commission_on_network(const char *onboarding_payload
 
     ESP_LOGI(TAG, "Attempting to commission node %llu", node_id);
     ESP_LOGI(TAG, "SetupCode %u", payload.setUpPINCode);
-    ESP_LOGI(TAG, "Discriminator: %u", payload.discriminator.GetLongValue());
+    if (payload.discriminator.IsShortDiscriminator())
+    {
+        ESP_LOGI(TAG, "Discriminator: %u (short)", payload.discriminator.GetShortValue());
+    }
+    else
+    {
+        ESP_LOGI(TAG, "Discriminator: %u (long)", payload.discriminator.GetLongValue());
+    }
 
     chip::DeviceLayer::PlatformMgr().LockChipStack();
     esp_matter::controller::pairing_code(node_id, onboarding_payload);
