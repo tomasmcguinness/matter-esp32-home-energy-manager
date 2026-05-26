@@ -6,6 +6,7 @@ import Devices from './Devices.tsx'
 import Data from './Data.tsx'
 import Forecast from './Forecast.tsx'
 import Settings from './Settings.tsx'
+import Test from './Test.tsx'
 
 import '@xyflow/react/dist/style.css';
 
@@ -38,6 +39,9 @@ function App() {
               <li className="nav-item">
                 <NavLink className="nav-link" to="/settings">Settings</NavLink>
               </li>
+              <li className="nav-item">
+                <NavLink className="nav-link" to="/test">Test</NavLink>
+              </li>
             </ul>
           </div>
         </div>
@@ -49,6 +53,7 @@ function App() {
         <Route path="/forecast" element={<Forecast />} />
         <Route path="/devices" element={<div className="container"><Devices /></div>} />
         <Route path="/settings" element={<div className="container"><Settings /></div>} />
+        <Route path="/test" element={<div className="container"><Test /></div>} />
       </Routes>
     </>
   )

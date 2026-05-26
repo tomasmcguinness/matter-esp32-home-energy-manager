@@ -201,6 +201,48 @@ export const handlers = [
     return HttpResponse.json({})
   }),
 
+  http.get('/api/forecast/surplus', ({ request }) => {
+    const url = new URL(request.url)
+    const date = url.searchParams.get('date') ?? new Date(Date.now() + 86400000).toISOString().slice(0, 10)
+    const [y, mo, d] = date.split('-').map(Number)
+    const slots = Array.from({ length: 24 }, (_, h) => {
+      const solar       = h >= 9  && h < 17 ? 3000 * Math.sin(Math.PI * (h - 9)  / 8) : 0
+      const consumption = 400
+        + (h >= 7  && h < 9  ? 1800 * Math.sin(Math.PI * (h - 7)  / 2) : 0)
+        + (h >= 17 && h < 21 ? 2500 * Math.sin(Math.PI * (h - 17) / 4) : 0)
+      const hour_ts = Math.floor(new Date(y, mo - 1, d, h).getTime() / 1000)
+      return { hour_ts, surplus_w: Math.round(solar - consumption) }
+    })
+    return HttpResponse.json({ date, slots })
+  }),
+
+  http.get('/api/forecast/consumption', ({ request }) => {
+    const url = new URL(request.url)
+    const date = url.searchParams.get('date') ?? new Date(Date.now() + 86400000).toISOString().slice(0, 10)
+    const [y, mo, d] = date.split('-').map(Number)
+    const slots = Array.from({ length: 24 }, (_, h) => {
+      const base    = 400
+      const morning = h >= 7  && h < 9  ? 1800 * Math.sin(Math.PI * (h - 7)  / 2) : 0
+      const evening = h >= 17 && h < 21 ? 2500 * Math.sin(Math.PI * (h - 17) / 4) : 0
+      const solar   = h >= 9  && h < 17 ? 3000 * Math.sin(Math.PI * (h - 9)  / 8) : 0
+      const hour_ts = Math.floor(new Date(y, mo - 1, d, h).getTime() / 1000)
+      return { hour_ts, power_w: Math.round(base + morning + evening - solar) }
+    })
+    return HttpResponse.json({ date, slots })
+  }),
+
+  http.post('/api/test/generate-sample-data', () => {
+    return HttpResponse.json({})
+  }),
+
+  http.post('/api/test/rollup-hourly', () => {
+    return HttpResponse.json({})
+  }),
+
+  http.post('/api/test/consumption-forecast/compute', () => {
+    return HttpResponse.json({})
+  }),
+
   http.post('/api/forecast/solar/fetch', () => {
     const today = new Date().toISOString().slice(0, 10)
     const estimates = []

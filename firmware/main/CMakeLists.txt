@@ -8,6 +8,7 @@ idf_component_register(SRCS
         "sd_card.c"
         "power_logger.c"
         "solar_forecast.c"
+        "consumption_forecast.c"
     INCLUDE_DIRS "."
     PRIV_INCLUDE_DIRS  "." "${ESP_MATTER_PATH}/examples/common/utils"
     PRIV_REQUIRES fatfs sdmmc driver json esp_eth ethernet_init nvs_flash button esp_matter esp_matter_controller esp_http_server esp_http_client

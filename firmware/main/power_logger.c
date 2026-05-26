@@ -1,4 +1,5 @@
 #include "power_logger.h"
+#include "consumption_forecast.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -21,17 +22,26 @@ static void schedule_midnight_rollup(void);
 
 static void on_midnight_timer(void *arg)
 {
-    // Roll up yesterday's minute data into hourly averages.
     time_t now = time(NULL);
     struct tm tm_info;
     localtime_r(&now, &tm_info);
-    // We fired at midnight so "now" is the new day — yesterday is one day back.
-    tm_info.tm_mday -= 1;
-    mktime(&tm_info);
+
+    // Yesterday: one day before the new day we just entered.
+    struct tm yesterday_tm = tm_info;
+    yesterday_tm.tm_mday -= 1;
+    mktime(&yesterday_tm);
     char yesterday[11];
-    strftime(yesterday, sizeof(yesterday), "%Y-%m-%d", &tm_info);
+    strftime(yesterday, sizeof(yesterday), "%Y-%m-%d", &yesterday_tm);
+
+    // Tomorrow: one day ahead, for the consumption forecast.
+    struct tm tomorrow_tm = tm_info;
+    tomorrow_tm.tm_mday += 1;
+    mktime(&tomorrow_tm);
+    char tomorrow[11];
+    strftime(tomorrow, sizeof(tomorrow), "%Y-%m-%d", &tomorrow_tm);
 
     power_logger_rollup_hourly(yesterday);
+    consumption_forecast_compute(tomorrow);
     schedule_midnight_rollup();
 }
 

@@ -3,13 +3,18 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <stdio.h>
 
 #include "esp_http_client.h"
 #include "esp_crt_bundle.h"
 #include "esp_log.h"
 #include "cJSON.h"
 
+#include "power_logger.h"
+
 static const char *TAG = "solar_forecast";
+
+#define LFS_BASE "/littlefs"
 
 // Hardcoded installation parameters — update to match site
 #define FORECAST_LAT "52.0"
@@ -29,6 +34,48 @@ typedef struct {
     int   len;
     int   cap;
 } resp_buf_t;
+
+static void save_hourly_solar(const char *date, cJSON *estimates)
+{
+    int64_t  sum_mw[24] = {0};
+    uint32_t count[24]  = {0};
+
+    struct tm midnight_tm = {0};
+    strptime(date, "%Y-%m-%d", &midnight_tm);
+    midnight_tm.tm_hour = 0;
+    midnight_tm.tm_min  = 0;
+    midnight_tm.tm_sec  = 0;
+    time_t midnight = mktime(&midnight_tm);
+
+    cJSON *est;
+    cJSON_ArrayForEach(est, estimates) {
+        cJSON *t = cJSON_GetObjectItemCaseSensitive(est, "time");
+        cJSON *w = cJSON_GetObjectItemCaseSensitive(est, "watts");
+        if (!cJSON_IsString(t) || !cJSON_IsNumber(w)) continue;
+        int h = 0, m = 0;
+        sscanf(t->valuestring, "%d:%d", &h, &m);
+        if (h < 0 || h > 23) continue;
+        sum_mw[h] += (int64_t)(w->valuedouble * 1000.0);
+        count[h]++;
+    }
+
+    char path[64];
+    snprintf(path, sizeof(path), "%s/solar-forecast-%s", LFS_BASE, date);
+    FILE *f = fopen(path, "wb");
+    if (!f) {
+        ESP_LOGW(TAG, "Cannot write solar-forecast-%s", date);
+        return;
+    }
+    for (int h = 0; h < 24; h++) {
+        power_record_t rec = {
+            .unix_minute = (uint32_t)(midnight + h * 3600),
+            .power_mw    = count[h] ? (int32_t)(sum_mw[h] / count[h]) : 0,
+        };
+        fwrite(&rec, sizeof(rec), 1, f);
+    }
+    fclose(f);
+    ESP_LOGI(TAG, "Saved hourly solar forecast for %s", date);
+}
 
 static esp_err_t http_event_handler(esp_http_client_event_t *evt)
 {
@@ -143,6 +190,35 @@ esp_err_t solar_forecast_fetch_tomorrow(cJSON **out_json)
     cJSON_AddNumberToObject(out, "total_wh", total_wh);
 
     cJSON_Delete(raw);
+
+    save_hourly_solar(tomorrow, estimates);
+
     *out_json = out;
     return ESP_OK;
+}
+
+char *solar_forecast_hourly_json(const char *date_str)
+{
+    char path[64];
+    snprintf(path, sizeof(path), "%s/solar-forecast-%s", LFS_BASE, date_str);
+
+    cJSON *root = cJSON_CreateObject();
+    cJSON_AddStringToObject(root, "date", date_str);
+    cJSON *slots = cJSON_AddArrayToObject(root, "slots");
+
+    FILE *f = fopen(path, "rb");
+    if (f) {
+        power_record_t rec;
+        while (fread(&rec, sizeof(rec), 1, f) == 1) {
+            cJSON *obj = cJSON_CreateObject();
+            cJSON_AddNumberToObject(obj, "hour_ts", (double)rec.unix_minute);
+            cJSON_AddNumberToObject(obj, "power_w",  rec.power_mw / 1000.0);
+            cJSON_AddItemToArray(slots, obj);
+        }
+        fclose(f);
+    }
+
+    char *json = cJSON_PrintUnformatted(root);
+    cJSON_Delete(root);
+    return json; // caller must free
 }
