@@ -17,11 +17,11 @@ static const char *TAG = "solar_forecast";
 #define LFS_BASE "/littlefs"
 
 // Hardcoded installation parameters — update to match site
-#define FORECAST_LAT "52.0"
-#define FORECAST_LON "-1.0"
+#define FORECAST_LAT "52.423957"
+#define FORECAST_LON "-1.7856016"
 #define FORECAST_DEC "35"    // panel tilt in degrees (0=flat, 90=vertical)
 #define FORECAST_AZ  "0"     // azimuth: 0=south, -90=east, 90=west
-#define FORECAST_KWP "4.0"   // installed peak power in kWp
+#define FORECAST_KWP "4.8"   // installed peak power in kWp
 
 #define FORECAST_URL \
     "https://api.forecast.solar/estimate/" \
