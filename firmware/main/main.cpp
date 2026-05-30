@@ -207,7 +207,7 @@ extern "C" void app_main(void)
     ESP_LOGI(TAG, "Waiting for IPv6 addresses...");
     xEventGroupWaitBits(s_net_event_group, IPV6_READY_BIT, pdFALSE, pdTRUE, pdMS_TO_TICKS(15000));
     log_ipv6_state();
-    ping_thread_device();
+    //ping_thread_device();
 
     ESP_LOGI(TAG, "Waiting for SNTP sync...");
     xEventGroupWaitBits(s_net_event_group, SNTP_SYNCED_BIT, pdFALSE, pdTRUE, pdMS_TO_TICKS(10000));

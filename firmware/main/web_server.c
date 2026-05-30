@@ -29,6 +29,11 @@
 #include "lwip/sockets.h"
 #include "lwip/netif.h"
 #include "lwip/ip6_addr.h"
+#include "lwip/icmp6.h"
+#include "lwip/ip6.h"
+#include "lwip/priv/nd6_priv.h"
+#include "esp_netif.h"
+#include "esp_netif_ip_addr.h"
 
 static const char *TAG = "web_server";
 
@@ -1507,11 +1512,27 @@ static esp_err_t debug_ping6_get_handler(httpd_req_t *req)
         return ESP_FAIL;
     }
 
-    struct sockaddr_in6 dest = {0};
-    dest.sin6_family = AF_INET6;
-    if (inet_pton(AF_INET6, addr_str, &dest.sin6_addr) != 1) {
+    struct sockaddr_in6 dst = {0};
+    dst.sin6_family = AF_INET6;
+    if (inet_pton(AF_INET6, addr_str, &dst.sin6_addr) != 1) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid IPv6 address");
         return ESP_FAIL;
+    }
+
+    // Find a usable source address and interface from the default netif
+    char src_addr_str[50] = {0};
+    char iface_name[10] = {0};
+    esp_netif_t *netif = esp_netif_get_default_netif();
+    if (netif) {
+        esp_ip6_addr_t ip6_list[LWIP_IPV6_NUM_ADDRESSES];
+        int count = esp_netif_get_all_ip6(netif, ip6_list);
+        for (int j = 0; j < count; j++) {
+            if (esp_netif_ip6_get_addr_type(&ip6_list[j]) != ESP_IP6_ADDR_IS_UNKNOWN) {
+                snprintf(src_addr_str, sizeof(src_addr_str), IPV6STR, IPV62STR(ip6_list[j]));
+                esp_netif_get_netif_impl_name(netif, iface_name);
+                break;
+            }
+        }
     }
 
     int sock = socket(AF_INET6, SOCK_RAW, IPPROTO_ICMPV6);
@@ -1520,9 +1541,18 @@ static esp_err_t debug_ping6_get_handler(httpd_req_t *req)
         return ESP_FAIL;
     }
 
-    // Tell lwIP to compute the ICMPv6 checksum at byte offset 2 (over pseudo-header)
-    int chksum_offset = 2;
-    setsockopt(sock, IPPROTO_IPV6, IPV6_CHECKSUM, &chksum_offset, sizeof(chksum_offset));
+    if (src_addr_str[0]) {
+        struct sockaddr_in6 src = {0};
+        src.sin6_family = AF_INET6;
+        inet_pton(AF_INET6, src_addr_str, &src.sin6_addr);
+        bind(sock, (struct sockaddr *)&src, sizeof(src));
+    }
+
+    if (iface_name[0]) {
+        struct ifreq ifr = {0};
+        strlcpy(ifr.ifr_name, iface_name, sizeof(ifr.ifr_name));
+        setsockopt(sock, SOL_SOCKET, SO_BINDTODEVICE, &ifr, sizeof(ifr));
+    }
 
     struct timeval tv = {.tv_sec = 2, .tv_usec = 0};
     setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
@@ -1531,29 +1561,32 @@ static esp_err_t debug_ping6_get_handler(httpd_req_t *req)
     cJSON_AddStringToObject(root, "target", addr_str);
     cJSON *results = cJSON_AddArrayToObject(root, "pings");
 
-    typedef struct {
-        uint8_t  type;
-        uint8_t  code;
-        uint16_t checksum;
-        uint16_t id;
-        uint16_t seq;
-        uint8_t  data[8];
-    } __attribute__((packed)) icmp6_echo_t;
-
     uint16_t ping_id = (uint16_t)(esp_random() & 0xFFFF);
+    uint8_t payload[8] = "PING";
 
     for (int i = 0; i < 4; i++) {
-        icmp6_echo_t pkt = {
-            .type = 128,  // ICMPv6 Echo Request
-            .code = 0,
-            .checksum = 0,
-            .id  = htons(ping_id),
-            .seq = htons((uint16_t)(i + 1)),
+        struct icmp6_echo_hdr pkt = {
+            .type   = ICMP6_TYPE_EREQ,
+            .code   = 0,
+            .chksum = 0,
+            .id     = htons(ping_id),
+            .seqno  = htons((uint16_t)(i + 1)),
         };
 
+        struct iovec iov[2];
+        iov[0].iov_base = &pkt;
+        iov[0].iov_len  = sizeof(pkt);
+        iov[1].iov_base = payload;
+        iov[1].iov_len  = sizeof(payload);
+
+        struct msghdr msg = {0};
+        msg.msg_name    = &dst;
+        msg.msg_namelen = sizeof(dst);
+        msg.msg_iov     = iov;
+        msg.msg_iovlen  = 2;
+
         int64_t t_send = esp_timer_get_time();
-        ssize_t sent = sendto(sock, &pkt, sizeof(pkt), 0,
-                              (struct sockaddr *)&dest, sizeof(dest));
+        ssize_t sent = sendmsg(sock, &msg, 0);
 
         cJSON *ping = cJSON_CreateObject();
         cJSON_AddNumberToObject(ping, "seq", i + 1);
@@ -1565,27 +1598,36 @@ static esp_err_t debug_ping6_get_handler(httpd_req_t *req)
             continue;
         }
 
-        uint8_t recv_buf[64];
-        struct sockaddr_in6 from = {0};
-        socklen_t fromlen = sizeof(from);
-        ssize_t recvd = recvfrom(sock, recv_buf, sizeof(recv_buf), 0,
-                                  (struct sockaddr *)&from, &fromlen);
-        int64_t t_recv = esp_timer_get_time();
+        // lwIP delivers the full IPv6 header (IP6_HLEN bytes) before the ICMPv6 payload.
+        // Loop to discard non-echo-reply packets (e.g. Neighbor Discovery).
+        uint8_t recv_buf[256];
+        int64_t t_recv = 0;
+        while (true) {
+            struct iovec recv_iov = { .iov_base = recv_buf, .iov_len = sizeof(recv_buf) };
+            struct msghdr recv_msg = {0};
+            recv_msg.msg_iov    = &recv_iov;
+            recv_msg.msg_iovlen = 1;
 
-        if (recvd < 0) {
-            cJSON_AddBoolToObject(ping, "success", false);
-            cJSON_AddStringToObject(ping, "error", "timeout");
-        } else if (recvd >= 8 && recv_buf[0] == 129) {  // 129 = ICMPv6 Echo Reply
+            ssize_t recvd = recvmsg(sock, &recv_msg, 0);
+            t_recv = esp_timer_get_time();
+
+            if (recvd < 0) {
+                cJSON_AddBoolToObject(ping, "success", false);
+                cJSON_AddStringToObject(ping, "error", "timeout");
+                break;
+            }
+
+            if (recvd < IP6_HLEN + (ssize_t)ICMP6_HLEN) continue;
+
+            struct icmp6_echo_hdr *reply = (struct icmp6_echo_hdr *)(recv_buf + IP6_HLEN);
+            if (reply->type != ICMP6_TYPE_EREP) continue;
+
             cJSON_AddBoolToObject(ping, "success", true);
             cJSON_AddNumberToObject(ping, "rtt_ms", (t_recv - t_send) / 1000.0);
-        } else {
-            cJSON_AddBoolToObject(ping, "success", false);
-            char err[32];
-            snprintf(err, sizeof(err), "unexpected type %u", recv_buf[0]);
-            cJSON_AddStringToObject(ping, "error", err);
+            break;
         }
-        cJSON_AddItemToArray(results, ping);
 
+        cJSON_AddItemToArray(results, ping);
         if (i < 3) vTaskDelay(pdMS_TO_TICKS(200));
     }
 
@@ -1634,6 +1676,60 @@ static esp_err_t debug_routes6_get_handler(httpd_req_t *req)
 
         // Always include the interface, even with no IPv6 — lets you see all netifs
         cJSON_AddItemToArray(ifaces, iface);
+    }
+
+    // Default routers learned via RA
+    cJSON *routers = cJSON_AddArrayToObject(root, "default_routers");
+    for (int i = 0; i < LWIP_ND6_NUM_ROUTERS; i++) {
+        if (default_router_list[i].neighbor_entry == NULL) continue;
+        char addr6[64] = {0};
+        ip6addr_ntoa_r(&default_router_list[i].neighbor_entry->next_hop_address, addr6, sizeof(addr6));
+        cJSON *r = cJSON_CreateObject();
+        cJSON_AddStringToObject(r, "addr", addr6);
+        cJSON_AddNumberToObject(r, "lifetime_s", default_router_list[i].invalidation_timer);
+        struct netif *rnetif = default_router_list[i].neighbor_entry->netif;
+        if (rnetif) {
+            char name[8];
+            snprintf(name, sizeof(name), "%c%c%u", rnetif->name[0], rnetif->name[1], rnetif->num);
+            cJSON_AddStringToObject(r, "iface", name);
+        }
+        cJSON_AddItemToArray(routers, r);
+    }
+
+    // On-link prefixes learned via RA Prefix Information Option (PIO)
+    cJSON *prefixes = cJSON_AddArrayToObject(root, "on_link_prefixes");
+    for (int i = 0; i < LWIP_ND6_NUM_PREFIXES; i++) {
+        if (ip6_addr_isany(&prefix_list[i].prefix)) continue;
+        char addr6[64] = {0};
+        ip6addr_ntoa_r(&prefix_list[i].prefix, addr6, sizeof(addr6));
+        cJSON *p = cJSON_CreateObject();
+        cJSON_AddStringToObject(p, "prefix", addr6);
+        cJSON_AddNumberToObject(p, "lifetime_s", prefix_list[i].invalidation_timer);
+        if (prefix_list[i].netif) {
+            char name[8];
+            snprintf(name, sizeof(name), "%c%c%u",
+                     prefix_list[i].netif->name[0],
+                     prefix_list[i].netif->name[1],
+                     prefix_list[i].netif->num);
+            cJSON_AddStringToObject(p, "iface", name);
+        }
+        cJSON_AddItemToArray(prefixes, p);
+    }
+
+    // Destination cache — shows next-hop actually used for each looked-up destination.
+    // Thread mesh-local addresses (fd43::.../64 via RIO) appear here after the first
+    // lookup, confirming they route through the Thread Border Router gateway.
+    cJSON *dests = cJSON_AddArrayToObject(root, "destination_cache");
+    for (int i = 0; i < LWIP_ND6_NUM_DESTINATIONS; i++) {
+        if (ip6_addr_isany(&destination_cache[i].destination_addr)) continue;
+        char dst[64] = {0}, hop[64] = {0};
+        ip6addr_ntoa_r(&destination_cache[i].destination_addr, dst, sizeof(dst));
+        ip6addr_ntoa_r(&destination_cache[i].next_hop_addr, hop, sizeof(hop));
+        cJSON *d = cJSON_CreateObject();
+        cJSON_AddStringToObject(d, "dest", dst);
+        cJSON_AddStringToObject(d, "next_hop", hop);
+        cJSON_AddNumberToObject(d, "age", destination_cache[i].age);
+        cJSON_AddItemToArray(dests, d);
     }
 
     return send_json(req, root, 200);
