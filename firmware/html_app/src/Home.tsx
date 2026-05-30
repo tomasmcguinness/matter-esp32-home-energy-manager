@@ -120,17 +120,31 @@ function ConfiguredSlot({ label, device, onReconfigure, onDelete }: { label: str
 }
 
 function GridSensorModal({ initialSelected, onSave, onClose }: { initialSelected: SimpleDevice | null; onSave: (device: SimpleDevice) => void; onClose: () => void }) {
-  const [devices, setDevices] = useState<SimpleDevice[]>([])
+  type EndpointEntry = { nodeId: number; endpointId: number; label: string; deviceName: string }
+
+  const [devices, setDevices] = useState<EndpointEntry[]>([])
   const [selected, setSelected] = useState<SimpleDevice | null>(initialSelected)
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
   useEffect(() => {
-    fetch('/api/devices/simple')
+    fetch('/api/devices/endpoints?deviceTypeId=0x0510')
       .then(r => r.ok ? r.json() : Promise.reject(`HTTP ${r.status}`))
-      .then((data: { devices: SimpleDevice[] }) => {
-        setDevices(data.devices.filter(d => d.hasElectricalSensor))
+      .then((data: { endpoints: EndpointEntry[] }) => {
+        let entries = data.endpoints
+        // The new endpoint excludes already-assigned sensors. If one is already
+        // configured as the grid sensor, re-insert it at the top so the user can
+        // reconfirm or switch to a different channel.
+        if (initialSelected) {
+          const alreadyListed = entries.some(
+            e => e.nodeId === initialSelected.nodeId && e.endpointId === initialSelected.endpointId
+          )
+          if (!alreadyListed) {
+            entries = [{ nodeId: initialSelected.nodeId, endpointId: initialSelected.endpointId, label: initialSelected.label, deviceName: '' }, ...entries]
+          }
+        }
+        setDevices(entries)
         setLoading(false)
       })
       .catch((e: unknown) => {
@@ -166,11 +180,12 @@ function GridSensorModal({ initialSelected, onSave, onClose }: { initialSelected
         {!loading && devices.length > 0 && (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 20 }}>
             {devices.map(d => {
+              const displayLabel = d.label || d.deviceName || `EP${d.endpointId}`
               const isSelected = selected?.nodeId === d.nodeId && selected?.endpointId === d.endpointId
               return (
                 <div
                   key={`${d.nodeId}-${d.endpointId}`}
-                  onClick={() => setSelected(d)}
+                  onClick={() => setSelected({ nodeId: d.nodeId, endpointId: d.endpointId, label: displayLabel, hasElectricalSensor: true, hasSolarPower: false })}
                   style={{
                     padding: '10px 14px', borderRadius: 8, cursor: 'pointer',
                     border: `2px solid ${isSelected ? '#3b82f6' : '#e2e8f0'}`,
@@ -178,7 +193,7 @@ function GridSensorModal({ initialSelected, onSave, onClose }: { initialSelected
                     transition: 'border-color .12s, background .12s',
                   }}
                 >
-                  <div style={{ fontWeight: 600, fontSize: 14, color: '#1e293b' }}>{d.label}</div>
+                  <div style={{ fontWeight: 600, fontSize: 14, color: '#1e293b' }}>{displayLabel}</div>
                   <div style={{ fontSize: 12, color: '#94a3b8', marginTop: 2 }}>
                     Node 0x{d.nodeId.toString(16).toUpperCase()} &middot; EP {d.endpointId}
                   </div>

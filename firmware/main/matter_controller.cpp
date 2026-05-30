@@ -53,7 +53,7 @@ static constexpr uint32_t kBasicInfoCluster = 0x0028;
 static constexpr uint32_t kBasicInfoVendorName = 0x0002;
 static constexpr uint32_t kBasicInfoProductName = 0x0004;
 
-void processElectralPowerMeasurementUpdate(uint64_t node_id,
+void processElectricalPowerMeasurementUpdate(uint64_t node_id,
                                            const chip::app::ConcreteDataAttributePath &path,
                                            chip::TLV::TLVReader *data);
 
@@ -354,8 +354,8 @@ esp_err_t matter_controller_commission_on_network(const char *onboarding_payload
     }
 
     chip::DeviceLayer::PlatformMgr().LockChipStack();
-    //home_energy_manager::controller::pairing_command::get_instance().pairing_on_network(node_id, payload.setUpPINCode);
-    home_energy_manager::controller::pairing_command::get_instance().pairing_code(node_id, onboarding_payload);
+    home_energy_manager::controller::pairing_command::get_instance().pairing_on_network(node_id, payload.setUpPINCode);
+    //home_energy_manager::controller::pairing_command::get_instance().pairing_code(node_id, onboarding_payload);
     chip::DeviceLayer::PlatformMgr().UnlockChipStack();
 
     if (xSemaphoreTake(s_commission_ctx.done, pdMS_TO_TICKS(60000)) != pdTRUE)
@@ -475,7 +475,7 @@ static void on_attribute_data_cb(uint64_t node_id,
 
     // Process ElectrialPowerMeasurement updates.
     if (path.mClusterId == ElectricalPowerMeasurement::Id) {
-        processElectralPowerMeasurementUpdate(node_id, path, data);
+        processElectricalPowerMeasurementUpdate(node_id, path, data);
     }
      
     return;
@@ -515,9 +515,9 @@ static void load_grid_sensor_identity(void)
     cJSON_Delete(root);
 }
 
-void processElectralPowerMeasurementUpdate(uint64_t node_id,
-                                           const chip::app::ConcreteDataAttributePath &path,
-                                           chip::TLV::TLVReader *data)
+void processElectricalPowerMeasurementUpdate(uint64_t node_id,
+                                             const chip::app::ConcreteDataAttributePath &path,
+                                             chip::TLV::TLVReader *data)
 {
     ESP_LOGI(TAG, "Received attribute update for node 0x%016llX, cluster 0x%04X, attribute 0x%04X", node_id, path.mClusterId, path.mAttributeId);
 
@@ -578,6 +578,8 @@ esp_err_t matter_controller_subscribe(void)
         {
             uint64_t node_id = node_ids[i];
             uint16_t endpoint_id = endpoint_ids[i];
+
+            ESP_LOGI(TAG, "Subscribing to Active Power on node 0x%016llX, endpoint %u", (unsigned long long)node_id, (unsigned)endpoint_id);
 
             auto *args = new std::tuple<uint64_t, uint16_t>(node_id, endpoint_id);
 

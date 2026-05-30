@@ -12,7 +12,7 @@ idf_component_register(SRCS
         "commands/pairing_command.cpp"
     INCLUDE_DIRS "."
     PRIV_INCLUDE_DIRS  "." "${ESP_MATTER_PATH}/examples/common/utils"
-    PRIV_REQUIRES fatfs sdmmc driver json esp_eth ethernet_init nvs_flash button esp_matter esp_matter_controller esp_http_server esp_http_client
+    PRIV_REQUIRES fatfs sdmmc driver json esp_eth ethernet_init nvs_flash button esp_matter esp_matter_controller esp_http_server esp_http_client lwip
     LDFRAGMENTS "linker.lf"
 )
 

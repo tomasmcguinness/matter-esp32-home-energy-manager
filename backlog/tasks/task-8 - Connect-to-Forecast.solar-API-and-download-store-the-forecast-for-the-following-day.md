@@ -3,12 +3,14 @@ id: TASK-8
 title: >-
   Connect to Forecast.solar API and download & store the forecast for the
   following day
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-05-18 05:20'
+updated_date: '2026-05-27 09:23'
 labels: []
 milestone: m-4
 dependencies: []
+ordinal: 3000
 ---
 
 ## Description

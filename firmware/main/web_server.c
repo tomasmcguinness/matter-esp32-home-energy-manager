@@ -22,6 +22,13 @@
 
 #include "mbedtls/base64.h"
 #include "mdns.h"
+#include "esp_timer.h"
+#include "esp_random.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "lwip/sockets.h"
+#include "lwip/netif.h"
+#include "lwip/ip6_addr.h"
 
 static const char *TAG = "web_server";
 
@@ -192,6 +199,175 @@ static esp_err_t devices_simple_get_handler(httpd_req_t *req)
         cJSON_AddBoolToObject(simple, "hasElectricalSensor", has_electrical_sensor);
         cJSON_AddBoolToObject(simple, "hasSolarPower", has_solar_power);
         cJSON_AddItemToArray(out_arr, simple);
+    }
+    cJSON_Delete(full);
+
+    return send_json(req, result, 200);
+}
+
+/// @brief Returns endpoints matching a given Matter device type, excluding those already assigned
+///        to a topology node. Intended for use by UI dropdowns (e.g. "Select Grid Sensor").
+///        Query parameter: deviceTypeId=<decimal> (required).
+///        Handles bridged/nested devices by inheriting the label from the nearest ancestor
+///        BridgedNode endpoint when the leaf endpoint's own label is empty.
+/// @param req
+/// @return
+static esp_err_t devices_endpoints_get_handler(httpd_req_t *req)
+{
+    // --- 1. Parse required deviceTypeId query param ---
+    char qbuf[32] = {0};
+    uint32_t filter_type = 0;
+    bool has_filter = false;
+    size_t qlen = httpd_req_get_url_query_len(req);
+    if (qlen > 0 && qlen < sizeof(qbuf))
+    {
+        if (httpd_req_get_url_query_str(req, qbuf, sizeof(qbuf)) == ESP_OK)
+        {
+            char val[16] = {0};
+            if (httpd_query_key_value(qbuf, "deviceTypeId", val, sizeof(val)) == ESP_OK)
+            {
+                filter_type = (uint32_t)strtoul(val, NULL, 0); // accepts decimal or 0x... hex
+                has_filter = true;
+            }
+        }
+    }
+    if (!has_filter)
+    {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Missing deviceTypeId");
+        return ESP_FAIL;
+    }
+
+    // --- 2. Build in-use set from node_manager ---
+    // Nodes with settings.type == "device" carry settings.nodeId + settings.endpointId
+    // and represent already-assigned topology slots (grid_meter, solar_inverter, etc.).
+#define MAX_IN_USE 16
+    uint64_t used_node_ids[MAX_IN_USE];
+    uint16_t used_ep_ids[MAX_IN_USE];
+    int used_count = 0;
+
+    char *nodes_json = node_manager_get_all_json();
+    if (nodes_json)
+    {
+        cJSON *nodes_root = cJSON_Parse(nodes_json);
+        free(nodes_json);
+        if (nodes_root)
+        {
+            cJSON *nodes_arr = cJSON_GetObjectItemCaseSensitive(nodes_root, "nodes");
+            cJSON *n;
+            cJSON_ArrayForEach(n, nodes_arr)
+            {
+                cJSON *settings = cJSON_GetObjectItemCaseSensitive(n, "settings");
+                if (!cJSON_IsObject(settings)) continue;
+                cJSON *type_j = cJSON_GetObjectItemCaseSensitive(settings, "type");
+                if (!cJSON_IsString(type_j) || strcmp(type_j->valuestring, "device") != 0) continue;
+                cJSON *nid_j = cJSON_GetObjectItemCaseSensitive(settings, "nodeId");
+                cJSON *eid_j = cJSON_GetObjectItemCaseSensitive(settings, "endpointId");
+                if (!cJSON_IsNumber(nid_j) || !cJSON_IsNumber(eid_j)) continue;
+                if (used_count < MAX_IN_USE)
+                {
+                    used_node_ids[used_count] = (uint64_t)nid_j->valuedouble;
+                    used_ep_ids[used_count]   = (uint16_t)eid_j->valuedouble;
+                    used_count++;
+                }
+            }
+            cJSON_Delete(nodes_root);
+        }
+    }
+
+    // --- 3. Load all devices and filter ---
+    char *full_json = device_manager_get_all_json();
+    if (!full_json)
+    {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "OOM");
+        return ESP_FAIL;
+    }
+    cJSON *full = cJSON_Parse(full_json);
+    free(full_json);
+    if (!full)
+    {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Parse failed");
+        return ESP_FAIL;
+    }
+
+    cJSON *result  = cJSON_CreateObject();
+    cJSON *out_arr = cJSON_AddArrayToObject(result, "endpoints");
+    cJSON *dev_arr = cJSON_GetObjectItemCaseSensitive(full, "devices");
+    cJSON *dev;
+
+    cJSON_ArrayForEach(dev, dev_arr)
+    {
+        cJSON *nid_j  = cJSON_GetObjectItemCaseSensitive(dev, "nodeId");
+        if (!cJSON_IsNumber(nid_j)) continue;
+        uint64_t node_id = (uint64_t)nid_j->valuedouble;
+
+        // Prefer user-assigned name; fall back to product name.
+        cJSON *name_j = cJSON_GetObjectItemCaseSensitive(dev, "name");
+        const char *device_name = (cJSON_IsString(name_j) && name_j->valuestring[0])
+                                  ? name_j->valuestring
+                                  : cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(dev, "productName"));
+
+        cJSON *endpoints = cJSON_GetObjectItemCaseSensitive(dev, "endpoints");
+        cJSON *ep;
+        cJSON_ArrayForEach(ep, endpoints)
+        {
+            // --- device type filter ---
+            bool type_match = false;
+            cJSON *dtypes = cJSON_GetObjectItemCaseSensitive(ep, "deviceTypes");
+            cJSON *dt;
+            cJSON_ArrayForEach(dt, dtypes)
+            {
+                if ((uint32_t)dt->valuedouble == filter_type) { type_match = true; break; }
+            }
+            if (!type_match) continue;
+
+            cJSON *epid_j = cJSON_GetObjectItemCaseSensitive(ep, "endpointId");
+            if (!cJSON_IsNumber(epid_j)) continue;
+            uint16_t ep_id = (uint16_t)epid_j->valuedouble;
+
+            // --- exclusion check ---
+            bool in_use = false;
+            for (int i = 0; i < used_count; i++)
+            {
+                if (used_node_ids[i] == node_id && used_ep_ids[i] == ep_id) { in_use = true; break; }
+            }
+            if (in_use) continue;
+
+            // --- label: prefer own label, otherwise walk parent chain ---
+            // For bridged/nested devices the meaningful label is often on the BridgedNode
+            // ancestor, not on the leaf measurement endpoint.
+            cJSON *label_j = cJSON_GetObjectItemCaseSensitive(ep, "label");
+            const char *label = (cJSON_IsString(label_j) && label_j->valuestring[0])
+                                ? label_j->valuestring : NULL;
+
+            if (!label)
+            {
+                cJSON *parent_id_j = cJSON_GetObjectItemCaseSensitive(ep, "parentEndpointId");
+                while (!label && cJSON_IsNumber(parent_id_j))
+                {
+                    uint16_t parent_ep_id = (uint16_t)parent_id_j->valuedouble;
+                    cJSON *parent_ep;
+                    parent_id_j = NULL; // will be updated if we find the parent
+                    cJSON_ArrayForEach(parent_ep, endpoints)
+                    {
+                        cJSON *pid_j = cJSON_GetObjectItemCaseSensitive(parent_ep, "endpointId");
+                        if (!cJSON_IsNumber(pid_j) || (uint16_t)pid_j->valuedouble != parent_ep_id) continue;
+                        cJSON *plabel_j = cJSON_GetObjectItemCaseSensitive(parent_ep, "label");
+                        if (cJSON_IsString(plabel_j) && plabel_j->valuestring[0])
+                            label = plabel_j->valuestring;
+                        parent_id_j = cJSON_GetObjectItemCaseSensitive(parent_ep, "parentEndpointId");
+                        break;
+                    }
+                }
+            }
+
+            // --- build result entry ---
+            cJSON *entry = cJSON_CreateObject();
+            cJSON_AddNumberToObject(entry, "nodeId",     (double)node_id);
+            cJSON_AddNumberToObject(entry, "endpointId", (double)ep_id);
+            cJSON_AddStringToObject(entry, "label",      label ? label : "");
+            cJSON_AddStringToObject(entry, "deviceName", device_name ? device_name : "");
+            cJSON_AddItemToArray(out_arr, entry);
+        }
     }
     cJSON_Delete(full);
 
@@ -1316,6 +1492,153 @@ static esp_err_t debug_files_get_handler(httpd_req_t *req)
     return send_file(req, fs_path);
 }
 
+static esp_err_t debug_ping6_get_handler(httpd_req_t *req)
+{
+    char qbuf[128] = {0};
+    char addr_str[64] = {0};
+
+    size_t qlen = httpd_req_get_url_query_len(req);
+    if (qlen > 0 && qlen < sizeof(qbuf)) {
+        if (httpd_req_get_url_query_str(req, qbuf, sizeof(qbuf)) == ESP_OK)
+            httpd_query_key_value(qbuf, "addr", addr_str, sizeof(addr_str));
+    }
+    if (!addr_str[0]) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Missing addr");
+        return ESP_FAIL;
+    }
+
+    struct sockaddr_in6 dest = {0};
+    dest.sin6_family = AF_INET6;
+    if (inet_pton(AF_INET6, addr_str, &dest.sin6_addr) != 1) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid IPv6 address");
+        return ESP_FAIL;
+    }
+
+    int sock = socket(AF_INET6, SOCK_RAW, IPPROTO_ICMPV6);
+    if (sock < 0) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Socket create failed");
+        return ESP_FAIL;
+    }
+
+    // Tell lwIP to compute the ICMPv6 checksum at byte offset 2 (over pseudo-header)
+    int chksum_offset = 2;
+    setsockopt(sock, IPPROTO_IPV6, IPV6_CHECKSUM, &chksum_offset, sizeof(chksum_offset));
+
+    struct timeval tv = {.tv_sec = 2, .tv_usec = 0};
+    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+
+    cJSON *root = cJSON_CreateObject();
+    cJSON_AddStringToObject(root, "target", addr_str);
+    cJSON *results = cJSON_AddArrayToObject(root, "pings");
+
+    typedef struct {
+        uint8_t  type;
+        uint8_t  code;
+        uint16_t checksum;
+        uint16_t id;
+        uint16_t seq;
+        uint8_t  data[8];
+    } __attribute__((packed)) icmp6_echo_t;
+
+    uint16_t ping_id = (uint16_t)(esp_random() & 0xFFFF);
+
+    for (int i = 0; i < 4; i++) {
+        icmp6_echo_t pkt = {
+            .type = 128,  // ICMPv6 Echo Request
+            .code = 0,
+            .checksum = 0,
+            .id  = htons(ping_id),
+            .seq = htons((uint16_t)(i + 1)),
+        };
+
+        int64_t t_send = esp_timer_get_time();
+        ssize_t sent = sendto(sock, &pkt, sizeof(pkt), 0,
+                              (struct sockaddr *)&dest, sizeof(dest));
+
+        cJSON *ping = cJSON_CreateObject();
+        cJSON_AddNumberToObject(ping, "seq", i + 1);
+
+        if (sent < 0) {
+            cJSON_AddBoolToObject(ping, "success", false);
+            cJSON_AddStringToObject(ping, "error", "send failed");
+            cJSON_AddItemToArray(results, ping);
+            continue;
+        }
+
+        uint8_t recv_buf[64];
+        struct sockaddr_in6 from = {0};
+        socklen_t fromlen = sizeof(from);
+        ssize_t recvd = recvfrom(sock, recv_buf, sizeof(recv_buf), 0,
+                                  (struct sockaddr *)&from, &fromlen);
+        int64_t t_recv = esp_timer_get_time();
+
+        if (recvd < 0) {
+            cJSON_AddBoolToObject(ping, "success", false);
+            cJSON_AddStringToObject(ping, "error", "timeout");
+        } else if (recvd >= 8 && recv_buf[0] == 129) {  // 129 = ICMPv6 Echo Reply
+            cJSON_AddBoolToObject(ping, "success", true);
+            cJSON_AddNumberToObject(ping, "rtt_ms", (t_recv - t_send) / 1000.0);
+        } else {
+            cJSON_AddBoolToObject(ping, "success", false);
+            char err[32];
+            snprintf(err, sizeof(err), "unexpected type %u", recv_buf[0]);
+            cJSON_AddStringToObject(ping, "error", err);
+        }
+        cJSON_AddItemToArray(results, ping);
+
+        if (i < 3) vTaskDelay(pdMS_TO_TICKS(200));
+    }
+
+    close(sock);
+    return send_json(req, root, 200);
+}
+
+static esp_err_t debug_routes6_get_handler(httpd_req_t *req)
+{
+    cJSON *root = cJSON_CreateObject();
+    cJSON *ifaces = cJSON_AddArrayToObject(root, "interfaces");
+
+    struct netif *netif;
+    NETIF_FOREACH(netif) {
+        cJSON *iface = cJSON_CreateObject();
+
+        char name[8];
+        snprintf(name, sizeof(name), "%c%c%u", netif->name[0], netif->name[1], netif->num);
+        cJSON_AddStringToObject(iface, "name", name);
+        cJSON_AddBoolToObject(iface, "up", netif_is_up(netif));
+        cJSON_AddBoolToObject(iface, "link_up", netif_is_link_up(netif));
+
+        // IPv4 address for reference
+        char ip4[16];
+        snprintf(ip4, sizeof(ip4), IPSTR, IP2STR(&netif->ip_addr.u_addr.ip4));
+        cJSON_AddStringToObject(iface, "ip4", ip4);
+
+        cJSON *addrs = cJSON_AddArrayToObject(iface, "ip6_addrs");
+        for (int j = 0; j < LWIP_IPV6_NUM_ADDRESSES; j++) {
+            uint8_t state = netif_ip6_addr_state(netif, j);
+            if (ip6_addr_isinvalid(state)) continue;
+
+            char addr6[64] = {0};
+            ip6addr_ntoa_r(netif_ip6_addr(netif, j), addr6, sizeof(addr6));
+
+            const char *state_str = "valid";
+            if (ip6_addr_istentative(state))       state_str = "tentative";
+            else if (ip6_addr_ispreferred(state))  state_str = "preferred";
+            else if (ip6_addr_isdeprecated(state)) state_str = "deprecated";
+
+            cJSON *a = cJSON_CreateObject();
+            cJSON_AddStringToObject(a, "addr", addr6);
+            cJSON_AddStringToObject(a, "state", state_str);
+            cJSON_AddItemToArray(addrs, a);
+        }
+
+        // Always include the interface, even with no IPv6 — lets you see all netifs
+        cJSON_AddItemToArray(ifaces, iface);
+    }
+
+    return send_json(req, root, 200);
+}
+
 static esp_err_t static_get_handler(httpd_req_t *req)
 {
     char fs_path[FS_PATH_MAX];
@@ -1370,6 +1693,7 @@ esp_err_t web_server_start(void)
 
     const httpd_uri_t devices_get = {.uri = "/api/devices", .method = HTTP_GET, .handler = devices_get_handler};
     const httpd_uri_t devices_simple_get = {.uri = "/api/devices/simple", .method = HTTP_GET, .handler = devices_simple_get_handler};
+    const httpd_uri_t devices_endpoints_get = {.uri = "/api/devices/endpoints", .method = HTTP_GET, .handler = devices_endpoints_get_handler};
     const httpd_uri_t device_delete = {.uri = "/api/devices/*", .method = HTTP_DELETE, .handler = device_delete_handler};
     const httpd_uri_t device_name_put = {.uri = "/api/devices/*/name", .method = HTTP_PUT, .handler = device_name_put_handler};
     const httpd_uri_t endpoint_put = {.uri = "/api/devices/*/endpoints/*", .method = HTTP_PUT, .handler = device_endpoint_put_handler};
@@ -1395,10 +1719,13 @@ esp_err_t web_server_start(void)
     const httpd_uri_t test_consumption_forecast_compute = {.uri = "/api/test/consumption-forecast/compute", .method = HTTP_POST, .handler = test_consumption_forecast_compute_handler};
     const httpd_uri_t debug_files_list = {.uri = "/debug/files", .method = HTTP_GET, .handler = debug_files_list_handler};
     const httpd_uri_t debug_files_get = {.uri = "/debug/files/*", .method = HTTP_GET, .handler = debug_files_get_handler};
+    const httpd_uri_t debug_ping6 = {.uri = "/debug/ping6", .method = HTTP_GET, .handler = debug_ping6_get_handler};
+    const httpd_uri_t debug_routes6 = {.uri = "/debug/routes6", .method = HTTP_GET, .handler = debug_routes6_get_handler};
     const httpd_uri_t static_files = {.uri = "/*", .method = HTTP_GET, .handler = static_get_handler};
 
     httpd_register_uri_handler(server, &devices_get);
     httpd_register_uri_handler(server, &devices_simple_get);
+    httpd_register_uri_handler(server, &devices_endpoints_get);
     httpd_register_uri_handler(server, &device_delete);
     httpd_register_uri_handler(server, &device_name_put);
     httpd_register_uri_handler(server, &endpoint_put);
@@ -1424,6 +1751,8 @@ esp_err_t web_server_start(void)
     httpd_register_uri_handler(server, &test_consumption_forecast_compute);
     httpd_register_uri_handler(server, &debug_files_list);
     httpd_register_uri_handler(server, &debug_files_get);
+    httpd_register_uri_handler(server, &debug_ping6);
+    httpd_register_uri_handler(server, &debug_routes6);
 
     ws_server_init(server);
 

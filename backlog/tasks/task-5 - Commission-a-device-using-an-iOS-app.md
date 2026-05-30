@@ -4,10 +4,11 @@ title: Commission a device using an iOS app
 status: Done
 assignee: []
 created_date: '2026-05-05 05:44'
-updated_date: '2026-05-05 14:10'
+updated_date: '2026-05-27 09:23'
 labels: []
 milestone: m-0
 dependencies: []
+ordinal: 2000
 ---
 
 ## Description

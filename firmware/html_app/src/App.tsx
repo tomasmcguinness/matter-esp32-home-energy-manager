@@ -47,10 +47,10 @@ function App() {
         </div>
       </nav>
       <Routes>
-        <Route path="/" element={<Home />} />
+        <Route path="/" element={<div className="container"><Home /></div>} />
         <Route path="/topology" element={<Topology />} />
-        <Route path="/data" element={<Data />} />
-        <Route path="/forecast" element={<Forecast />} />
+        <Route path="/data" element={<div className="container"><Data /></div>} />
+        <Route path="/forecast" element={<div className="container"><Forecast /></div>} />
         <Route path="/devices" element={<div className="container"><Devices /></div>} />
         <Route path="/settings" element={<div className="container"><Settings /></div>} />
         <Route path="/test" element={<div className="container"><Test /></div>} />

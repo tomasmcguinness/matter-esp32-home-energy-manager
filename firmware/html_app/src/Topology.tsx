@@ -32,7 +32,7 @@ function DeviceNode({ data }: { data: DeviceNodeData }) {
     <>
       <Handle type="target" position={Position.Left} id="power-in" />
       <div style={{ padding: '4px 10px', background: '#f1f5f9', borderBottom: '1px solid #e2e8f0', fontSize: 12, fontWeight: 600, color: '#1e293b', whiteSpace: 'nowrap' }}>
-        0x{data.nodeId?.toString(16).toUpperCase()}
+        0x{data.nodeId?.toString(16).toUpperCase()} | {data.endpointId} | {data.label}
       </div>
 
       <div style={{ minWidth: '100px', padding: '5px 10px', display: 'grid', gridTemplateColumns: 'auto 1fr', columnGap: 8, rowGap: 2, fontSize: 12 }}>
@@ -96,8 +96,6 @@ function Topology() {
   const [nodes, setNodes, onNodesChange] = useNodesState(initialNodes)
   const [edges, setEdges, onEdgesChangeBase] = useEdgesState(initialEdges)
   const [gridModalOpen, setGridModalOpen] = useState(false)
-  const [palette, setPalette] = useState<DeviceSpec[]>([])
-  const [paletteLoading, setPaletteLoading] = useState(true)
   const [toasts, setToasts] = useState<Toast[]>([])
   const reactFlowInstance = useRef<ReactFlowInstance | null>(null)
   const nodeIdCounter = useRef(10)
@@ -116,7 +114,7 @@ function Topology() {
   }, [dismissToast])
 
   const handleWsMessage = useCallback((msg: WsMessage) => {
-    console.log('[ws]', msg)
+    //console.log('[ws]', msg)
 
     if (msg.type === 'device_commissioned') {
       console.log('Handling device_commissioned message')
@@ -127,6 +125,8 @@ function Topology() {
       //console.log('[ws]', 'Handling attribute update message')
 
       const d = msg.data as { nodeId: number; endpointId: number; clusterId: number; attributeId: number; value: number }
+
+      console.log('[WS]', { d });
 
       let powerMeasurement: PowerMeasurement = {}
 
@@ -145,12 +145,12 @@ function Topology() {
         }
 
         setNodes(nds => nds.map(n =>
-          n.data.nodeId === d.nodeId //&& n.data.endpointId === d.endpointId
+          n.data.nodeId === d.nodeId && n.data.endpointId === d.endpointId
             ? { ...n, data: { ...n.data, power: { ...(n.data.power ?? {}), ...powerMeasurement } } }
             : n
         ))
 
-        const sourceNode = getNodes().find(n => n.data.nodeId === d.nodeId)
+        const sourceNode = getNodes().find(n => n.data.nodeId === d.nodeId && n.data.endpointId === d.endpointId)
 
         if (sourceNode && powerMeasurement.power !== undefined) {
           setEdges(eds => eds.map(e =>
@@ -188,23 +188,10 @@ function Topology() {
     return () => window.removeEventListener('keydown', handleKeyDown)
   }, [setNodes, setEdges])
 
-  useEffect(() => {
-    fetch('/api/devices')
-      .then(r => r.ok ? r.json() : Promise.reject())
-      .then((data: { devices: DeviceSpec[] }) => {
-        data.devices.forEach(d => {
-          d.label = "Meter Reference Point"
-        })
-        setPalette(data.devices)
-      })
-      .catch(() => { })
-      .finally(() => setPaletteLoading(false))
-  }, [])
-
-  const onDragStart = (e: React.DragEvent, device: DeviceSpec) => {
-    e.dataTransfer.setData('application/reactflow', JSON.stringify(device))
-    e.dataTransfer.effectAllowed = 'copy'
-  }
+  // const onDragStart = (e: React.DragEvent, device: DeviceSpec) => {
+  //   e.dataTransfer.setData('application/reactflow', JSON.stringify(device))
+  //   e.dataTransfer.effectAllowed = 'copy'
+  // }
 
   const onDragOver = useCallback((e: React.DragEvent) => {
     e.preventDefault()
@@ -351,34 +338,6 @@ function Topology() {
 
   return (
     <div style={{ display: 'flex', height: 'calc(100vh - 60px)' }}>
-      <aside style={{ width: 240, flexShrink: 0, background: '#fff', borderRight: '1px solid #e2e8f0', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
-        <div style={{ padding: '12px 14px', borderBottom: '1px solid #e2e8f0' }}>
-          <h2 style={{ fontSize: 12, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '.06em', color: '#94a3b8', margin: 0 }}>Available Devices</h2>
-        </div>
-        <div style={{ flex: 1, overflowY: 'auto', padding: '8px 0' }}>
-          {paletteLoading && (
-            <div style={{ fontSize: 12, color: '#94a3b8', padding: '16px 14px' }}>Loading devices…</div>
-          )}
-          {!paletteLoading && palette.length === 0 && (
-            <div style={{ fontSize: 12, color: '#94a3b8', padding: '16px 14px' }}>No devices found</div>
-          )}
-          {palette.map(device => (
-            <div
-              key={device.nodeId}
-              draggable
-              onDragStart={e => onDragStart(e, device)}
-              style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 14px', cursor: 'grab', userSelect: 'none', transition: 'background .12s' }}
-              onMouseEnter={e => (e.currentTarget.style.background = '#f1f5f9')}
-              onMouseLeave={e => (e.currentTarget.style.background = '')}
-            >
-              <div style={{ flex: 1, minWidth: 0 }}>
-                <div style={{ fontWeight: 500, color: '#1e293b' }}>{device.label}</div>
-              </div>
-            </div>
-          ))}
-        </div>
-      </aside>
-
       <div className="reactflow-wrapper" style={{ flex: 1, position: 'relative' }} onDragOver={onDragOver}>
         <ReactFlow
           style={{ height: '100%' }}

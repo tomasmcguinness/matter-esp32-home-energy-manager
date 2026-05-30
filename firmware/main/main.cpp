@@ -10,6 +10,9 @@
 #include "ethernet_init.h"
 #include "mdns.h"
 #include "esp_sntp.h"
+#include "lwip/netif.h"
+#include "lwip/nd6.h"
+#include "ping/ping_sock.h"
 
 #include "managers/device_manager.h"
 #include "managers/node_manager.h"
@@ -18,7 +21,11 @@
 #include "sd_card.h"
 #include "power_logger.h"
 
+#include "esp_netif_net_stack.h"
+
 static const char *TAG = "main";
+
+static void log_ipv6_state(void);
 
 static EventGroupHandle_t s_net_event_group;
 #define IPV6_READY_BIT  BIT0
@@ -34,9 +41,12 @@ static void eth_event_handler(void *arg, esp_event_base_t event_base,
                               int32_t event_id, void *event_data)
 {
     esp_netif_t *netif = (esp_netif_t *)arg;
+    struct netif *lwip_netif = (struct netif *)esp_netif_get_netif_impl(netif);
+
     switch (event_id) {
     case ETHERNET_EVENT_CONNECTED:
         ESP_LOGI(TAG, "Ethernet link up");
+        netif_set_flags(lwip_netif, NETIF_FLAG_MLD6);
         esp_netif_create_ip6_linklocal(netif);
         break;
     case ETHERNET_EVENT_DISCONNECTED: ESP_LOGI(TAG, "Ethernet link down"); break;
@@ -50,6 +60,9 @@ static void got_ip6_event_handler(void *arg, esp_event_base_t event_base,
 {
     ip_event_got_ip6_t *event = (ip_event_got_ip6_t *)event_data;
     ESP_LOGI(TAG, "Got IPv6: " IPV6STR, IPV62STR(event->ip6_info.ip));
+    
+    log_ipv6_state();
+    
     xEventGroupSetBits(s_net_event_group, IPV6_READY_BIT);
 }
 
@@ -67,6 +80,100 @@ static void got_ip_event_handler(void *arg, esp_event_base_t event_base,
     esp_sntp_setservername(0, "pool.ntp.org");
     esp_sntp_init();
     ESP_LOGI(TAG, "SNTP started");
+}
+
+static void log_ipv6_state(void)
+{
+    ESP_LOGI(TAG, "=== IPv6 Network State ===");
+
+    struct netif *netif;
+    NETIF_FOREACH(netif) {
+        ESP_LOGI(TAG, "Interface %c%c%d:", netif->name[0], netif->name[1], netif->num);
+        for (int i = 0; i < LWIP_IPV6_NUM_ADDRESSES; i++) {
+            if (ip6_addr_isvalid(netif_ip6_addr_state(netif, i))) {
+                ESP_LOGI(TAG, "  addr[%d]: %s", i, ip6addr_ntoa(netif_ip6_addr(netif, i)));
+            }
+        }
+    }
+
+    // Probe whether LwIP has a route to the Thread mesh prefix (fd43:2a42:8b75:1::/64).
+    // nd6_find_route() returns the outbound netif if a route exists, NULL otherwise.
+    ip6_addr_t thread_dest;
+    IP6_ADDR(&thread_dest, PP_HTONL(0xfd432a42), PP_HTONL(0x8b750001),
+             PP_HTONL(0x00000000), PP_HTONL(0x00000001));
+    struct netif *route_netif = nd6_find_route(&thread_dest);
+    if (route_netif != NULL) {
+        ESP_LOGI(TAG, "Route to Thread prefix fd43:2a42:8b75:1::/64 found via %c%c%d",
+                 route_netif->name[0], route_netif->name[1], route_netif->num);
+    } else {
+        ESP_LOGW(TAG, "No route to Thread prefix fd43:2a42:8b75:1::/64 — commissioning will fail");
+    }
+
+    ESP_LOGI(TAG, "==========================");
+}
+
+static void on_ping_success(esp_ping_handle_t hdl, void *args)
+{
+    uint16_t seqno;
+    uint32_t elapsed_ms;
+    uint8_t ttl;
+    ip_addr_t addr;
+    esp_ping_get_profile(hdl, ESP_PING_PROF_SEQNO,   &seqno,      sizeof(seqno));
+    esp_ping_get_profile(hdl, ESP_PING_PROF_TIMEGAP, &elapsed_ms, sizeof(elapsed_ms));
+    esp_ping_get_profile(hdl, ESP_PING_PROF_TTL,     &ttl,        sizeof(ttl));
+    esp_ping_get_profile(hdl, ESP_PING_PROF_IPADDR,  &addr,       sizeof(addr));
+    ESP_LOGI(TAG, "Ping reply from %s: seq=%d time=%dms ttl=%d",
+             ipaddr_ntoa(&addr), seqno, elapsed_ms, ttl);
+}
+
+static void on_ping_timeout(esp_ping_handle_t hdl, void *args)
+{
+    uint16_t seqno;
+    ip_addr_t addr;
+    esp_ping_get_profile(hdl, ESP_PING_PROF_SEQNO,  &seqno, sizeof(seqno));
+    esp_ping_get_profile(hdl, ESP_PING_PROF_IPADDR, &addr,  sizeof(addr));
+    ESP_LOGW(TAG, "Ping timeout to %s seq=%d", ipaddr_ntoa(&addr), seqno);
+}
+
+static void on_ping_end(esp_ping_handle_t hdl, void *args)
+{
+    uint32_t sent, received, total_ms;
+    esp_ping_get_profile(hdl, ESP_PING_PROF_REQUEST,  &sent,     sizeof(sent));
+    esp_ping_get_profile(hdl, ESP_PING_PROF_REPLY,    &received, sizeof(received));
+    esp_ping_get_profile(hdl, ESP_PING_PROF_DURATION, &total_ms, sizeof(total_ms));
+    ESP_LOGI(TAG, "Ping complete: sent=%d received=%d time=%dms", sent, received, total_ms);
+    esp_ping_delete_session(hdl);
+}
+
+static void ping_thread_device(void)
+{
+    // fd43:2a42:8b75:1:35f1:c73a:1eb6:9dac — Thread device from commissioning logs
+    ip6_addr_t addr6;
+    IP6_ADDR(&addr6, PP_HTONL(0xfd432a42), PP_HTONL(0x8b750001),
+                     PP_HTONL(0x35f1c73a), PP_HTONL(0x1eb69dac));
+
+    ip_addr_t target;
+    ip_addr_copy_from_ip6(target, addr6);
+
+    esp_ping_config_t cfg = ESP_PING_DEFAULT_CONFIG();
+    cfg.target_addr  = target;
+    cfg.count        = 4;
+    cfg.interval_ms  = 1000;
+    cfg.timeout_ms   = 2000;
+
+    esp_ping_callbacks_t cbs = {
+        .on_ping_success = on_ping_success,
+        .on_ping_timeout = on_ping_timeout,
+        .on_ping_end     = on_ping_end,
+    };
+
+    esp_ping_handle_t ping;
+    esp_err_t err = esp_ping_new_session(&cfg, &cbs, &ping);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to create ping session: %s", esp_err_to_name(err));
+        return;
+    }
+    esp_ping_start(ping);
 }
 
 extern "C" void app_main(void)
@@ -97,8 +204,10 @@ extern "C" void app_main(void)
 
     ESP_ERROR_CHECK(esp_eth_start(eth_handles[0]));
 
-    ESP_LOGI(TAG, "Waiting for IPv6 link-local address...");
+    ESP_LOGI(TAG, "Waiting for IPv6 addresses...");
     xEventGroupWaitBits(s_net_event_group, IPV6_READY_BIT, pdFALSE, pdTRUE, pdMS_TO_TICKS(15000));
+    log_ipv6_state();
+    ping_thread_device();
 
     ESP_LOGI(TAG, "Waiting for SNTP sync...");
     xEventGroupWaitBits(s_net_event_group, SNTP_SYNCED_BIT, pdFALSE, pdTRUE, pdMS_TO_TICKS(10000));

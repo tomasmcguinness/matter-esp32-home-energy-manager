@@ -25,6 +25,7 @@ export function useWebSocket(onMessage: (msg: WsMessage) => void): WsReadyState 
 
     ws.onopen = () => {
       setReadyState('open')
+      console.log('Connected to WebSocket!')
       retryMs.current = BASE_RETRY_MS
     }
 
@@ -39,6 +40,7 @@ export function useWebSocket(onMessage: (msg: WsMessage) => void): WsReadyState 
 
     ws.onclose = () => {
       setReadyState('closed')
+      console.log('Closed connection to WebSocket!')
       retryTimer.current = setTimeout(() => {
         retryMs.current = Math.min(retryMs.current * 2, MAX_RETRY_MS)
         setReadyState('connecting')
