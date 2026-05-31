@@ -31,6 +31,7 @@
 #include "lwip/ip6_addr.h"
 #include "lwip/icmp6.h"
 #include "lwip/ip6.h"
+#include "lwip/nd6.h"
 #include "lwip/priv/nd6_priv.h"
 #include "esp_netif.h"
 #include "esp_netif_ip_addr.h"
@@ -1732,7 +1733,45 @@ static esp_err_t debug_routes6_get_handler(httpd_req_t *req)
         cJSON_AddItemToArray(dests, d);
     }
 
+    static const char *const nd6_states[] = {
+        "NO_ENTRY", "INCOMPLETE", "REACHABLE", "STALE", "DELAY", "PROBE"
+    };
+    cJSON *neighbors = cJSON_AddArrayToObject(root, "neighbor_cache");
+    for (int i = 0; i < LWIP_ND6_NUM_NEIGHBORS; i++) {
+        if (neighbor_cache[i].state == ND6_NO_ENTRY) continue;
+        char addr6[64] = {0};
+        ip6addr_ntoa_r(&neighbor_cache[i].next_hop_address, addr6, sizeof(addr6));
+        cJSON *n = cJSON_CreateObject();
+        cJSON_AddStringToObject(n, "addr", addr6);
+        uint8_t s = neighbor_cache[i].state;
+        cJSON_AddStringToObject(n, "state", s < 6 ? nd6_states[s] : "UNKNOWN");
+        cJSON_AddBoolToObject(n, "is_router", neighbor_cache[i].isrouter);
+        cJSON_AddNumberToObject(n, "probes_sent", neighbor_cache[i].counter.probes_sent);
+        cJSON_AddItemToArray(neighbors, n);
+    }
+
     return send_json(req, root, 200);
+}
+
+// nd6_clear_destination_cache() touches lwIP internals and must run with the
+// TCPIP core lock held, so it's invoked via esp_netif_tcpip_exec.
+static esp_err_t clear_dest_cache_cb(void *ctx)
+{
+    (void)ctx;
+    nd6_clear_destination_cache();
+    return ESP_OK;
+}
+
+static esp_err_t debug_routes6_cache_delete_handler(httpd_req_t *req)
+{
+    esp_err_t err = esp_netif_tcpip_exec(clear_dest_cache_cb, NULL);
+
+    cJSON *root = cJSON_CreateObject();
+    cJSON_AddBoolToObject(root, "cleared", err == ESP_OK);
+    if (err != ESP_OK) {
+        cJSON_AddStringToObject(root, "error", esp_err_to_name(err));
+    }
+    return send_json(req, root, err == ESP_OK ? 200 : 500);
 }
 
 static esp_err_t static_get_handler(httpd_req_t *req)
@@ -1817,6 +1856,7 @@ esp_err_t web_server_start(void)
     const httpd_uri_t debug_files_get = {.uri = "/debug/files/*", .method = HTTP_GET, .handler = debug_files_get_handler};
     const httpd_uri_t debug_ping6 = {.uri = "/debug/ping6", .method = HTTP_GET, .handler = debug_ping6_get_handler};
     const httpd_uri_t debug_routes6 = {.uri = "/debug/routes6", .method = HTTP_GET, .handler = debug_routes6_get_handler};
+    const httpd_uri_t debug_routes6_cache_delete = {.uri = "/debug/routes6/cache", .method = HTTP_DELETE, .handler = debug_routes6_cache_delete_handler};
     const httpd_uri_t static_files = {.uri = "/*", .method = HTTP_GET, .handler = static_get_handler};
 
     httpd_register_uri_handler(server, &devices_get);
@@ -1849,6 +1889,7 @@ esp_err_t web_server_start(void)
     httpd_register_uri_handler(server, &debug_files_get);
     httpd_register_uri_handler(server, &debug_ping6);
     httpd_register_uri_handler(server, &debug_routes6);
+    httpd_register_uri_handler(server, &debug_routes6_cache_delete);
 
     ws_server_init(server);
 

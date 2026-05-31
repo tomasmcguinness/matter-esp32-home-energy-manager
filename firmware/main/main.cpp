@@ -12,6 +12,7 @@
 #include "esp_sntp.h"
 #include "lwip/netif.h"
 #include "lwip/nd6.h"
+#include "lwip/mld6.h"
 #include "ping/ping_sock.h"
 
 #include "managers/device_manager.h"
@@ -55,14 +56,36 @@ static void eth_event_handler(void *arg, esp_event_base_t event_base,
     }
 }
 
+// TEST: join the all-nodes multicast group (ff02::1) via MLD. Must run inside
+// the TCPIP context (core lock held), so it's invoked via esp_netif_tcpip_exec.
+// Nodes normally never send an MLD report for ff02::1, so an MLD-snooping switch
+// prunes it on our port and we never receive multicast RAs. If this join makes
+// the OTBR's RA start arriving in nd6_input, MLD snooping is the cause.
+static esp_err_t join_all_nodes_cb(void *ctx)
+{
+    struct netif *lwip_netif = (struct netif *)ctx;
+    ip6_addr_t allnodes;
+    IP6_ADDR(&allnodes, PP_HTONL(0xff020000), PP_HTONL(0x00000000),
+             PP_HTONL(0x00000000), PP_HTONL(0x00000001));
+    ip6_addr_assign_zone(&allnodes, IP6_MULTICAST, lwip_netif);
+    err_t err = mld6_joingroup_netif(lwip_netif, &allnodes);
+    return (err == ERR_OK) ? ESP_OK : ESP_FAIL;
+}
+
 static void got_ip6_event_handler(void *arg, esp_event_base_t event_base,
                                   int32_t event_id, void *event_data)
 {
     ip_event_got_ip6_t *event = (ip_event_got_ip6_t *)event_data;
     ESP_LOGI(TAG, "Got IPv6: " IPV6STR, IPV62STR(event->ip6_info.ip));
-    
+
+    struct netif *lwip_netif = (struct netif *)esp_netif_get_netif_impl(event->esp_netif);
+    if (lwip_netif != NULL) {
+        esp_err_t err = esp_netif_tcpip_exec(join_all_nodes_cb, lwip_netif);
+        ESP_LOGW(TAG, "mld6_joingroup ff02::1 -> %s", esp_err_to_name(err));
+    }
+
     log_ipv6_state();
-    
+
     xEventGroupSetBits(s_net_event_group, IPV6_READY_BIT);
 }
 
@@ -178,6 +201,11 @@ static void ping_thread_device(void)
 
 extern "C" void app_main(void)
 {
+    //esp_log_level_set("lwip", ESP_LOG_DEBUG);
+    //esp_log_level_set("ip6", ESP_LOG_DEBUG);
+    //esp_log_level_set("icmp6", ESP_LOG_DEBUG);
+    //esp_log_level_set("nd6", ESP_LOG_DEBUG);
+
     ESP_ERROR_CHECK(nvs_flash_init());
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
