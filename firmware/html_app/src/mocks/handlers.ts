@@ -23,6 +23,7 @@ let devices: Device[] = [
   },
   {
     nodeId: 20001,
+    name: 'Garage Meter',
     vendorName: 'Shelly',
     productName: 'Pro 3EM',
     endpoints: [
@@ -79,6 +80,31 @@ export const handlers = [
     return HttpResponse.json({ devices: simpleDevices })
   }),
 
+  http.get('/api/devices/endpoints', ({ request }) => {
+    const url = new URL(request.url)
+    const raw = url.searchParams.get('deviceTypeId') ?? '0'
+    const filterType = raw.startsWith('0x') ? parseInt(raw, 16) : parseInt(raw, 10)
+    // An endpoint may be assigned to at most one topology node regardless of role,
+    // so exclude any node that has already claimed a nodeId/endpointId.
+    const inUse = nodeConfigs
+      .filter(n => typeof n.settings?.nodeId === 'number' && typeof n.settings?.endpointId === 'number')
+      .map(n => ({ nodeId: n.settings.nodeId as number, endpointId: n.settings.endpointId as number }))
+    const endpoints = devices.flatMap(d =>
+      d.endpoints
+        .filter(ep => ep.endpointId !== 0 && ep.deviceTypes?.includes(filterType))
+        .filter(ep => !inUse.some(u => u.nodeId === d.nodeId && u.endpointId === ep.endpointId))
+        .map(ep => ({ nodeId: d.nodeId, endpointId: ep.endpointId, label: ep.label || `EP${ep.endpointId}`, deviceName: d.productName }))
+    )
+    return HttpResponse.json({ endpoints })
+  }),
+
+  http.put('/api/devices/:nodeId/name', async ({ params, request }) => {
+    const nodeId = Number(params.nodeId)
+    const body = (await request.json()) as { name: string }
+    devices = devices.map((d) => (d.nodeId === nodeId ? { ...d, name: body.name } : d))
+    return HttpResponse.json({})
+  }),
+
   http.put('/api/devices/:nodeId/endpoints/:endpointId', async ({ params, request }) => {
     const nodeId = Number(params.nodeId)
     const endpointId = Number(params.endpointId)
@@ -97,18 +123,34 @@ export const handlers = [
   }),
 
   http.get('/api/nodes', () => {
-    return HttpResponse.json({ nodes: nodeConfigs })
+    // Mirror the firmware: nodes wired to a Matter endpoint carry the current
+    // cached ElectricalPowerMeasurement values (cluster 144) so power renders on load.
+    const nodes = nodeConfigs.map(n => {
+      const nodeId = n.settings?.nodeId
+      const endpointId = n.settings?.endpointId
+      if (typeof nodeId !== 'number' || typeof endpointId !== 'number') return n
+      return {
+        ...n,
+        values: [
+          { clusterId: 144, attributeId: 0x04, value: 230000 },  // 230.0 V
+          { clusterId: 144, attributeId: 0x05, value: 4350 },    // 4.35 A
+          { clusterId: 144, attributeId: 0x08, value: 1000000 }, // 1000.0 W
+        ],
+      }
+    })
+    return HttpResponse.json({ nodes })
   }),
 
   http.put('/api/nodes/:nodeId', async ({ params, request }) => {
     const id = params.nodeId as string
-    const body = (await request.json()) as { x: number; y: number }
+    const body = (await request.json()) as { x: number; y: number; settings?: Record<string, unknown> }
     const existing = nodeConfigs.find(n => n.id === id)
     if (existing) {
       existing.x = body.x
       existing.y = body.y
+      if (body.settings) existing.settings = body.settings
     } else {
-      nodeConfigs.push({ id, x: body.x, y: body.y, settings: {} })
+      nodeConfigs.push({ id, x: body.x, y: body.y, settings: body.settings ?? {} })
     }
     return HttpResponse.json({})
   }),

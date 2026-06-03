@@ -11,6 +11,9 @@ function fmt(value: number | undefined, unit: string): string {
   return value === undefined ? '—' : `${(value/1000).toFixed(1)} ${unit}`
 }
 
+// One output circuit per appliance slot on the Home screen.
+const CU_CIRCUITS = [0, 1, 2, 3, 4]
+
 function ConsumerUnitNode({ data }: { data: { label: string } }) {
   return (
     <>
@@ -19,12 +22,42 @@ function ConsumerUnitNode({ data }: { data: { label: string } }) {
       <div style={{ padding: '5px 12px', fontSize: 13, fontWeight: 500, color: '#1e293b', whiteSpace: 'nowrap' }}>
         {data.label}
       </div>
+      {CU_CIRCUITS.map((slot, i) => (
+        <Handle
+          key={slot}
+          type="source"
+          position={Position.Right}
+          id={`circuit_${slot + 1}`}
+          style={{ top: `${((i + 1) * 100) / (CU_CIRCUITS.length + 1)}%` }}
+        />
+      ))}
     </>
   )
 }
 
 type PowerMeasurement = { voltage?: number, current?: number, power?: number }
 type DeviceNodeData = { label: string; nodeId?: number; endpointId?: number; power?: PowerMeasurement }
+
+// ElectricalPowerMeasurement cluster (0x0090) and its attribute ids.
+const EPM_CLUSTER = 144
+const EPM_VOLTAGE = 0x04
+const EPM_CURRENT = 0x05
+const EPM_POWER = 0x08
+
+// A cached attribute value as delivered by /api/nodes and by websocket updates.
+type ValueEntry = { clusterId: number; attributeId: number; value: number }
+
+// Map a single attribute (cluster + attribute id) to the PowerMeasurement field it sets.
+// Shared by the initial /api/nodes hydration and live websocket updates.
+function powerFromAttribute(clusterId: number, attributeId: number, value: number): PowerMeasurement {
+  const pm: PowerMeasurement = {}
+  if (clusterId === EPM_CLUSTER) {
+    if (attributeId === EPM_VOLTAGE) pm.voltage = value
+    else if (attributeId === EPM_CURRENT) pm.current = value
+    else if (attributeId === EPM_POWER) pm.power = value
+  }
+  return pm
+}
 
 function DeviceNode({ data }: { data: DeviceNodeData }) {
   
@@ -45,9 +78,11 @@ function DeviceNode({ data }: { data: DeviceNodeData }) {
   )
 }
 
-const nodeTypes = { consumerUnit: ConsumerUnitNode, device: DeviceNode }
+// Appliance nodes are functionally identical to device nodes on the canvas (a metered
+// endpoint with a power-in handle); they only differ by their semantic role/type.
+const nodeTypes = { consumerUnit: ConsumerUnitNode, device: DeviceNode, appliance: DeviceNode }
 
-type SavedNodeConfig = { id: string; x: number; y: number; settings: Record<string, unknown> }
+type SavedNodeConfig = { id: string; x: number; y: number; settings: Record<string, unknown>; values?: ValueEntry[] }
 type SavedEdgeConfig = { id: string; source: string; target: string; sourceHandle?: string; targetHandle?: string }
 
 type DeviceSpec = {
@@ -128,33 +163,22 @@ function Topology() {
 
       console.log('[WS]', { d });
 
-      let powerMeasurement: PowerMeasurement = {}
+      const powerMeasurement = powerFromAttribute(d.clusterId, d.attributeId, d.value)
 
-      if (d.clusterId == 144) // Electrical Power Measurement
+      if (d.clusterId === EPM_CLUSTER) // Electrical Power Measurement
       {
-        switch (d.attributeId) {
-          case 0x04:
-            powerMeasurement.voltage = d.value;
-            break;
-          case 0x05:
-            powerMeasurement.current = d.value;
-            break;
-          case 0x08:
-            powerMeasurement.power = d.value;
-            break;
-        }
-
         setNodes(nds => nds.map(n =>
           n.data.nodeId === d.nodeId && n.data.endpointId === d.endpointId
             ? { ...n, data: { ...n.data, power: { ...(n.data.power ?? {}), ...powerMeasurement } } }
             : n
         ))
 
-        const sourceNode = getNodes().find(n => n.data.nodeId === d.nodeId && n.data.endpointId === d.endpointId)
+        const measuredNode = getNodes().find(n => n.data.nodeId === d.nodeId && n.data.endpointId === d.endpointId)
 
-        if (sourceNode && powerMeasurement.power !== undefined) {
+        if (measuredNode && powerMeasurement.power !== undefined) {
+          // The metered node may be the source (meter → CU) or target (CU → appliance).
           setEdges(eds => eds.map(e =>
-            e.source === sourceNode.id
+            e.source === measuredNode.id || e.target === measuredNode.id
               ? { ...e, data: { ...(e.data ?? {}), kw: powerMeasurement.power! / 1000000 } }
               : e
           ))
@@ -298,18 +322,28 @@ function Topology() {
     fetch('/api/nodes')
       .then(r => r.ok ? r.json() : Promise.reject())
       .then((data: { nodes: SavedNodeConfig[]; edges?: SavedEdgeConfig[] }) => {
-        const restoredNodes: Node[] = data.nodes.map(n => ({
-          id: n.id,
-          type: typeof n.settings?.type === 'string' ? n.settings.type as string : undefined,
-          position: { x: n.x, y: n.y },
-          draggable: true,
-          deletable: n.settings?.deletable !== false,
-          data: {
-            label: (n.settings?.label as string) ?? n.id,
-            nodeId: n.settings?.nodeId as number | undefined,
-            endpointId: n.settings?.endpointId as number | undefined,
-          },
-        }))
+        // Current cached values ride along in the node list, so power renders
+        // immediately on load without waiting for the first websocket update.
+        const powerByNode = new Map<string, PowerMeasurement>()
+        const restoredNodes: Node[] = data.nodes.map(n => {
+          const power = (n.values ?? []).reduce<PowerMeasurement>(
+            (acc, v) => ({ ...acc, ...powerFromAttribute(v.clusterId, v.attributeId, v.value) }), {})
+          const hasPower = Object.keys(power).length > 0
+          if (hasPower) powerByNode.set(n.id, power)
+          return {
+            id: n.id,
+            type: typeof n.settings?.type === 'string' ? n.settings.type as string : undefined,
+            position: { x: n.x, y: n.y },
+            draggable: true,
+            deletable: n.settings?.deletable !== false,
+            data: {
+              label: (n.settings?.label as string) ?? n.id,
+              nodeId: n.settings?.nodeId as number | undefined,
+              endpointId: n.settings?.endpointId as number | undefined,
+              ...(hasPower ? { power } : {}),
+            },
+          }
+        })
 
         for (const n of restoredNodes) {
           const m = n.id.match(/^node_(\d+)$/)
@@ -319,15 +353,20 @@ function Topology() {
         setNodes(restoredNodes)
 
         if (data.edges?.length) {
-          setEdges(data.edges.map(e => ({
-            id: e.id,
-            source: e.source,
-            target: e.target,
-            sourceHandle: e.sourceHandle,
-            targetHandle: e.targetHandle,
-            type: 'powerFlow',
-            data: { kw: 0 },
-          })))
+          setEdges(data.edges.map(e => {
+            // The metered node may be at either end: a meter feeds into the CU
+            // (it is the source), an appliance hangs off the CU (it is the target).
+            const power = powerByNode.get(e.source) ?? powerByNode.get(e.target)
+            return {
+              id: e.id,
+              source: e.source,
+              target: e.target,
+              sourceHandle: e.sourceHandle,
+              targetHandle: e.targetHandle,
+              type: 'powerFlow',
+              data: { kw: power?.power !== undefined ? power.power / 1000000 : 0 },
+            }
+          }))
         }
 
         const cu = data.nodes.find(n => n.id === 'consumer_unit')

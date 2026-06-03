@@ -300,6 +300,124 @@ function SolarInverterModal({ initialSelected, onSave, onClose }: { initialSelec
   )
 }
 
+function ApplianceSensorModal({ slotLabel, topologyNodeId, position, sourceHandle, edgeId, initialSelected, onSave, onClose }: {
+  slotLabel: string
+  topologyNodeId: string
+  position: { x: number; y: number }
+  sourceHandle: string
+  edgeId: string
+  initialSelected: SimpleDevice | null
+  onSave: (device: SimpleDevice) => void
+  onClose: () => void
+}) {
+  type EndpointEntry = { nodeId: number; endpointId: number; label: string; deviceName: string }
+
+  const [devices, setDevices] = useState<EndpointEntry[]>([])
+  const [selected, setSelected] = useState<SimpleDevice | null>(initialSelected)
+  const [loading, setLoading] = useState(true)
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  useEffect(() => {
+    fetch('/api/devices/endpoints?deviceTypeId=0x0510')
+      .then(r => r.ok ? r.json() : Promise.reject(`HTTP ${r.status}`))
+      .then((data: { endpoints: EndpointEntry[] }) => {
+        let entries = data.endpoints
+        // The endpoint list already excludes any endpoint assigned to another topology
+        // node. If this slot is already configured, re-insert its sensor at the top so the
+        // user can reconfirm or switch to a different channel.
+        if (initialSelected) {
+          const alreadyListed = entries.some(
+            e => e.nodeId === initialSelected.nodeId && e.endpointId === initialSelected.endpointId
+          )
+          if (!alreadyListed) {
+            entries = [{ nodeId: initialSelected.nodeId, endpointId: initialSelected.endpointId, label: initialSelected.label, deviceName: '' }, ...entries]
+          }
+        }
+        setDevices(entries)
+        setLoading(false)
+      })
+      .catch((e: unknown) => {
+        setError(e instanceof Error ? e.message : String(e))
+        setLoading(false)
+      })
+  }, [])
+
+  function handleSave() {
+    if (!selected) return
+    setSaving(true)
+    fetch(`/api/nodes/${topologyNodeId}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        x: position.x,
+        y: position.y,
+        settings: { label: selected.label, type: 'appliance', nodeId: selected.nodeId, endpointId: selected.endpointId },
+      }),
+    })
+      .then(r => r.ok ? r.json() : Promise.reject(`HTTP ${r.status}`))
+      // Wire the appliance to the Consumer Unit so the power-flow topology is complete.
+      .then(() => fetch('/api/edges', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id: edgeId, source: 'consumer_unit', sourceHandle, target: topologyNodeId, targetHandle: 'power-in' }),
+      }))
+      .then(r => r.ok ? r.json() : Promise.reject(`HTTP ${r.status}`))
+      .then(() => onSave(selected))
+      .catch((e: unknown) => {
+        setError(e instanceof Error ? e.message : String(e))
+        setSaving(false)
+      })
+  }
+
+  return (
+    <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.4)', zIndex: 200, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+      <div style={{ background: '#fff', borderRadius: 12, padding: 24, width: 380, maxWidth: '90vw', boxShadow: '0 8px 32px rgba(0,0,0,0.18)' }}>
+        <h2 style={{ margin: '0 0 4px', fontSize: 16, fontWeight: 700, color: '#1e293b' }}>Select {slotLabel} Sensor</h2>
+        <p style={{ margin: '0 0 16px', fontSize: 13, color: '#64748b' }}>Choose the device that measures power used by this appliance.</p>
+        {error && <div style={{ marginBottom: 12, padding: '8px 12px', background: '#fef2f2', border: '1px solid #fca5a5', borderRadius: 6, fontSize: 13, color: '#b91c1c' }}>{error}</div>}
+        {loading && <p style={{ fontSize: 13, color: '#94a3b8' }}>Loading devices…</p>}
+        {!loading && devices.length === 0 && <p style={{ fontSize: 13, color: '#94a3b8' }}>No devices with power measurement found.</p>}
+        {!loading && devices.length > 0 && (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 20 }}>
+            {devices.map(d => {
+              const displayLabel = d.label || d.deviceName || `EP${d.endpointId}`
+              const isSelected = selected?.nodeId === d.nodeId && selected?.endpointId === d.endpointId
+              return (
+                <div
+                  key={`${d.nodeId}-${d.endpointId}`}
+                  onClick={() => setSelected({ nodeId: d.nodeId, endpointId: d.endpointId, label: displayLabel, hasElectricalSensor: true, hasSolarPower: false })}
+                  style={{
+                    padding: '10px 14px', borderRadius: 8, cursor: 'pointer',
+                    border: `2px solid ${isSelected ? '#3b82f6' : '#e2e8f0'}`,
+                    background: isSelected ? '#eff6ff' : '#fff',
+                    transition: 'border-color .12s, background .12s',
+                  }}
+                >
+                  <div style={{ fontWeight: 600, fontSize: 14, color: '#1e293b' }}>{displayLabel}</div>
+                  <div style={{ fontSize: 12, color: '#94a3b8', marginTop: 2 }}>
+                    Node 0x{d.nodeId.toString(16).toUpperCase()} &middot; EP {d.endpointId}
+                  </div>
+                </div>
+              )
+            })}
+          </div>
+        )}
+        <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+          <button onClick={onClose} style={{ padding: '8px 16px', borderRadius: 6, border: '1px solid #e2e8f0', background: '#fff', fontSize: 13, cursor: 'pointer' }}>Cancel</button>
+          <button
+            onClick={handleSave}
+            disabled={!selected || saving}
+            style={{ padding: '8px 16px', borderRadius: 6, border: 'none', background: selected ? '#3b82f6' : '#cbd5e1', color: '#fff', fontSize: 13, fontWeight: 600, cursor: selected ? 'pointer' : 'not-allowed' }}
+          >
+            {saving ? 'Saving…' : 'Save'}
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 function SectionLabel({ children }: { children: string }) {
   return (
     <div style={{
@@ -340,13 +458,23 @@ const APPLIANCE_SLOTS = [
   'Appliance 5',
 ]
 
-type SavedNode = { id: string; settings?: { label?: string; nodeId?: number; endpointId?: number } }
+// Stable topology identifiers for each appliance slot (index 0 => "appliance_1", ...).
+// Each appliance hangs off its own Consumer Unit circuit handle.
+const applianceNodeId = (slot: number) => `appliance_${slot + 1}`
+const applianceCircuitHandle = (slot: number) => `circuit_${slot + 1}`
+const applianceEdgeId = (slot: number) => `consumer_unit-${applianceCircuitHandle(slot)}-${applianceNodeId(slot)}-power-in`
+
+type SavedNode = { id: string; x?: number; y?: number; settings?: { label?: string; type?: string; nodeId?: number; endpointId?: number } }
 
 function Home() {
   const [gridModalOpen, setGridModalOpen] = useState(false)
   const [gridSensor, setGridSensor] = useState<SimpleDevice | null>(null)
   const [solarModalOpen, setSolarModalOpen] = useState(false)
   const [solarInverter, setSolarInverter] = useState<SimpleDevice | null>(null)
+  const [appliances, setAppliances] = useState<(SimpleDevice | null)[]>(() => APPLIANCE_SLOTS.map(() => null))
+  const [applianceModalSlot, setApplianceModalSlot] = useState<number | null>(null)
+  // Consumer Unit position, used to place newly created appliance nodes on the canvas.
+  const [cuPos, setCuPos] = useState<{ x: number; y: number }>({ x: 0, y: 0 })
 
   useEffect(() => {
     fetch('/api/nodes')
@@ -360,6 +488,17 @@ function Home() {
         if (si?.settings?.nodeId !== undefined && si.settings.endpointId !== undefined && si.settings.label) {
           setSolarInverter({ nodeId: si.settings.nodeId as number, endpointId: si.settings.endpointId as number, label: si.settings.label as string, hasElectricalSensor: false, hasSolarPower: true })
         }
+        const cu = data.nodes.find(n => n.id === 'consumer_unit')
+        if (cu?.x !== undefined && cu.y !== undefined) {
+          setCuPos({ x: cu.x, y: cu.y })
+        }
+        setAppliances(APPLIANCE_SLOTS.map((_, slot) => {
+          const a = data.nodes.find(n => n.id === applianceNodeId(slot))
+          if (a?.settings?.nodeId !== undefined && a.settings.endpointId !== undefined && a.settings.label) {
+            return { nodeId: a.settings.nodeId as number, endpointId: a.settings.endpointId as number, label: a.settings.label as string, hasElectricalSensor: true, hasSolarPower: false }
+          }
+          return null
+        }))
       })
       .catch(() => { })
   }, [])
@@ -372,6 +511,18 @@ function Home() {
   function handleSolarSave(device: SimpleDevice) {
     setSolarInverter(device)
     setSolarModalOpen(false)
+  }
+
+  function handleApplianceSave(slot: number, device: SimpleDevice) {
+    setAppliances(prev => prev.map((a, i) => (i === slot ? device : a)))
+    setApplianceModalSlot(null)
+  }
+
+  function handleApplianceDelete(slot: number) {
+    fetch(`/api/edges/${applianceEdgeId(slot)}`, { method: 'DELETE' })
+      .then(() => fetch(`/api/nodes/${applianceNodeId(slot)}`, { method: 'DELETE' }))
+      .then(() => setAppliances(prev => prev.map((a, i) => (i === slot ? null : a))))
+      .catch(() => { })
   }
 
   function handleGridDelete() {
@@ -402,6 +553,18 @@ function Home() {
           initialSelected={solarInverter}
           onSave={handleSolarSave}
           onClose={() => setSolarModalOpen(false)}
+        />
+      )}
+      {applianceModalSlot !== null && (
+        <ApplianceSensorModal
+          slotLabel={APPLIANCE_SLOTS[applianceModalSlot]}
+          topologyNodeId={applianceNodeId(applianceModalSlot)}
+          position={{ x: cuPos.x + (applianceModalSlot - 2) * 170, y: cuPos.y + 200 }}
+          sourceHandle={applianceCircuitHandle(applianceModalSlot)}
+          edgeId={applianceEdgeId(applianceModalSlot)}
+          initialSelected={appliances[applianceModalSlot]}
+          onSave={device => handleApplianceSave(applianceModalSlot, device)}
+          onClose={() => setApplianceModalSlot(null)}
         />
       )}
 
@@ -454,13 +617,25 @@ function Home() {
       <section>
         <SectionLabel>Loads</SectionLabel>
         <div style={{ display: 'flex', gap: 12 }}>
-          {APPLIANCE_SLOTS.map(name => (
-            <UnconfiguredSlot
-              key={name}
-              label={name}
-              description="Assign a device to monitor this load"
-            />
-          ))}
+          {APPLIANCE_SLOTS.map((name, slot) => {
+            const device = appliances[slot]
+            return device ? (
+              <ConfiguredSlot
+                key={name}
+                label={name}
+                device={device}
+                onReconfigure={() => setApplianceModalSlot(slot)}
+                onDelete={() => handleApplianceDelete(slot)}
+              />
+            ) : (
+              <UnconfiguredSlot
+                key={name}
+                label={name}
+                description="Assign a device to monitor this load"
+                onConfigure={() => setApplianceModalSlot(slot)}
+              />
+            )
+          })}
         </div>
       </section>
 

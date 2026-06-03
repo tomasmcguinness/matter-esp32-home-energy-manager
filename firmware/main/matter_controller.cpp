@@ -16,6 +16,7 @@
 #include "managers/node_manager.h"
 #include "ws_server.h"
 #include "power_logger.h"
+#include "value_cache.h"
 #include "cJSON.h"
 
 #include <app/server/Dnssd.h>
@@ -45,6 +46,12 @@ static constexpr char kNodeIdCounterKey[] = "HEM_NodeIdCnt";
 static constexpr char kNodeListKey[] = "HEM_NodeList";
 static constexpr size_t kMaxNodes = 32;
 static constexpr uint64_t kFirstDeviceNodeId = 1;
+
+// Requested subscription reporting intervals. The server may negotiate a
+// smaller MaxInterval; the agreed value is logged by the CHIP ReadClient
+// ("Subscription established ... MaxInterval = Ns").
+static constexpr uint16_t kSubMinIntervalSec = 1;
+static constexpr uint16_t kSubMaxIntervalSec = 30;
 
 static constexpr uint32_t kDescriptorCluster = 0x001D;
 static constexpr uint32_t kDescriptorDeviceTypeList = 0x0000;
@@ -519,17 +526,13 @@ void processElectricalPowerMeasurementUpdate(uint64_t node_id,
                                              const chip::app::ConcreteDataAttributePath &path,
                                              chip::TLV::TLVReader *data)
 {
-    ESP_LOGI(TAG, "Received attribute update for node 0x%016llX, cluster 0x%04X, attribute 0x%04X", node_id, path.mClusterId, path.mAttributeId);
+    ESP_LOGI(TAG, "Received attribute update for node 0x%016llX, endpoint 0x%04X, cluster 0x%04X, attribute 0x%04X", node_id, path.mEndpointId, path.mClusterId, path.mAttributeId);
 
-    // Ignore anything that isn't from the ElectrialPowerMeasurement cluster.
+    // Ignore anything that isn't from the ElectrialPowerMeasurement cluster for the time being.
     //
     if (path.mClusterId != ElectricalPowerMeasurement::Id) {
         return;
     }
-
-    // if (path.mAttributeId != ElectricalPowerMeasurement::Attributes::ActivePower::Id) {
-    //     return;
-    // }
 
     if (data->GetType() == chip::TLV::kTLVType_Null) {
         return;
@@ -540,10 +543,19 @@ void processElectricalPowerMeasurementUpdate(uint64_t node_id,
     //
     int64_t raw_value = 0;
 
+    // If we don't get a value, ignore the update.
+    //
     if (data->Get(raw_value) != CHIP_NO_ERROR) {
         return;
     }
 
+    // Cache the latest value so a periodic task can sample it between reports.
+    //
+    ValueCache::instance().put(node_id, path.mEndpointId, path.mClusterId, path.mAttributeId, raw_value);
+
+    // If the update is for the grid, log it.
+    // TODO Log power data from different sources.
+    //
     if (node_id == s_grid_node_id &&
         path.mEndpointId == s_grid_endpoint_id &&
         path.mAttributeId == ElectricalPowerMeasurement::Attributes::ActivePower::Id)
@@ -552,13 +564,33 @@ void processElectricalPowerMeasurementUpdate(uint64_t node_id,
         power_logger_sample((int32_t)raw_value);
     }
 
-    ESP_LOGI(TAG, "Sending 'attribute_update' for node 0x%016llX, cluster 0x%04X, attribute 0x%04X", node_id, path.mClusterId, path.mAttributeId);
+    ESP_LOGI(TAG, "Sending 'attribute_update' for node 0x%016llX, endpoint: 0x%02X, cluster 0x%04X, attribute 0x%04X", node_id, path.mEndpointId, path.mClusterId, path.mAttributeId);
 
     char json[128];
 
     snprintf(json, sizeof(json), "{\"type\":\"attribute_update\",\"data\":{\"nodeId\":%llu,\"endpointId\":%u, \"clusterId\":%u, \"attributeId\":%u, \"value\":%lld}}", (unsigned long long)node_id, (unsigned)path.mEndpointId, path.mClusterId, path.mAttributeId, raw_value);
 
     ws_server_broadcast(json, strlen(json));
+}
+
+void matter_controller_seed_value_cache(void)
+{
+    static constexpr size_t kMaxSensors = 32;
+    uint64_t node_ids[kMaxSensors];
+    uint16_t endpoint_ids[kMaxSensors];
+    size_t count = device_manager_get_electrical_sensor_endpoints(node_ids, endpoint_ids, kMaxSensors);
+
+    // Pre-populate one (invalid) entry per attribute we subscribe to, so the
+    // cache shape mirrors the loaded device structure before any report arrives.
+    //
+    for (size_t i = 0; i < count; i++)
+    {
+        ValueCache::instance().seed(node_ids[i], endpoint_ids[i], ElectricalPowerMeasurement::Id, ElectricalPowerMeasurement::Attributes::Voltage::Id);
+        ValueCache::instance().seed(node_ids[i], endpoint_ids[i], ElectricalPowerMeasurement::Id, ElectricalPowerMeasurement::Attributes::ActiveCurrent::Id);
+        ValueCache::instance().seed(node_ids[i], endpoint_ids[i], ElectricalPowerMeasurement::Id, ElectricalPowerMeasurement::Attributes::ActivePower::Id);
+    }
+
+    ESP_LOGI(TAG, "Seeded value cache for %u electrical sensor endpoint(s)", (unsigned)count);
 }
 
 esp_err_t matter_controller_subscribe(void)
@@ -570,39 +602,63 @@ esp_err_t matter_controller_subscribe(void)
     uint16_t endpoint_ids[kMaxSensors];
     size_t count = device_manager_get_electrical_sensor_endpoints(node_ids, endpoint_ids, kMaxSensors);
 
-    if (count > 0)
+    // A Matter subscription rides a single CASE session to one node, so we
+    // subscribe per node (not per endpoint). The endpoint is wildcarded in the
+    // attribute path, so one subscription per node covers every endpoint on
+    // that node exposing ElectricalPowerMeasurement.
+    //
+    uint64_t unique_nodes[kMaxSensors];
+    size_t node_count = 0;
+    for (size_t i = 0; i < count; i++)
     {
-        ESP_LOGI(TAG, "Subscribing to Active Power on %u electrical sensor endpoint(s)", (unsigned)count);
-
-        for (size_t i = 0; i < count; i++)
+        bool seen = false;
+        for (size_t j = 0; j < node_count; j++)
         {
-            uint64_t node_id = node_ids[i];
-            uint16_t endpoint_id = endpoint_ids[i];
+            if (unique_nodes[j] == node_ids[i]) { seen = true; break; }
+        }
+        if (!seen)
+        {
+            unique_nodes[node_count++] = node_ids[i];
+        }
+    }
 
-            ESP_LOGI(TAG, "Subscribing to Active Power on node 0x%016llX, endpoint %u", (unsigned long long)node_id, (unsigned)endpoint_id);
+    if (node_count > 0)
+    {
+        ESP_LOGI(TAG, "Subscribing to ElectricalPowerMeasurement on %u node(s)", (unsigned)node_count);
 
-            auto *args = new std::tuple<uint64_t, uint16_t>(node_id, endpoint_id);
+        for (size_t i = 0; i < node_count; i++)
+        {
+            uint64_t node_id = unique_nodes[i];
+
+            ESP_LOGI(TAG, "Subscribing to ElectricalPowerMeasurement on node 0x%016llX (all endpoints), requested MaxInterval = %us", (unsigned long long)node_id, (unsigned)kSubMaxIntervalSec);
+
+            auto *args = new uint64_t(node_id);
 
             chip::DeviceLayer::PlatformMgr().ScheduleWork([](intptr_t arg)
                                                           {
-                auto *args = reinterpret_cast<std::tuple<uint64_t, uint16_t> *>(arg);
+                auto *args = reinterpret_cast<uint64_t *>(arg);
 
                 ScopedMemoryBufferWithSize<AttributePathParams> attr_paths;
                 attr_paths.Alloc(3);
 
+                // Endpoint left as wildcard (kInvalidEndpointId): subscribe to
+                // these attributes on every endpoint of the node that exposes
+                // the ElectricalPowerMeasurement cluster.
+                //
                 attr_paths[0] = AttributePathParams(ElectricalPowerMeasurement::Id, ElectricalPowerMeasurement::Attributes::Voltage::Id);
                 attr_paths[1] = AttributePathParams(ElectricalPowerMeasurement::Id, ElectricalPowerMeasurement::Attributes::ActiveCurrent::Id);
                 attr_paths[2] = AttributePathParams(ElectricalPowerMeasurement::Id, ElectricalPowerMeasurement::Attributes::ActivePower::Id);
-                
+
                 ScopedMemoryBufferWithSize<EventPathParams> event_paths;
                 event_paths.Alloc(0);
 
                 // This might be an ICD device??
-                auto *cmd = chip::Platform::New<esp_matter::controller::subscribe_command>(std::get<0>(*args),
-                    std::move(attr_paths), 
-                    std::move(event_paths), 
-                    1, // MinInterval 1 second 
-                    30, // MaxInterval 30 seconds
+                //
+                auto *cmd = chip::Platform::New<esp_matter::controller::subscribe_command>(*args,
+                    std::move(attr_paths),
+                    std::move(event_paths),
+                    kSubMinIntervalSec, // MinInterval
+                    kSubMaxIntervalSec, // MaxInterval (requested ceiling)
                     false, // <--- Keep Subscriptions
                     on_attribute_data_cb,
                     nullptr,
@@ -610,10 +666,10 @@ esp_err_t matter_controller_subscribe(void)
                     node_subscription_terminated_cb,
                     nullptr,
                     false);
-        
+
                 delete args;
-                
-                cmd->send_command(); 
+
+                cmd->send_command();
             }, reinterpret_cast<intptr_t>(args));
         }
     }

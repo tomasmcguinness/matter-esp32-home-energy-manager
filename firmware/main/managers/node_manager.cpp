@@ -11,6 +11,8 @@
 #include "freertos/semphr.h"
 #include "cJSON.h"
 
+#include "value_cache.h"
+
 static const char *TAG = "node_config_manager";
 
 #define LFS_BASE_PATH "/littlefs"
@@ -44,7 +46,11 @@ static node_config_t *find_node(const char *id)
     return nullptr;
 }
 
-static cJSON *build_json(void)
+// When values is non-null, each node that carries a Matter identity
+// (settings.nodeId + settings.endpointId) gets a transient "values" array of
+// {clusterId, attributeId, value} from the cache. Persisted JSON passes null so
+// these volatile values are never written to disk.
+static cJSON *build_json(const std::vector<ValueCacheEntry> *values)
 {
     cJSON *root = cJSON_CreateObject();
     cJSON *arr  = cJSON_AddArrayToObject(root, "nodes");
@@ -54,7 +60,29 @@ static cJSON *build_json(void)
         cJSON_AddNumberToObject(obj, "x", nc.x);
         cJSON_AddNumberToObject(obj, "y", nc.y);
         cJSON *settings = cJSON_Parse(nc.settings_json.c_str());
-        cJSON_AddItemToObject(obj, "settings", settings ? settings : cJSON_CreateObject());
+        if (!settings) settings = cJSON_CreateObject();
+        cJSON_AddItemToObject(obj, "settings", settings);
+
+        if (values) {
+            cJSON *nid_j = cJSON_GetObjectItemCaseSensitive(settings, "nodeId");
+            cJSON *eid_j = cJSON_GetObjectItemCaseSensitive(settings, "endpointId");
+            if (cJSON_IsNumber(nid_j) && cJSON_IsNumber(eid_j)) {
+                uint64_t node_id     = (uint64_t)nid_j->valuedouble;
+                uint16_t endpoint_id = (uint16_t)eid_j->valuedouble;
+                cJSON *vals = cJSON_CreateArray();
+                for (const auto &e : *values) {
+                    if (!e.valid || e.node_id != node_id || e.endpoint_id != endpoint_id) continue;
+                    cJSON *v = cJSON_CreateObject();
+                    cJSON_AddNumberToObject(v, "clusterId", (double)e.cluster_id);
+                    cJSON_AddNumberToObject(v, "attributeId", (double)e.attribute_id);
+                    cJSON_AddNumberToObject(v, "value", (double)e.value);
+                    cJSON_AddItemToArray(vals, v);
+                }
+                if (cJSON_GetArraySize(vals) > 0) cJSON_AddItemToObject(obj, "values", vals);
+                else cJSON_Delete(vals);
+            }
+        }
+
         cJSON_AddItemToArray(arr, obj);
     }
     cJSON *edges = cJSON_AddArrayToObject(root, "edges");
@@ -298,8 +326,10 @@ esp_err_t node_manager_clear(void)
 
 char *node_manager_get_all_json(void)
 {
+    // Snapshot the value cache before taking s_mutex to keep lock scopes separate.
+    std::vector<ValueCacheEntry> values = ValueCache::instance().snapshot();
     xSemaphoreTake(s_mutex, portMAX_DELAY);
-    cJSON *root = build_json();
+    cJSON *root = build_json(&values);
     xSemaphoreGive(s_mutex);
     char *text = cJSON_PrintUnformatted(root);
     cJSON_Delete(root);
@@ -309,7 +339,7 @@ char *node_manager_get_all_json(void)
 esp_err_t node_manager_persist(void)
 {
     xSemaphoreTake(s_mutex, portMAX_DELAY);
-    cJSON *root = build_json();
+    cJSON *root = build_json(nullptr);
     xSemaphoreGive(s_mutex);
 
     char *text = cJSON_PrintUnformatted(root);

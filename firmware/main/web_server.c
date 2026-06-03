@@ -244,8 +244,9 @@ static esp_err_t devices_endpoints_get_handler(httpd_req_t *req)
     }
 
     // --- 2. Build in-use set from node_manager ---
-    // Nodes with settings.type == "device" carry settings.nodeId + settings.endpointId
-    // and represent already-assigned topology slots (grid_meter, solar_inverter, etc.).
+    // Any node carrying settings.nodeId + settings.endpointId has already claimed that
+    // Matter endpoint (grid_meter, solar_inverter, appliance_N, ...). An endpoint may be
+    // assigned to at most one topology node regardless of its role, so exclude all of them.
 #define MAX_IN_USE 16
     uint64_t used_node_ids[MAX_IN_USE];
     uint16_t used_ep_ids[MAX_IN_USE];
@@ -264,8 +265,6 @@ static esp_err_t devices_endpoints_get_handler(httpd_req_t *req)
             {
                 cJSON *settings = cJSON_GetObjectItemCaseSensitive(n, "settings");
                 if (!cJSON_IsObject(settings)) continue;
-                cJSON *type_j = cJSON_GetObjectItemCaseSensitive(settings, "type");
-                if (!cJSON_IsString(type_j) || strcmp(type_j->valuestring, "device") != 0) continue;
                 cJSON *nid_j = cJSON_GetObjectItemCaseSensitive(settings, "nodeId");
                 cJSON *eid_j = cJSON_GetObjectItemCaseSensitive(settings, "endpointId");
                 if (!cJSON_IsNumber(nid_j) || !cJSON_IsNumber(eid_j)) continue;

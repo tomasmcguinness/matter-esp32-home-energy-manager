@@ -11,6 +11,7 @@ export type Endpoint = {
 
 export type Device = {
   nodeId: number
+  name?: string
   vendorName: string
   productName: string
   endpoints: Endpoint[]
@@ -132,6 +133,8 @@ function Devices() {
   const [simpleDevices, setSimpleDevices] = useState<SimpleDevice[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  const [editingNodeId, setEditingNodeId] = useState<number | null>(null)
+  const [draftName, setDraftName] = useState('')
 
   useEffect(() => {
     Promise.all([
@@ -152,6 +155,32 @@ function Devices() {
   function handleReinterrogate(nodeId: number) {
     fetch(`/api/devices/${nodeId}/interrogate`, { method: 'POST' })
       .then((r) => { if (!r.ok) throw new Error(`HTTP ${r.status}`) })
+  }
+
+  function startEdit(dev: Device) {
+    setEditingNodeId(dev.nodeId)
+    setDraftName(dev.name ?? '')
+  }
+
+  function cancelEdit() {
+    setEditingNodeId(null)
+    setDraftName('')
+  }
+
+  function handleSaveName(nodeId: number) {
+    const name = draftName.trim()
+    if (!name) return
+    fetch(`/api/devices/${nodeId}/name`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name }),
+    })
+      .then((r) => { if (!r.ok) throw new Error(`HTTP ${r.status}`) })
+      .then(() => {
+        setDevices((prev) => prev.map((d) => (d.nodeId === nodeId ? { ...d, name } : d)))
+        cancelEdit()
+      })
+      .catch((e: unknown) => setError(e instanceof Error ? e.message : 'Rename failed'))
   }
 
   function handleDelete(nodeId: number) {
@@ -209,13 +238,47 @@ function Devices() {
         ) : (
           <div className="d-flex flex-column gap-3">
             {devices.map((dev) => {
-              const name = [dev.vendorName, dev.productName].filter(Boolean).join(' ')
+              const productName = [dev.vendorName, dev.productName].filter(Boolean).join(' ')
               const nodeHex = `Node 0x${dev.nodeId.toString(16).toUpperCase()}`
+              const title = dev.name || productName || nodeHex
+              const subtitle = [dev.name ? productName : '', nodeHex].filter(Boolean).join(' · ')
+              const isEditing = editingNodeId === dev.nodeId
               return (
                 <div key={dev.nodeId} style={{ border: '1px solid #dee2e6', borderRadius: 6, overflow: 'hidden' }}>
-                  <div style={{ background: '#f8f9fa', borderBottom: '1px solid #dee2e6', padding: '8px 12px' }}>
-                    <strong>{name || nodeHex}</strong>
-                    {name && <span className="text-muted ms-2" style={{ fontSize: '0.8rem' }}>{nodeHex}</span>}
+                  <div style={{ background: '#f8f9fa', borderBottom: '1px solid #dee2e6', padding: '8px 12px' }}
+                    className="d-flex align-items-center justify-content-between gap-2">
+                    {isEditing ? (
+                      <>
+                        <input
+                          type="text"
+                          className="form-control form-control-sm"
+                          style={{ maxWidth: 280 }}
+                          autoFocus
+                          value={draftName}
+                          placeholder={productName || nodeHex}
+                          onChange={(e) => setDraftName(e.target.value)}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter') handleSaveName(dev.nodeId)
+                            if (e.key === 'Escape') cancelEdit()
+                          }}
+                        />
+                        <div className="d-flex gap-2 flex-shrink-0">
+                          <button className="btn btn-primary btn-sm" disabled={!draftName.trim()}
+                            onClick={() => handleSaveName(dev.nodeId)}>Save</button>
+                          <button className="btn btn-outline-secondary btn-sm" onClick={cancelEdit}>Cancel</button>
+                        </div>
+                      </>
+                    ) : (
+                      <>
+                        <div style={{ minWidth: 0 }}>
+                          <strong>{title}</strong>
+                          {subtitle && <span className="text-muted ms-2" style={{ fontSize: '0.8rem' }}>{subtitle}</span>}
+                        </div>
+                        <button className="btn btn-outline-secondary btn-sm flex-shrink-0" onClick={() => startEdit(dev)}>
+                          Rename
+                        </button>
+                      </>
+                    )}
                   </div>
                   {dev.endpoints.length > 0 && (() => {
                     const epMap = new Map(dev.endpoints.map(e => [e.endpointId, e]))

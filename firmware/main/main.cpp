@@ -214,6 +214,7 @@ extern "C" void app_main(void)
 
     ESP_ERROR_CHECK(node_manager_init());
     ESP_ERROR_CHECK(device_manager_init());
+    matter_controller_seed_value_cache();
     ESP_ERROR_CHECK(power_logger_init());
 
     uint8_t eth_port_cnt = 0;
