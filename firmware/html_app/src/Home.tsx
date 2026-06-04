@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 
-type SimpleDevice = { nodeId: number; endpointId: number; label: string; hasElectricalSensor: boolean; hasSolarPower: boolean }
+type SimpleDevice = { nodeId: number; endpointId: number; label: string; name?: string; hasElectricalSensor: boolean; hasSolarPower: boolean }
 
 type SlotProps = {
   label: string
@@ -108,12 +108,12 @@ function ConfiguredSlot({ label, device, onReconfigure, onDelete }: { label: str
         <TrashIcon />
       </button>
       <div style={{ fontSize: 10, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '.08em', color: '#16a34a' }}>{label}</div>
-      <div style={{ fontWeight: 600, fontSize: 14, color: '#1e293b', textAlign: 'center' }}>{device.label}</div>
+      <div style={{ fontWeight: 600, fontSize: 14, color: '#1e293b', textAlign: 'center' }}>{device.name || device.label}</div>
       <div style={{ fontSize: 12, color: '#64748b' }}>
         Node 0x{device.nodeId.toString(16).toUpperCase()} &middot; EP {device.endpointId}
       </div>
       <div style={{ marginTop: 4, fontSize: 11, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '.06em', color: hovered ? '#3b82f6' : '#94a3b8', transition: 'color .15s' }}>
-        ✎ Change
+        ✎ Edit
       </div>
     </div>
   )
@@ -300,7 +300,7 @@ function SolarInverterModal({ initialSelected, onSave, onClose }: { initialSelec
   )
 }
 
-function ApplianceSensorModal({ slotLabel, topologyNodeId, position, sourceHandle, edgeId, initialSelected, onSave, onClose }: {
+function EditApplianceModal({ slotLabel, topologyNodeId, position, sourceHandle, edgeId, initialSelected, onSave, onClose }: {
   slotLabel: string
   topologyNodeId: string
   position: { x: number; y: number }
@@ -314,6 +314,11 @@ function ApplianceSensorModal({ slotLabel, topologyNodeId, position, sourceHandl
 
   const [devices, setDevices] = useState<EndpointEntry[]>([])
   const [selected, setSelected] = useState<SimpleDevice | null>(initialSelected)
+  // User-supplied friendly name. Seeded from any existing name, otherwise the device label.
+  const [name, setName] = useState<string>(initialSelected?.name ?? initialSelected?.label ?? '')
+  // Track whether the user has manually edited the name, so picking a different device
+  // can re-seed the default name without clobbering a custom one.
+  const [nameTouched, setNameTouched] = useState<boolean>(!!initialSelected?.name)
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -346,13 +351,16 @@ function ApplianceSensorModal({ slotLabel, topologyNodeId, position, sourceHandl
   function handleSave() {
     if (!selected) return
     setSaving(true)
+    // Fall back to the device label when the user left the name blank.
+    const resolvedName = name.trim() || selected.label
     fetch(`/api/nodes/${topologyNodeId}`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         x: position.x,
         y: position.y,
-        settings: { label: selected.label, type: 'appliance', nodeId: selected.nodeId, endpointId: selected.endpointId },
+        // The backend replaces the whole settings object (no merge), so send every field.
+        settings: { label: selected.label, name: resolvedName, type: 'appliance', nodeId: selected.nodeId, endpointId: selected.endpointId },
       }),
     })
       .then(r => r.ok ? r.json() : Promise.reject(`HTTP ${r.status}`))
@@ -363,7 +371,7 @@ function ApplianceSensorModal({ slotLabel, topologyNodeId, position, sourceHandl
         body: JSON.stringify({ id: edgeId, source: 'consumer_unit', sourceHandle, target: topologyNodeId, targetHandle: 'power-in' }),
       }))
       .then(r => r.ok ? r.json() : Promise.reject(`HTTP ${r.status}`))
-      .then(() => onSave(selected))
+      .then(() => onSave({ ...selected, name: resolvedName }))
       .catch((e: unknown) => {
         setError(e instanceof Error ? e.message : String(e))
         setSaving(false)
@@ -373,8 +381,20 @@ function ApplianceSensorModal({ slotLabel, topologyNodeId, position, sourceHandl
   return (
     <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.4)', zIndex: 200, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
       <div style={{ background: '#fff', borderRadius: 12, padding: 24, width: 380, maxWidth: '90vw', boxShadow: '0 8px 32px rgba(0,0,0,0.18)' }}>
-        <h2 style={{ margin: '0 0 4px', fontSize: 16, fontWeight: 700, color: '#1e293b' }}>Select {slotLabel} Sensor</h2>
+        <h2 style={{ margin: '0 0 4px', fontSize: 16, fontWeight: 700, color: '#1e293b' }}>Edit {slotLabel}</h2>
+        
+        
         <p style={{ margin: '0 0 16px', fontSize: 13, color: '#64748b' }}>Choose the device that measures power used by this appliance.</p>
+        <label style={{ display: 'block', marginBottom: 16 }}>
+          <span style={{ display: 'block', fontSize: 12, fontWeight: 600, color: '#475569', marginBottom: 4 }}>Appliance name</span>
+          <input
+            type="text"
+            value={name}
+            placeholder="e.g. Dishwasher"
+            onChange={e => { setName(e.target.value); setNameTouched(true) }}
+            style={{ width: '100%', boxSizing: 'border-box', padding: '8px 12px', borderRadius: 6, border: '1px solid #e2e8f0', fontSize: 14, color: '#1e293b' }}
+          />
+        </label>
         {error && <div style={{ marginBottom: 12, padding: '8px 12px', background: '#fef2f2', border: '1px solid #fca5a5', borderRadius: 6, fontSize: 13, color: '#b91c1c' }}>{error}</div>}
         {loading && <p style={{ fontSize: 13, color: '#94a3b8' }}>Loading devices…</p>}
         {!loading && devices.length === 0 && <p style={{ fontSize: 13, color: '#94a3b8' }}>No devices with power measurement found.</p>}
@@ -386,7 +406,11 @@ function ApplianceSensorModal({ slotLabel, topologyNodeId, position, sourceHandl
               return (
                 <div
                   key={`${d.nodeId}-${d.endpointId}`}
-                  onClick={() => setSelected({ nodeId: d.nodeId, endpointId: d.endpointId, label: displayLabel, hasElectricalSensor: true, hasSolarPower: false })}
+                  onClick={() => {
+                    setSelected({ nodeId: d.nodeId, endpointId: d.endpointId, label: displayLabel, hasElectricalSensor: true, hasSolarPower: false })
+                    // Default the name to the device label until the user types their own.
+                    if (!nameTouched) setName(displayLabel)
+                  }}
                   style={{
                     padding: '10px 14px', borderRadius: 8, cursor: 'pointer',
                     border: `2px solid ${isSelected ? '#3b82f6' : '#e2e8f0'}`,
@@ -464,7 +488,7 @@ const applianceNodeId = (slot: number) => `appliance_${slot + 1}`
 const applianceCircuitHandle = (slot: number) => `circuit_${slot + 1}`
 const applianceEdgeId = (slot: number) => `consumer_unit-${applianceCircuitHandle(slot)}-${applianceNodeId(slot)}-power-in`
 
-type SavedNode = { id: string; x?: number; y?: number; settings?: { label?: string; type?: string; nodeId?: number; endpointId?: number } }
+type SavedNode = { id: string; x?: number; y?: number; settings?: { label?: string; name?: string; type?: string; nodeId?: number; endpointId?: number } }
 
 function Home() {
   const [gridModalOpen, setGridModalOpen] = useState(false)
@@ -495,7 +519,7 @@ function Home() {
         setAppliances(APPLIANCE_SLOTS.map((_, slot) => {
           const a = data.nodes.find(n => n.id === applianceNodeId(slot))
           if (a?.settings?.nodeId !== undefined && a.settings.endpointId !== undefined && a.settings.label) {
-            return { nodeId: a.settings.nodeId as number, endpointId: a.settings.endpointId as number, label: a.settings.label as string, hasElectricalSensor: true, hasSolarPower: false }
+            return { nodeId: a.settings.nodeId as number, endpointId: a.settings.endpointId as number, label: a.settings.label as string, name: a.settings.name as string | undefined, hasElectricalSensor: true, hasSolarPower: false }
           }
           return null
         }))
@@ -556,7 +580,7 @@ function Home() {
         />
       )}
       {applianceModalSlot !== null && (
-        <ApplianceSensorModal
+        <EditApplianceModal
           slotLabel={APPLIANCE_SLOTS[applianceModalSlot]}
           topologyNodeId={applianceNodeId(applianceModalSlot)}
           position={{ x: cuPos.x + (applianceModalSlot - 2) * 170, y: cuPos.y + 200 }}

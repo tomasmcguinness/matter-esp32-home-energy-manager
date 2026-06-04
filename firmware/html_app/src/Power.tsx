@@ -107,13 +107,60 @@ function todayString(): string {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
 }
 
-function Data() {
-  const [searchParams, setSearchParams] = useSearchParams()
-  const date = searchParams.get('date') ?? todayString()
+// The topology graph is the source of truth for which nodes exist and how they
+// are wired. The handle a node connects to on the consumer unit IS its role.
+const CU_ID = 'consumer_unit'
 
-  function setDate(value: string) {
-    setSearchParams(prev => { prev.set('date', value); return prev }, { replace: true })
+type NodeRole = 'grid' | 'solar' | 'appliance' | 'other'
+
+type SavedNodeConfig = { id: string; settings?: Record<string, unknown> }
+type SavedEdgeConfig = { id: string; source: string; target: string; sourceHandle?: string; targetHandle?: string }
+
+type ConnectedNode = { graphId: string; label: string; role: NodeRole }
+
+function roleForHandle(handle?: string | null): NodeRole {
+  if (handle === 'grid') return 'grid'
+  if (handle?.startsWith('solar')) return 'solar'
+  if (handle?.startsWith('circuit')) return 'appliance'
+  return 'other'
+}
+
+function nodeLabel(node: SavedNodeConfig | undefined, fallback: string): string {
+  if (!node) return fallback
+  const name = node.settings?.name
+  const label = node.settings?.label
+  if (typeof name === 'string' && name) return name
+  if (typeof label === 'string' && label) return label
+  return fallback
+}
+
+const ROLE_ORDER: Record<NodeRole, number> = { grid: 0, solar: 1, appliance: 2, other: 3 }
+
+// Derive the connected nodes (and their roles) from the consumer unit's edges.
+function connectedNodes(nodes: SavedNodeConfig[], edges: SavedEdgeConfig[]): ConnectedNode[] {
+  const byId = new Map(nodes.map(n => [n.id, n]))
+  const seen = new Set<string>()
+  const result: ConnectedNode[] = []
+
+  for (const e of edges) {
+    let otherId: string | null = null
+    let cuHandle: string | null | undefined = null
+    if (e.source === CU_ID) { otherId = e.target; cuHandle = e.sourceHandle }
+    else if (e.target === CU_ID) { otherId = e.source; cuHandle = e.targetHandle }
+    if (!otherId || seen.has(otherId)) continue
+    seen.add(otherId)
+    result.push({
+      graphId: otherId,
+      label: nodeLabel(byId.get(otherId), otherId),
+      role: roleForHandle(cuHandle),
+    })
   }
+
+  return result.sort((a, b) =>
+    ROLE_ORDER[a.role] - ROLE_ORDER[b.role] || a.label.localeCompare(b.label))
+}
+
+function GridSection({ date }: { date: string }) {
   const [records, setRecords] = useState<PowerRecord[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -133,10 +180,63 @@ function Data() {
       })
   }, [date])
 
+  if (error) return <div className="alert alert-danger">{error}</div>
+  if (loading) return <p style={{ color: '#94a3b8', fontSize: 13 }}>Loading…</p>
+  return <PowerChart records={records} />
+}
+
+function PendingSection() {
+  return (
+    <p style={{ color: '#94a3b8', fontSize: 13 }}>
+      Power recording for this device is not yet available.
+    </p>
+  )
+}
+
+function NodeCard({ node, date }: { node: ConnectedNode; date: string }) {
+  return (
+    <div className="mb-4">
+      <h2 style={{ fontSize: 14, fontWeight: 600, color: '#64748b', marginBottom: 12 }}>
+        {node.label}{node.role === 'grid' ? ' (Grid)' : ''}
+      </h2>
+      <div style={{ border: '1px solid #e2e8f0', borderRadius: 8, padding: '12px 16px', background: '#fff' }}>
+        {node.role === 'grid' ? <GridSection date={date} /> : <PendingSection />}
+      </div>
+    </div>
+  )
+}
+
+function Power() {
+  const [searchParams, setSearchParams] = useSearchParams()
+  const date = searchParams.get('date') ?? todayString()
+
+  function setDate(value: string) {
+    setSearchParams(prev => { prev.set('date', value); return prev }, { replace: true })
+  }
+
+  const [nodes, setNodes] = useState<ConnectedNode[]>([])
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
+
+  useEffect(() => {
+    setLoading(true)
+    setError(null)
+    fetch('/api/nodes')
+      .then(r => r.ok ? r.json() : Promise.reject(`HTTP ${r.status}`))
+      .then((data: { nodes?: SavedNodeConfig[]; edges?: SavedEdgeConfig[] }) => {
+        setNodes(connectedNodes(data.nodes ?? [], data.edges ?? []))
+        setLoading(false)
+      })
+      .catch((e: unknown) => {
+        setError(e instanceof Error ? e.message : String(e))
+        setLoading(false)
+      })
+  }, [])
+
   return (
     <div className="container">
       <div className="mt-3 mb-2 d-flex align-items-center justify-content-between">
-        <h1 className="mb-0">Data</h1>
+        <h1 className="mb-0">Power</h1>
         <input
           type="date"
           className="form-control form-control-sm"
@@ -150,16 +250,17 @@ function Data() {
 
       {error && <div className="alert alert-danger">{error}</div>}
 
-      <h2 style={{ fontSize: 14, fontWeight: 600, color: '#64748b', marginBottom: 12 }}>Grid Power</h2>
       {loading ? (
         <p style={{ color: '#94a3b8', fontSize: 13 }}>Loading…</p>
+      ) : nodes.length === 0 ? (
+        <p style={{ color: '#94a3b8', fontSize: 13 }}>
+          No connected devices. Wire a meter or appliance to the consumer unit on the Topology page.
+        </p>
       ) : (
-        <div style={{ border: '1px solid #e2e8f0', borderRadius: 8, padding: '12px 16px', background: '#fff' }}>
-          <PowerChart records={records} />
-        </div>
+        nodes.map(n => <NodeCard key={n.graphId} node={n} date={date} />)
       )}
     </div>
   )
 }
 
-export default Data
+export default Power

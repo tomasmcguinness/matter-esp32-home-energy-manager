@@ -212,35 +212,10 @@ function Topology() {
     return () => window.removeEventListener('keydown', handleKeyDown)
   }, [setNodes, setEdges])
 
-  // const onDragStart = (e: React.DragEvent, device: DeviceSpec) => {
-  //   e.dataTransfer.setData('application/reactflow', JSON.stringify(device))
-  //   e.dataTransfer.effectAllowed = 'copy'
-  // }
-
   const onDragOver = useCallback((e: React.DragEvent) => {
     e.preventDefault()
     e.dataTransfer.dropEffect = 'copy'
   }, [])
-
-  // const onDrop = useCallback((e: React.DragEvent) => {
-  //   e.preventDefault()
-  //   const raw = e.dataTransfer.getData('application/reactflow')
-  //   if (!raw || !reactFlowInstance.current) return
-  //   const device: DeviceSpec = JSON.parse(raw)
-  //   //if (device.dropTarget !== 'canvas') return
-
-  //   const position = reactFlowInstance.current.screenToFlowPosition({ x: e.clientX, y: e.clientY })
-  //   const id = `node_${++nodeIdCounter.current}`
-  //   setNodes(prev => [
-  //     ...prev,
-  //     { id, position, draggable: true, data: { label: `${device.icon} ${device.label}` } },
-  //   ])
-  //   fetch(`/api/nodes/${id}`, {
-  //     method: 'PUT',
-  //     headers: { 'Content-Type': 'application/json' },
-  //     body: JSON.stringify({ x: position.x, y: position.y }),
-  //   }).catch(() => { })
-  // }, [setNodes])
 
   const onDrop = useCallback(
     (e: React.DragEvent) => {
@@ -337,7 +312,7 @@ function Topology() {
             draggable: true,
             deletable: n.settings?.deletable !== false,
             data: {
-              label: (n.settings?.label as string) ?? n.id,
+              label: (n.settings?.name as string) || (n.settings?.label as string) || n.id,
               nodeId: n.settings?.nodeId as number | undefined,
               endpointId: n.settings?.endpointId as number | undefined,
               ...(hasPower ? { power } : {}),

@@ -8,7 +8,19 @@ export type Settings = {
 let settings: Settings = { name: 'Home Energy Manager' }
 
 type NodeConfig = { id: string; x: number; y: number; settings: Record<string, unknown> }
-let nodeConfigs: NodeConfig[] = []
+type EdgeConfig = { id: string; source: string; target: string; sourceHandle?: string; targetHandle?: string }
+
+// Seed a small topology so the Power page has connected nodes to render in dev:
+// a consumer unit fed by a grid meter, with an oven hanging off circuit 1.
+let nodeConfigs: NodeConfig[] = [
+  { id: 'consumer_unit', x: 0, y: 0, settings: { label: 'Consumer Unit', type: 'consumerUnit', deletable: false } },
+  { id: 'grid_meter', x: -220, y: 0, settings: { label: 'Grid Meter', type: 'device', nodeId: 30001, endpointId: 1 } },
+  { id: 'node_11', x: 260, y: -40, settings: { name: 'Oven', label: 'Oven', type: 'appliance', nodeId: 20001, endpointId: 1 } },
+]
+let edgeConfigs: EdgeConfig[] = [
+  { id: 'grid_meter-power-out-consumer_unit-grid', source: 'grid_meter', target: 'consumer_unit', sourceHandle: 'power-out', targetHandle: 'grid' },
+  { id: 'consumer_unit-circuit_1-node_11-power-in', source: 'consumer_unit', target: 'node_11', sourceHandle: 'circuit_1', targetHandle: 'power-in' },
+]
 
 let devices: Device[] = [
   {
@@ -138,7 +150,7 @@ export const handlers = [
         ],
       }
     })
-    return HttpResponse.json({ nodes })
+    return HttpResponse.json({ nodes, edges: edgeConfigs })
   }),
 
   http.put('/api/nodes/:nodeId', async ({ params, request }) => {
@@ -224,6 +236,20 @@ export const handlers = [
   http.delete('/api/nodes/:nodeId', ({ params }) => {
     const id = params.nodeId as string
     nodeConfigs = nodeConfigs.filter(n => n.id !== id)
+    edgeConfigs = edgeConfigs.filter(e => e.source !== id && e.target !== id)
+    return HttpResponse.json({})
+  }),
+
+  http.post('/api/edges', async ({ request }) => {
+    const body = (await request.json()) as EdgeConfig
+    const existing = edgeConfigs.find(e => e.id === body.id)
+    if (!existing) edgeConfigs.push(body)
+    return HttpResponse.json({})
+  }),
+
+  http.delete('/api/edges/:edgeId', ({ params }) => {
+    const id = params.edgeId as string
+    edgeConfigs = edgeConfigs.filter(e => e.id !== id)
     return HttpResponse.json({})
   }),
 

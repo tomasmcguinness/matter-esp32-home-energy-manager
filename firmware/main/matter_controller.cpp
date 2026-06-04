@@ -465,7 +465,7 @@ void node_subscription_terminated_cb(uint64_t remote_node_id, uint32_t subscript
     ESP_LOGI(TAG, "Subscription terminated, node 0x%016llX, subscription id 0x%08X", remote_node_id, subscription_id);
 }
 
-void node_subscribe_failed_cb(void *ctx, const chip::ScopedNodeId &node_id, int err)
+void node_subscribe_failed_cb(void *ctx, const chip::ScopedNodeId &node_id, chip::ChipError err)
 {
     ESP_LOGE(TAG, "Failed to subscribe (context: %p)", ctx);
 }
@@ -664,7 +664,7 @@ esp_err_t matter_controller_subscribe(void)
                     nullptr,
                     node_subscription_established_cb,
                     node_subscription_terminated_cb,
-                    nullptr,
+                    node_subscribe_failed_cb,
                     false);
 
                 delete args;
