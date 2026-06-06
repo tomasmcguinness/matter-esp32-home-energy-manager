@@ -4,17 +4,21 @@
 #include <stddef.h>
 #include "esp_err.h"
 
-// Per-node power logger. An independent periodic task pulls the current
-// ElectricalPowerMeasurement/ActivePower reading from the ValueCache for every
-// topology node wired to the consumer unit (appliances + solar, but NOT the
-// grid — that stays in power_logger), and persists a per-minute average per
-// node. Files are keyed by the stable topology graph node id so recorded data
-// survives Matter device replacement.
+// Power logger for every topology node wired to the consumer unit. An
+// independent periodic task pulls the current ElectricalPowerMeasurement/
+// ActivePower reading from the ValueCache for each stream (appliances, solar
+// AND the grid) and persists a per-minute average. Polling the cache — rather
+// than logging on each Matter report — keeps a stalled or bursty subscription
+// from leaving gaps in the record.
 //
-// On-disk format mirrors power_logger (power_record_t), so the two streams are
-// interchangeable for downstream tooling:
-//   minute file : /littlefs/node-<graphId>-YYYY-MM-DD
-//   hourly file : /littlefs/nodeh-<graphId>-YYYY-MM-DD
+// Per-node files are keyed by the stable topology graph node id so recorded
+// data survives Matter device replacement. The grid is flagged and persisted to
+// the grid-* files power_logger owns, keeping the consumption-forecast pipeline
+// and web API unchanged. On-disk format is power_record_t throughout:
+//   node minute file : /littlefs/node-<graphId>-YYYY-MM-DD
+//   node hourly file : /littlefs/nodeh-<graphId>-YYYY-MM-DD
+//   grid minute file : /littlefs/grid-YYYY-MM-DD
+//   grid hourly file : /littlefs/grid-hourly-YYYY-MM-DD
 
 #ifdef __cplusplus
 extern "C" {

@@ -1,70 +1,14 @@
 #include "power_logger.h"
-#include "consumption_forecast.h"
 
 #include <stdio.h>
 #include <string.h>
 #include <time.h>
 
-#include "freertos/FreeRTOS.h"
-#include "freertos/semphr.h"
-#include "esp_timer.h"
 #include "esp_log.h"
 #include "cJSON.h"
 
 #define TAG          "power_logger"
 #define LFS_BASE     "/littlefs"
-#define FLUSH_US     (60ULL * 1000000ULL) // 60 seconds
-
-static SemaphoreHandle_t    s_mutex;
-static esp_timer_handle_t   s_daily_timer;
-
-static void schedule_midnight_rollup(void);
-
-static void on_midnight_timer(void *arg)
-{
-    time_t now = time(NULL);
-    struct tm tm_info;
-    localtime_r(&now, &tm_info);
-
-    // Yesterday: one day before the new day we just entered.
-    struct tm yesterday_tm = tm_info;
-    yesterday_tm.tm_mday -= 1;
-    mktime(&yesterday_tm);
-    char yesterday[11];
-    strftime(yesterday, sizeof(yesterday), "%Y-%m-%d", &yesterday_tm);
-
-    // Tomorrow: one day ahead, for the consumption forecast.
-    struct tm tomorrow_tm = tm_info;
-    tomorrow_tm.tm_mday += 1;
-    mktime(&tomorrow_tm);
-    char tomorrow[11];
-    strftime(tomorrow, sizeof(tomorrow), "%Y-%m-%d", &tomorrow_tm);
-
-    power_logger_rollup_hourly(yesterday);
-    consumption_forecast_compute(tomorrow);
-    schedule_midnight_rollup();
-}
-
-static void schedule_midnight_rollup(void)
-{
-    time_t now = time(NULL);
-    struct tm tm_info;
-    localtime_r(&now, &tm_info);
-    tm_info.tm_hour = 0;
-    tm_info.tm_min  = 0;
-    tm_info.tm_sec  = 0;
-    tm_info.tm_mday += 1;
-    time_t next_midnight = mktime(&tm_info);
-    uint64_t delay_us = (uint64_t)(next_midnight - now) * 1000000ULL;
-    esp_timer_start_once(s_daily_timer, delay_us);
-    ESP_LOGI(TAG, "Daily rollup scheduled in %llu s", (unsigned long long)(next_midnight - now));
-}
-
-static struct {
-    int64_t  sum_mw;
-    uint32_t count;
-    uint32_t unix_minute; // start of the minute being accumulated
-} s_accum;
 
 static void date_from_unix(uint32_t ts, char *buf, size_t len)
 {
@@ -74,7 +18,7 @@ static void date_from_unix(uint32_t ts, char *buf, size_t len)
     strftime(buf, len, "%Y-%m-%d", &tm_info);
 }
 
-static void write_record(uint32_t unix_minute, int32_t power_mw)
+void power_logger_write_grid_minute(uint32_t unix_minute, int32_t power_mw)
 {
     char date[16];
     date_from_unix(unix_minute, date, sizeof(date));
@@ -91,71 +35,7 @@ static void write_record(uint32_t unix_minute, int32_t power_mw)
     power_record_t rec = {unix_minute, power_mw};
     fwrite(&rec, sizeof(rec), 1, f);
     fclose(f);
-}
-
-static void on_flush_timer(void *arg)
-{
-    xSemaphoreTake(s_mutex, portMAX_DELAY);
-    if (s_accum.count == 0)
-    {
-        xSemaphoreGive(s_mutex);
-        return;
-    }
-    int32_t  avg_mw      = (int32_t)(s_accum.sum_mw / s_accum.count);
-    uint32_t unix_minute = s_accum.unix_minute;
-    s_accum.sum_mw    = 0;
-    s_accum.count     = 0;
-    s_accum.unix_minute = 0;
-    xSemaphoreGive(s_mutex);
-
-    write_record(unix_minute, avg_mw);
-    ESP_LOGD(TAG, "Flushed minute %u: %d mW", unix_minute, avg_mw);
-}
-
-esp_err_t power_logger_init(void)
-{
-    s_mutex = xSemaphoreCreateMutex();
-    if (!s_mutex)
-        return ESP_ERR_NO_MEM;
-
-    esp_timer_handle_t flush_timer;
-    esp_timer_create_args_t flush_args = {
-        .callback = on_flush_timer,
-        .arg      = NULL,
-        .name     = "power_logger_flush",
-    };
-    esp_err_t err = esp_timer_create(&flush_args, &flush_timer);
-    if (err != ESP_OK)
-        return err;
-    err = esp_timer_start_periodic(flush_timer, FLUSH_US);
-    if (err != ESP_OK)
-        return err;
-
-    esp_timer_create_args_t daily_args = {
-        .callback = on_midnight_timer,
-        .arg      = NULL,
-        .name     = "power_logger_daily",
-    };
-    err = esp_timer_create(&daily_args, &s_daily_timer);
-    if (err != ESP_OK)
-        return err;
-    schedule_midnight_rollup();
-
-    return ESP_OK;
-}
-
-void power_logger_sample(int32_t power_mw)
-{
-    time_t now = time(NULL);
-    // Round down to the current minute boundary
-    uint32_t minute_start = (uint32_t)(now - (now % 60));
-
-    xSemaphoreTake(s_mutex, portMAX_DELAY);
-    if (s_accum.count == 0)
-        s_accum.unix_minute = minute_start;
-    s_accum.sum_mw += power_mw;
-    s_accum.count++;
-    xSemaphoreGive(s_mutex);
+    ESP_LOGD(TAG, "Wrote grid minute %u: %d mW", unix_minute, power_mw);
 }
 
 char *power_logger_day_json(const char *date_str)

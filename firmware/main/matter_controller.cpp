@@ -17,7 +17,6 @@
 #include "managers/device_manager.h"
 #include "managers/node_manager.h"
 #include "ws_server.h"
-#include "power_logger.h"
 #include "value_cache.h"
 #include "cJSON.h"
 
@@ -513,40 +512,6 @@ static void on_attribute_data_cb(uint64_t node_id,
     return;
 }
 
-// Grid sensor identity, loaded once from the node manager when subscribing.
-static uint64_t s_grid_node_id     = 0;
-static uint16_t s_grid_endpoint_id = 0;
-
-static void load_grid_sensor_identity(void)
-{
-    char *json = node_manager_get_all_json();
-    if (!json) return;
-
-    cJSON *root = cJSON_Parse(json);
-    free(json);
-    if (!root) return;
-
-    cJSON *nodes = cJSON_GetObjectItemCaseSensitive(root, "nodes");
-    cJSON *n;
-    cJSON_ArrayForEach(n, nodes)
-    {
-        cJSON *id_j = cJSON_GetObjectItemCaseSensitive(n, "id");
-        if (!cJSON_IsString(id_j) || strcmp(id_j->valuestring, "grid_meter") != 0)
-            continue;
-        cJSON *settings = cJSON_GetObjectItemCaseSensitive(n, "settings");
-        cJSON *nid_j    = cJSON_GetObjectItemCaseSensitive(settings, "nodeId");
-        cJSON *eid_j    = cJSON_GetObjectItemCaseSensitive(settings, "endpointId");
-        if (cJSON_IsNumber(nid_j) && cJSON_IsNumber(eid_j))
-        {
-            s_grid_node_id     = (uint64_t)nid_j->valuedouble;
-            s_grid_endpoint_id = (uint16_t)eid_j->valuedouble;
-            ESP_LOGI(TAG, "Grid sensor: node 0x%llx EP %u", (unsigned long long)s_grid_node_id, s_grid_endpoint_id);
-        }
-        break;
-    }
-    cJSON_Delete(root);
-}
-
 void processElectricalPowerMeasurementUpdate(uint64_t node_id,
                                              const chip::app::ConcreteDataAttributePath &path,
                                              chip::TLV::TLVReader *data)
@@ -574,20 +539,11 @@ void processElectricalPowerMeasurementUpdate(uint64_t node_id,
         return;
     }
 
-    // Cache the latest value so a periodic task can sample it between reports.
+    // Cache the latest value. node_power_logger polls the cache on a timer and
+    // persists per-minute averages for every stream (grid included), so logging
+    // no longer hangs off the report cadence here.
     //
     ValueCache::instance().put(node_id, path.mEndpointId, path.mClusterId, path.mAttributeId, raw_value);
-
-    // If the update is for the grid, log it.
-    // TODO Log power data from different sources.
-    //
-    if (node_id == s_grid_node_id &&
-        path.mEndpointId == s_grid_endpoint_id &&
-        path.mAttributeId == ElectricalPowerMeasurement::Attributes::ActivePower::Id)
-    {
-        ESP_LOGI(TAG, "Recording grid power value");
-        power_logger_sample((int32_t)raw_value);
-    }
 
     ESP_LOGI(TAG, "Sending 'attribute_update' for node 0x%016llX, endpoint: 0x%02X, cluster 0x%04X, attribute 0x%04X", node_id, path.mEndpointId, path.mClusterId, path.mAttributeId);
 

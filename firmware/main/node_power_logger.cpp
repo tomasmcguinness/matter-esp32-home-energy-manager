@@ -1,5 +1,6 @@
 #include "node_power_logger.h"
-#include "power_logger.h"        // power_record_t — shared on-disk format
+#include "power_logger.h"        // power_record_t + grid file writer/rollup
+#include "consumption_forecast.h"
 #include "value_cache.h"
 #include "managers/node_manager.h"
 
@@ -38,6 +39,7 @@ struct stream_t {
     std::string graph_id;       // stable topology graph node id (file key)
     uint64_t    node_id     = 0; // Matter node id (cache lookup)
     uint16_t    endpoint_id = 0; // Matter endpoint id (cache lookup)
+    bool        is_grid     = false; // grid meter: persisted to the grid-* files
     int64_t     sum_mw      = 0;
     uint32_t    count       = 0;
     uint32_t    unix_minute = 0; // start of the minute being accumulated
@@ -84,9 +86,11 @@ static const char *json_str(cJSON *obj, const char *key)
 }
 
 // Rebuild the set of recorded streams from the topology graph: every node wired
-// to the consumer unit that maps to a Matter endpoint, excluding the grid (the
-// grid lives in power_logger). Called at init and once per flush so topology
-// edits are picked up without parsing the graph on every sample.
+// to the consumer unit that maps to a Matter endpoint, including the grid. All
+// streams are sampled identically (polled from the ValueCache); the grid is
+// flagged so it persists to the grid-* files power_logger owns. Called at init
+// and once per flush so topology edits are picked up without parsing the graph
+// on every sample.
 static void refresh_streams(void)
 {
     char *raw = node_manager_get_all_json();
@@ -98,8 +102,8 @@ static void refresh_streams(void)
     cJSON *nodes = cJSON_GetObjectItemCaseSensitive(root, "nodes");
     cJSON *edges = cJSON_GetObjectItemCaseSensitive(root, "edges");
 
-    // Collect graph ids connected to the CU, dropping the grid node.
-    std::vector<std::string> connected;
+    // Collect graph ids connected to the CU, remembering which is the grid.
+    std::vector<std::pair<std::string, bool>> connected; // (graph id, is_grid)
     cJSON *e = nullptr;
     cJSON_ArrayForEach(e, edges) {
         const char *src = json_str(e, "source");
@@ -113,16 +117,15 @@ static void refresh_streams(void)
         else continue;
 
         bool is_grid = other == GRID_NODE_ID || (cu_handle && strcmp(cu_handle, "grid") == 0);
-        if (is_grid) continue;
 
         bool seen = false;
-        for (const auto &c : connected) if (c == other) { seen = true; break; }
-        if (!seen) connected.push_back(other);
+        for (const auto &c : connected) if (c.first == other) { seen = true; break; }
+        if (!seen) connected.emplace_back(other, is_grid);
     }
 
     // Resolve each connected graph id to its Matter node/endpoint via settings.
     std::vector<stream_t> next;
-    for (const auto &gid : connected) {
+    for (const auto &[gid, is_grid] : connected) {
         char clean[40];
         if (!sanitize_token(gid.c_str(), clean, sizeof(clean))) continue;
 
@@ -138,6 +141,7 @@ static void refresh_streams(void)
                 s.graph_id    = clean;
                 s.node_id     = (uint64_t)nid->valuedouble;
                 s.endpoint_id = (uint16_t)eid->valuedouble;
+                s.is_grid     = is_grid;
                 next.push_back(std::move(s));
             }
             break;
@@ -193,21 +197,26 @@ static void write_record(const char *graph_id, const power_record_t *rec)
 static void on_flush_timer(void *arg)
 {
     // Drain the completed accumulators under the lock, write outside it.
-    std::vector<std::pair<std::string, power_record_t>> pending;
+    struct pending_t { std::string graph_id; power_record_t rec; bool is_grid; };
+    std::vector<pending_t> pending;
 
     xSemaphoreTake(s_mutex, portMAX_DELAY);
     for (auto &s : s_streams) {
         if (s.count == 0) continue;
         power_record_t rec = { s.unix_minute, (int32_t)(s.sum_mw / s.count) };
-        pending.emplace_back(s.graph_id, rec);
+        pending.push_back({ s.graph_id, rec, s.is_grid });
         s.sum_mw = 0;
         s.count = 0;
         s.unix_minute = 0;
     }
     xSemaphoreGive(s_mutex);
 
-    for (const auto &p : pending)
-        write_record(p.first.c_str(), &p.second);
+    for (const auto &p : pending) {
+        if (p.is_grid)
+            power_logger_write_grid_minute(p.rec.unix_minute, p.rec.power_mw);
+        else
+            write_record(p.graph_id.c_str(), &p.rec);
+    }
 
     // Pick up topology edits for the next minute.
     refresh_streams();
@@ -225,7 +234,18 @@ static void on_midnight_timer(void *arg)
     char yesterday[11];
     strftime(yesterday, sizeof(yesterday), "%Y-%m-%d", &yesterday_tm);
 
+    struct tm tomorrow_tm = tm_info;
+    tomorrow_tm.tm_mday += 1;
+    mktime(&tomorrow_tm);
+    char tomorrow[11];
+    strftime(tomorrow, sizeof(tomorrow), "%Y-%m-%d", &tomorrow_tm);
+
+    // Roll up yesterday's per-minute data to hourly, for both the per-node
+    // streams and the grid, then build tomorrow's consumption forecast from the
+    // freshly-rolled grid-hourly history.
     node_power_logger_rollup_hourly(yesterday);
+    power_logger_rollup_hourly(yesterday);
+    consumption_forecast_compute(tomorrow);
     schedule_midnight_rollup();
 }
 
