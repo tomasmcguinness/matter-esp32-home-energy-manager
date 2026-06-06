@@ -1836,6 +1836,46 @@ static esp_err_t static_get_handler(httpd_req_t *req)
     return send_file(req, fs_path);
 }
 
+// Custom URI matcher. The stock httpd_uri_match_wildcard only honours a '*' that
+// is the final character of the template, so mid-path patterns such as
+// "/api/devices/*/interrogate" never match and get shadowed by the trailing-
+// wildcard "/api/devices/*" route (yielding a spurious 405). This matcher treats:
+//   - a '*' that is NOT the last template char as exactly one path segment
+//     (one or more non-'/' chars), and
+//   - a trailing '*' as the remainder of the URI (zero or more chars, including
+//     '/'), preserving the stock greedy behaviour relied on by "/*",
+//     "/debug/files/*", "/api/devices/*", etc.
+static bool uri_match_segments(const char *templ, const char *uri, size_t uri_len)
+{
+    size_t tlen = strlen(templ);
+    size_t ti = 0, ui = 0;
+
+    while (ti < tlen) {
+        if (templ[ti] == '*') {
+            if (ti == tlen - 1) {
+                // Trailing wildcard: matches the rest (zero or more chars).
+                return true;
+            }
+            // Mid-path wildcard: consume exactly one non-empty segment.
+            if (ui >= uri_len || uri[ui] == '/') {
+                return false;
+            }
+            while (ui < uri_len && uri[ui] != '/') {
+                ui++;
+            }
+            ti++; // step past '*'; template should continue with '/'
+        } else {
+            if (ui >= uri_len || templ[ti] != uri[ui]) {
+                return false;
+            }
+            ti++;
+            ui++;
+        }
+    }
+    // Template fully consumed — match only if the URI is too.
+    return ui == uri_len;
+}
+
 esp_err_t web_server_start(void)
 {
     esp_vfs_spiffs_conf_t conf = {
@@ -1854,7 +1894,7 @@ esp_err_t web_server_start(void)
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.server_port = 80;
     config.lru_purge_enable = true;
-    config.uri_match_fn = httpd_uri_match_wildcard;
+    config.uri_match_fn = uri_match_segments;
     config.stack_size = 12288;
     config.max_uri_handlers = 40;
     config.max_resp_headers = 20;
