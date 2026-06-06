@@ -15,21 +15,11 @@ export type Device = {
   vendorName: string
   productName: string
   endpoints: Endpoint[]
-}
-
-export type SimpleDevice = {
-  nodeId: number
-  endpointId: number
-  label: string
-  hasPowerMeasurement: boolean
+  hasSubscription: boolean
 }
 
 type DevicesResponse = {
   devices: Device[]
-}
-
-type SimpleDevicesResponse = {
-  devices: SimpleDevice[]
 }
 
 const LINE = '#000000'
@@ -128,9 +118,7 @@ function EndpointRow({
 }
 
 function Devices() {
-  const [mode, setMode] = useState<'simple' | 'full'>('simple')
   const [devices, setDevices] = useState<Device[]>([])
-  const [simpleDevices, setSimpleDevices] = useState<SimpleDevice[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [editingNodeId, setEditingNodeId] = useState<number | null>(null)
@@ -139,11 +127,9 @@ function Devices() {
   useEffect(() => {
     Promise.all([
       fetch('/api/devices').then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json() as Promise<DevicesResponse> }),
-      fetch('/api/devices/simple').then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json() as Promise<SimpleDevicesResponse> }),
     ])
-      .then(([full, simple]) => {
+      .then(([full]) => {
         setDevices(full.devices)
-        setSimpleDevices(simple.devices)
         setLoading(false)
       })
       .catch((e: unknown) => {
@@ -197,121 +183,94 @@ function Devices() {
     <>
       <div className="mt-3 mb-2 d-flex align-items-center justify-content-between">
         <h1 className="mb-0">Devices</h1>
-        <div className="btn-group" role="group" aria-label="View mode">
-          <input type="radio" className="btn-check" name="deviceMode" id="mode-simple" autoComplete="off"
-            checked={mode === 'simple'} onChange={() => setMode('simple')} />
-          <label className="btn btn-outline-primary btn-sm" htmlFor="mode-simple">Simple</label>
-          <input type="radio" className="btn-check" name="deviceMode" id="mode-full" autoComplete="off"
-            checked={mode === 'full'} onChange={() => setMode('full')} />
-          <label className="btn btn-outline-primary btn-sm" htmlFor="mode-full">Full</label>
-        </div>
       </div>
       <hr />
       {error && <div className="alert alert-danger">{error}</div>}
 
-      {mode === 'simple' && (
-        simpleDevices.length === 0 ? (
-          <div className="alert alert-info">No devices have been paired. Please add a device using the companion app.</div>
-        ) : (
-          <div className="d-flex flex-column gap-2">
-            {simpleDevices.map(dev => (
-              <div key={`${dev.nodeId}-${dev.endpointId}`}
-                style={{ border: '1px solid #dee2e6', borderRadius: 6, padding: '10px 14px' }}>
-                <div className="d-flex align-items-center justify-content-between">
-                  <strong>{dev.label}</strong>
-                  {dev.hasPowerMeasurement && (
-                    <span className="badge badge-pill badge-primary" >Power Measurement</span>
+      {devices.length === 0 ? (
+        <div className="alert alert-info">No devices have been paired. Please add a device using the companion app.</div>
+      ) : (
+        <div className="d-flex flex-column gap-3">
+          {devices.map((dev) => {
+            const productName = [dev.vendorName, dev.productName].filter(Boolean).join(' ')
+            const nodeHex = `Node 0x${dev.nodeId.toString(16).toUpperCase()}`
+            const title = dev.name || productName || nodeHex
+            const subtitle = [dev.name ? productName : '', nodeHex].filter(Boolean).join(' · ')
+            const isEditing = editingNodeId === dev.nodeId
+            return (
+              <div key={dev.nodeId} style={{ border: '1px solid #dee2e6', borderRadius: 6, overflow: 'hidden' }}>
+                <div style={{ background: '#f8f9fa', borderBottom: '1px solid #dee2e6', padding: '8px 12px' }}
+                  className="d-flex align-items-center justify-content-between gap-2">
+                  {isEditing ? (
+                    <>
+                      <input
+                        type="text"
+                        className="form-control form-control-sm"
+                        style={{ maxWidth: 280 }}
+                        autoFocus
+                        value={draftName}
+                        placeholder={productName || nodeHex}
+                        onChange={(e) => setDraftName(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') handleSaveName(dev.nodeId)
+                          if (e.key === 'Escape') cancelEdit()
+                        }}
+                      />
+                      <div className="d-flex gap-2 flex-shrink-0">
+                        <button className="btn btn-primary btn-sm" disabled={!draftName.trim()}
+                          onClick={() => handleSaveName(dev.nodeId)}>Save</button>
+                        <button className="btn btn-outline-secondary btn-sm" onClick={cancelEdit}>Cancel</button>
+                      </div>
+                    </>
+                  ) : (
+                    <>
+                      <div style={{ minWidth: 0 }}>
+                        <strong>{title}</strong>
+                        {subtitle && <span className="text-muted ms-2" style={{ fontSize: '0.8rem' }}>{subtitle}</span>}
+                        {dev.hasSubscription && (
+                          <span className="badge text-bg-success">Subscribed</span>
+                        ) || (
+                            <span className="badge text-bg-danger">Not Subscribed</span>
+                          )}
+                      </div>
+                      <button className="btn btn-danger btn-sm" onClick={() => handleDelete(dev.nodeId)}>
+                        Delete
+                      </button>
+                      <button className="btn btn-outline-secondary btn-sm flex-shrink-0" onClick={() => startEdit(dev)}>
+                        Rename
+                      </button>
+                    </>
                   )}
                 </div>
-                <div className="text-muted" style={{ fontSize: '0.8rem', marginTop: 2 }}>
-                  Node 0x{dev.nodeId.toString(16).toUpperCase()}
+                {dev.endpoints.length > 0 && (() => {
+                  const epMap = new Map(dev.endpoints.map(e => [e.endpointId, e]))
+                  const childIds = new Set(dev.endpoints.flatMap(e => e.parts ?? []))
+                  const roots = dev.endpoints.filter(e => !childIds.has(e.endpointId))
+                  return (
+                    <div style={{ padding: '10px 12px' }}>
+                      {roots.map((ep, idx) => (
+                        <EndpointRow
+                          key={ep.endpointId}
+                          ep={ep}
+                          epMap={epMap}
+                          isLast={idx === roots.length - 1}
+                          depth={0}
+                        />
+                      ))}
+                    </div>
+                  )
+                })()}
+                <div style={{ padding: '8px 12px', borderTop: '1px solid #dee2e6' }} className="d-flex gap-2">
+                  <button className="btn btn-primary btn-sm" onClick={() => handleReinterrogate(dev.nodeId)}>
+                    Interview
+                  </button>
                 </div>
               </div>
-            ))}
-          </div>
-        )
-      )}
-
-      {mode === 'full' && (
-        devices.length === 0 ? (
-          <div className="alert alert-info">No devices have been paired. Please add a device using the companion app.</div>
-        ) : (
-          <div className="d-flex flex-column gap-3">
-            {devices.map((dev) => {
-              const productName = [dev.vendorName, dev.productName].filter(Boolean).join(' ')
-              const nodeHex = `Node 0x${dev.nodeId.toString(16).toUpperCase()}`
-              const title = dev.name || productName || nodeHex
-              const subtitle = [dev.name ? productName : '', nodeHex].filter(Boolean).join(' · ')
-              const isEditing = editingNodeId === dev.nodeId
-              return (
-                <div key={dev.nodeId} style={{ border: '1px solid #dee2e6', borderRadius: 6, overflow: 'hidden' }}>
-                  <div style={{ background: '#f8f9fa', borderBottom: '1px solid #dee2e6', padding: '8px 12px' }}
-                    className="d-flex align-items-center justify-content-between gap-2">
-                    {isEditing ? (
-                      <>
-                        <input
-                          type="text"
-                          className="form-control form-control-sm"
-                          style={{ maxWidth: 280 }}
-                          autoFocus
-                          value={draftName}
-                          placeholder={productName || nodeHex}
-                          onChange={(e) => setDraftName(e.target.value)}
-                          onKeyDown={(e) => {
-                            if (e.key === 'Enter') handleSaveName(dev.nodeId)
-                            if (e.key === 'Escape') cancelEdit()
-                          }}
-                        />
-                        <div className="d-flex gap-2 flex-shrink-0">
-                          <button className="btn btn-primary btn-sm" disabled={!draftName.trim()}
-                            onClick={() => handleSaveName(dev.nodeId)}>Save</button>
-                          <button className="btn btn-outline-secondary btn-sm" onClick={cancelEdit}>Cancel</button>
-                        </div>
-                      </>
-                    ) : (
-                      <>
-                        <div style={{ minWidth: 0 }}>
-                          <strong>{title}</strong>
-                          {subtitle && <span className="text-muted ms-2" style={{ fontSize: '0.8rem' }}>{subtitle}</span>}
-                        </div>
-                        <button className="btn btn-outline-secondary btn-sm flex-shrink-0" onClick={() => startEdit(dev)}>
-                          Rename
-                        </button>
-                      </>
-                    )}
-                  </div>
-                  {dev.endpoints.length > 0 && (() => {
-                    const epMap = new Map(dev.endpoints.map(e => [e.endpointId, e]))
-                    const childIds = new Set(dev.endpoints.flatMap(e => e.parts ?? []))
-                    const roots = dev.endpoints.filter(e => !childIds.has(e.endpointId))
-                    return (
-                      <div style={{ padding: '10px 12px' }}>
-                        {roots.map((ep, idx) => (
-                          <EndpointRow
-                            key={ep.endpointId}
-                            ep={ep}
-                            epMap={epMap}
-                            isLast={idx === roots.length - 1}
-                            depth={0}
-                          />
-                        ))}
-                      </div>
-                    )
-                  })()}
-                  <div style={{ padding: '8px 12px', borderTop: '1px solid #dee2e6' }} className="d-flex gap-2">
-                    <button className="btn btn-primary btn-sm" onClick={() => handleReinterrogate(dev.nodeId)}>
-                      Re-interrogate
-                    </button>
-                    <button className="btn btn-danger btn-sm" onClick={() => handleDelete(dev.nodeId)}>
-                      Delete
-                    </button>
-                  </div>
-                </div>
-              )
-            })}
-          </div>
-        )
-      )}
+            )
+          })}
+        </div>
+      )
+      }
     </>
   )
 }

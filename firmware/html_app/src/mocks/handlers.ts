@@ -32,12 +32,14 @@ let devices: Device[] = [
       { endpointId: 1, label: 'Solax Inverter',   included: false, deviceTypes: [0x0017], parts: [] },
       { endpointId: 2, label: 'FeedIn CT Clamp',  included: false, deviceTypes: [0x0510], parts: [] },
     ],
+    hasSubscription: true,
   },
   {
     nodeId: 20001,
     name: 'Garage Meter',
     vendorName: 'Shelly',
     productName: 'Pro 3EM',
+    hasSubscription: true,
     endpoints: [
       { endpointId: 0, label: 'Root Node',   included: false, deviceTypes: [0x0016], parts: [1] },
       { endpointId: 1, label: 'Grid Meter',  included: true,  deviceTypes: [0x0512], parts: [2] },
@@ -48,6 +50,7 @@ let devices: Device[] = [
     nodeId: 30001,
     vendorName: 'Cold Bear',
     productName: 'Smart Meter',
+    hasSubscription: true,
     endpoints: [
       { endpointId: 0, label: 'Root Node',   included: false, deviceTypes: [0x0016], parts: [1,2] },
       { endpointId: 1, label: 'Meter Reference Point',  included: true,  deviceTypes: [0x0512], parts: [2] },
@@ -185,6 +188,33 @@ export const handlers = [
       const noise = (Math.random() - 0.5) * 150
       // positive = import, negative = export
       records.push({ minute: t, power_w: Math.round(base + morning + evening - solar + noise) })
+    }
+    return HttpResponse.json({ records })
+  }),
+
+  http.get('/api/data/node', ({ request }) => {
+    const url = new URL(request.url)
+    const id = url.searchParams.get('id') ?? ''
+    const date = url.searchParams.get('date') ?? new Date().toISOString().slice(0, 10)
+    const [year, month, day] = date.split('-').map(Number)
+    const startOfDay = Math.floor(new Date(year, month - 1, day).getTime() / 1000)
+    const endOfDay = startOfDay + 86400
+    const nowSec = Math.floor(Date.now() / 1000)
+    const endTime = Math.min(nowSec, endOfDay)
+
+    // Only the seeded oven has synthetic data; other nodes return empty (the
+    // chart then shows "No recordings for this day").
+    if (id !== 'node_11') return HttpResponse.json({ records: [] })
+
+    // An oven runs in a few short bursts: ~2kW with the element duty-cycling.
+    const bursts = [[11.0, 11.8], [18.0, 19.25]] // [startHour, endHour]
+    const records = []
+    for (let t = startOfDay; t < endTime; t += 60) {
+      const hour = (t - startOfDay) / 3600
+      const inBurst = bursts.some(([a, b]) => hour >= a && hour < b)
+      const duty = inBurst && (Math.floor((t - startOfDay) / 60) % 5) < 3 // ~60% on
+      const noise = duty ? (Math.random() - 0.5) * 120 : 0
+      records.push({ minute: t, power_w: Math.round((duty ? 2000 : 0) + noise) })
     }
     return HttpResponse.json({ records })
   }),

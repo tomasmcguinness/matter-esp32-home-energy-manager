@@ -7,6 +7,7 @@ idf_component_register(SRCS
         "managers/node_manager.cpp"
         "sd_card.c"
         "power_logger.c"
+        "node_power_logger.cpp"
         "value_cache.cpp"
         "solar_forecast.c"
         "consumption_forecast.c"

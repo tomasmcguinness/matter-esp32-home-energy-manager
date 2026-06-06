@@ -39,6 +39,7 @@ struct device_entry_t {
     std::string product_name;
     std::string name;
     std::vector<endpoint_entry_t> endpoints;
+    bool has_subscription = false;
 };
 
 static std::vector<device_entry_t> s_devices;
@@ -254,6 +255,24 @@ esp_err_t device_manager_set_endpoint_included(uint64_t node_id, uint16_t endpoi
     return ep ? ESP_OK : ESP_ERR_NOT_FOUND;
 }
 
+esp_err_t device_manager_mark_subscribed(uint64_t node_id)
+{
+    xSemaphoreTake(s_mutex, portMAX_DELAY);
+    auto *dev = find_device(node_id);
+    if (dev) dev->has_subscription = true;
+    xSemaphoreGive(s_mutex);
+    return dev ? ESP_OK : ESP_ERR_NOT_FOUND;
+}
+
+esp_err_t device_manager_mark_unsubscribed(uint64_t node_id)
+{
+    xSemaphoreTake(s_mutex, portMAX_DELAY);
+    auto *dev = find_device(node_id);
+    if (dev) dev->has_subscription = false;
+    xSemaphoreGive(s_mutex);
+    return dev ? ESP_OK : ESP_ERR_NOT_FOUND;
+}
+
 char *device_manager_get_all_json(void)
 {
     xSemaphoreTake(s_mutex, portMAX_DELAY);
@@ -267,6 +286,7 @@ char *device_manager_get_all_json(void)
         cJSON_AddStringToObject(dobj, "vendorName",  dev.vendor_name.c_str());
         cJSON_AddStringToObject(dobj, "productName", dev.product_name.c_str());
         cJSON_AddStringToObject(dobj, "name",        dev.name.c_str());
+        cJSON_AddBoolToObject(dobj, "hasSubscription", dev.has_subscription);
 
         cJSON *eps = cJSON_AddArrayToObject(dobj, "endpoints");
         for (const auto &ep : dev.endpoints) {

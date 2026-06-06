@@ -160,7 +160,9 @@ function connectedNodes(nodes: SavedNodeConfig[], edges: SavedEdgeConfig[]): Con
     ROLE_ORDER[a.role] - ROLE_ORDER[b.role] || a.label.localeCompare(b.label))
 }
 
-function GridSection({ date }: { date: string }) {
+// Fetch a day's power records from the given endpoint and chart them. The grid
+// reads its own stream; every other connected node reads its per-node stream.
+function ProfileSection({ url }: { url: string }) {
   const [records, setRecords] = useState<PowerRecord[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -168,7 +170,7 @@ function GridSection({ date }: { date: string }) {
   useEffect(() => {
     setLoading(true)
     setError(null)
-    fetch(`/api/data/grid?date=${date}`)
+    fetch(url)
       .then(r => r.ok ? r.json() : Promise.reject(`HTTP ${r.status}`))
       .then((data: { records: PowerRecord[] }) => {
         setRecords(data.records)
@@ -178,29 +180,24 @@ function GridSection({ date }: { date: string }) {
         setError(e instanceof Error ? e.message : String(e))
         setLoading(false)
       })
-  }, [date])
+  }, [url])
 
   if (error) return <div className="alert alert-danger">{error}</div>
   if (loading) return <p style={{ color: '#94a3b8', fontSize: 13 }}>Loading…</p>
   return <PowerChart records={records} />
 }
 
-function PendingSection() {
-  return (
-    <p style={{ color: '#94a3b8', fontSize: 13 }}>
-      Power recording for this device is not yet available.
-    </p>
-  )
-}
-
 function NodeCard({ node, date }: { node: ConnectedNode; date: string }) {
+  const url = node.role === 'grid'
+    ? `/api/data/grid?date=${date}`
+    : `/api/data/node?id=${encodeURIComponent(node.graphId)}&date=${date}`
   return (
     <div className="mb-4">
       <h2 style={{ fontSize: 14, fontWeight: 600, color: '#64748b', marginBottom: 12 }}>
         {node.label}{node.role === 'grid' ? ' (Grid)' : ''}
       </h2>
       <div style={{ border: '1px solid #e2e8f0', borderRadius: 8, padding: '12px 16px', background: '#fff' }}>
-        {node.role === 'grid' ? <GridSection date={date} /> : <PendingSection />}
+        <ProfileSection url={url} />
       </div>
     </div>
   )

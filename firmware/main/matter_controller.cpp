@@ -2,6 +2,8 @@
 
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
+#include <freertos/queue.h>
+#include <freertos/task.h>
 
 #include <esp_log.h>
 #include <esp_matter.h>
@@ -394,6 +396,7 @@ esp_err_t matter_controller_commission_on_network(const char *onboarding_payload
 esp_err_t matter_controller_interrogate_node(uint64_t node_id)
 {
     // Clear stale endpoints so removed endpoints don't persist after re-interview
+    //
     device_manager_clear_device_endpoints(node_id);
     interrogate_node(node_id);
     return ESP_OK;
@@ -455,19 +458,40 @@ esp_err_t matter_controller_start(void)
 // Subscriptions
 // ---------------------------------------------------------------------------
 
+// Drop a node id onto the subscription queue; the worker task picks it up and
+// establishes (or re-establishes) the subscription. Safe to call from the CHIP
+// event-loop thread (the subscription callbacks below) and from app threads.
+static void subscribe_enqueue(uint64_t node_id);
+
 void node_subscription_established_cb(uint64_t remote_node_id, uint32_t subscription_id)
 {
     ESP_LOGI(TAG, "Successfully subscribed, node 0x%016llX, subscription id 0x%08X", remote_node_id, subscription_id);
+
+    // Flag on the device manager that this node is subscribed, so the UI can reflect that.
+    //
+    device_manager_mark_subscribed(remote_node_id);
 }
 
 void node_subscription_terminated_cb(uint64_t remote_node_id, uint32_t subscription_id)
 {
     ESP_LOGI(TAG, "Subscription terminated, node 0x%016llX, subscription id 0x%08X", remote_node_id, subscription_id);
+
+    // The subscription is gone; reflect that and queue a re-subscribe attempt.
+    //
+    device_manager_mark_unsubscribed(remote_node_id);
+    subscribe_enqueue(remote_node_id);
 }
 
 void node_subscribe_failed_cb(void *ctx, const chip::ScopedNodeId &node_id, chip::ChipError err)
 {
-    ESP_LOGE(TAG, "Failed to subscribe (context: %p)", ctx);
+    uint64_t remote_node_id = node_id.GetNodeId();
+    ESP_LOGE(TAG, "Failed to subscribe to node 0x%016llX: %" CHIP_ERROR_FORMAT " (context: %p)",
+             (unsigned long long)remote_node_id, err.Format(), ctx);
+
+    // Flag the subscription failure so the UI can reflect that, then queue a retry.
+    //
+    device_manager_mark_unsubscribed(remote_node_id);
+    subscribe_enqueue(remote_node_id);
 }
 
 static void on_attribute_data_cb(uint64_t node_id,
@@ -481,6 +505,7 @@ static void on_attribute_data_cb(uint64_t node_id,
         return;
 
     // Process ElectrialPowerMeasurement updates.
+    //
     if (path.mClusterId == ElectricalPowerMeasurement::Id) {
         processElectricalPowerMeasurementUpdate(node_id, path, data);
     }
@@ -593,9 +618,111 @@ void matter_controller_seed_value_cache(void)
     ESP_LOGI(TAG, "Seeded value cache for %u electrical sensor endpoint(s)", (unsigned)count);
 }
 
+// ---------------------------------------------------------------------------
+// Subscription queue
+//
+// Subscriptions are driven through a FreeRTOS queue of node ids. matter_controller_subscribe
+// enqueues the nodes to subscribe to; a single worker task dequeues each one and establishes
+// the subscription. When a subscription fails or is terminated, the callbacks above drop the
+// node back onto the queue so the worker re-establishes it. Per the chosen policy, retries are
+// re-queued immediately and naturally paced by the CASE-session setup time.
+// ---------------------------------------------------------------------------
+
+static QueueHandle_t s_subscribe_queue = nullptr;
+static TaskHandle_t  s_subscribe_task  = nullptr;
+static constexpr size_t kSubscribeQueueLen = kMaxNodes;
+
+// Establish (or re-establish) a subscription to one node. Runs on the CHIP event-loop thread
+// via ScheduleWork. The endpoint is wildcarded, so one subscription per node covers every
+// endpoint on that node exposing ElectricalPowerMeasurement.
+static void establish_subscription(uint64_t node_id)
+{
+    ESP_LOGI(TAG, "Subscribing to ElectricalPowerMeasurement on node 0x%016llX (all endpoints), requested MaxInterval = %us", (unsigned long long)node_id, (unsigned)kSubMaxIntervalSec);
+
+    auto *args = new uint64_t(node_id);
+
+    chip::DeviceLayer::PlatformMgr().ScheduleWork([](intptr_t arg)
+                                                  {
+        auto *args = reinterpret_cast<uint64_t *>(arg);
+
+        ScopedMemoryBufferWithSize<AttributePathParams> attr_paths;
+        attr_paths.Alloc(3);
+
+        // Endpoint left as wildcard (kInvalidEndpointId): subscribe to
+        // these attributes on every endpoint of the node that exposes
+        // the ElectricalPowerMeasurement cluster.
+        //
+        attr_paths[0] = AttributePathParams(ElectricalPowerMeasurement::Id, ElectricalPowerMeasurement::Attributes::Voltage::Id);
+        attr_paths[1] = AttributePathParams(ElectricalPowerMeasurement::Id, ElectricalPowerMeasurement::Attributes::ActiveCurrent::Id);
+        attr_paths[2] = AttributePathParams(ElectricalPowerMeasurement::Id, ElectricalPowerMeasurement::Attributes::ActivePower::Id);
+
+        ScopedMemoryBufferWithSize<EventPathParams> event_paths;
+        event_paths.Alloc(0);
+
+        // This might be an ICD device, so we would need to change the MinInterval to zero
+        //
+        auto *cmd = chip::Platform::New<esp_matter::controller::subscribe_command>(*args,
+            std::move(attr_paths),
+            std::move(event_paths),
+            kSubMinIntervalSec, // MinInterval
+            kSubMaxIntervalSec, // MaxInterval (requested ceiling)
+            false, // <--- Keep Subscriptions
+            on_attribute_data_cb,
+            nullptr,
+            node_subscription_established_cb,
+            node_subscription_terminated_cb,
+            node_subscribe_failed_cb,
+            false);
+
+        delete args;
+
+        cmd->send_command();
+    }, reinterpret_cast<intptr_t>(args));
+}
+
+static void subscribe_enqueue(uint64_t node_id)
+{
+    if (!s_subscribe_queue)
+    {
+        ESP_LOGW(TAG, "Subscribe queue not ready, dropping node 0x%016llX", (unsigned long long)node_id);
+        return;
+    }
+    if (xQueueSend(s_subscribe_queue, &node_id, 0) != pdTRUE)
+    {
+        ESP_LOGW(TAG, "Subscribe queue full, dropping node 0x%016llX", (unsigned long long)node_id);
+    }
+}
+
+static void subscribe_task(void *)
+{
+    uint64_t node_id = 0;
+    for (;;)
+    {
+        if (xQueueReceive(s_subscribe_queue, &node_id, portMAX_DELAY) == pdTRUE)
+        {
+            establish_subscription(node_id);
+        }
+    }
+}
+
 esp_err_t matter_controller_subscribe(void)
 {
-    load_grid_sensor_identity();
+    if (!s_subscribe_queue)
+    {
+        s_subscribe_queue = xQueueCreate(kSubscribeQueueLen, sizeof(uint64_t));
+        if (!s_subscribe_queue)
+        {
+            ESP_LOGE(TAG, "Failed to create subscribe queue");
+            return ESP_ERR_NO_MEM;
+        }
+        if (xTaskCreate(subscribe_task, "subscribe", 4096, nullptr, 5, &s_subscribe_task) != pdPASS)
+        {
+            ESP_LOGE(TAG, "Failed to create subscribe task");
+            vQueueDelete(s_subscribe_queue);
+            s_subscribe_queue = nullptr;
+            return ESP_ERR_NO_MEM;
+        }
+    }
 
     static constexpr size_t kMaxSensors = 32;
     uint64_t node_ids[kMaxSensors];
@@ -624,53 +751,10 @@ esp_err_t matter_controller_subscribe(void)
 
     if (node_count > 0)
     {
-        ESP_LOGI(TAG, "Subscribing to ElectricalPowerMeasurement on %u node(s)", (unsigned)node_count);
-
+        ESP_LOGI(TAG, "Queuing subscription to ElectricalPowerMeasurement on %u node(s)", (unsigned)node_count);
         for (size_t i = 0; i < node_count; i++)
         {
-            uint64_t node_id = unique_nodes[i];
-
-            ESP_LOGI(TAG, "Subscribing to ElectricalPowerMeasurement on node 0x%016llX (all endpoints), requested MaxInterval = %us", (unsigned long long)node_id, (unsigned)kSubMaxIntervalSec);
-
-            auto *args = new uint64_t(node_id);
-
-            chip::DeviceLayer::PlatformMgr().ScheduleWork([](intptr_t arg)
-                                                          {
-                auto *args = reinterpret_cast<uint64_t *>(arg);
-
-                ScopedMemoryBufferWithSize<AttributePathParams> attr_paths;
-                attr_paths.Alloc(3);
-
-                // Endpoint left as wildcard (kInvalidEndpointId): subscribe to
-                // these attributes on every endpoint of the node that exposes
-                // the ElectricalPowerMeasurement cluster.
-                //
-                attr_paths[0] = AttributePathParams(ElectricalPowerMeasurement::Id, ElectricalPowerMeasurement::Attributes::Voltage::Id);
-                attr_paths[1] = AttributePathParams(ElectricalPowerMeasurement::Id, ElectricalPowerMeasurement::Attributes::ActiveCurrent::Id);
-                attr_paths[2] = AttributePathParams(ElectricalPowerMeasurement::Id, ElectricalPowerMeasurement::Attributes::ActivePower::Id);
-
-                ScopedMemoryBufferWithSize<EventPathParams> event_paths;
-                event_paths.Alloc(0);
-
-                // This might be an ICD device??
-                //
-                auto *cmd = chip::Platform::New<esp_matter::controller::subscribe_command>(*args,
-                    std::move(attr_paths),
-                    std::move(event_paths),
-                    kSubMinIntervalSec, // MinInterval
-                    kSubMaxIntervalSec, // MaxInterval (requested ceiling)
-                    false, // <--- Keep Subscriptions
-                    on_attribute_data_cb,
-                    nullptr,
-                    node_subscription_established_cb,
-                    node_subscription_terminated_cb,
-                    node_subscribe_failed_cb,
-                    false);
-
-                delete args;
-
-                cmd->send_command();
-            }, reinterpret_cast<intptr_t>(args));
+            subscribe_enqueue(unique_nodes[i]);
         }
     }
     else

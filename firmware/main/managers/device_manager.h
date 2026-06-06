@@ -16,6 +16,8 @@ esp_err_t device_manager_add_device(uint64_t node_id);
 esp_err_t device_manager_set_vendor_name(uint64_t node_id, const char *name, size_t len);
 esp_err_t device_manager_set_product_name(uint64_t node_id, const char *name, size_t len);
 esp_err_t device_manager_set_device_name(uint64_t node_id, const char *name, size_t len);
+esp_err_t device_manager_mark_subscribed(uint64_t node_id);
+esp_err_t device_manager_mark_unsubscribed(uint64_t node_id);
 
 esp_err_t device_manager_add_endpoint(uint64_t node_id, uint16_t endpoint_id);
 esp_err_t device_manager_add_device_type(uint64_t node_id, uint16_t endpoint_id, uint32_t device_type_id);
