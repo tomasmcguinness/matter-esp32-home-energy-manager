@@ -21,6 +21,7 @@
 #include "web_server.h"
 #include "sd_card.h"
 #include "power_logger.h"
+#include "solar_forecast.h"
 #include "node_power_logger.h"
 
 #include "esp_netif_net_stack.h"
@@ -244,6 +245,9 @@ extern "C" void app_main(void)
     xEventGroupWaitBits(s_net_event_group, SNTP_SYNCED_BIT, pdFALSE, pdTRUE, pdMS_TO_TICKS(10000));
     if (!(xEventGroupGetBits(s_net_event_group) & SNTP_SYNCED_BIT))
         ESP_LOGW(TAG, "SNTP sync timed out — time may be incorrect");
+
+    // Schedule the daily 2 AM forecast job now that wall-clock time is set.
+    ESP_ERROR_CHECK(solar_forecast_start_daily_job());
 
     // TODO Wait for some updates from esp-matter to ensure the P4 works 
     // correctly before trying to use the Platform mDNS.

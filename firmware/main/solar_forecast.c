@@ -4,22 +4,29 @@
 #include <string.h>
 #include <time.h>
 #include <stdio.h>
+#include <unistd.h>
 
 #include "esp_http_client.h"
 #include "esp_crt_bundle.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "cJSON.h"
 
 #include "power_logger.h"
+#include "consumption_forecast.h"
 
 static const char *TAG = "solar_forecast";
 
 #define LFS_BASE "/littlefs"
 
+#define DAILY_JOB_HOUR 2   // local hour at which the daily forecast job runs
+
+static esp_timer_handle_t s_daily_timer;
+
 // Hardcoded installation parameters — update to match site
 #define FORECAST_LAT "52.423957"
 #define FORECAST_LON "-1.7856016"
-#define FORECAST_DEC "35"    // panel tilt in degrees (0=flat, 90=vertical)
+#define FORECAST_DEC "45"    // panel tilt in degrees (0=flat, 90=vertical)
 #define FORECAST_AZ  "0"     // azimuth: 0=south, -90=east, 90=west
 #define FORECAST_KWP "4.8"   // installed peak power in kWp
 
@@ -94,7 +101,7 @@ static esp_err_t http_event_handler(esp_http_client_event_t *evt)
     return ESP_OK;
 }
 
-esp_err_t solar_forecast_fetch_tomorrow(cJSON **out_json)
+esp_err_t solar_forecast_fetch(const char *target_date, cJSON **out_json)
 {
     resp_buf_t buf = {
         .data = malloc(INITIAL_BUF_CAP + 1),
@@ -137,36 +144,23 @@ esp_err_t solar_forecast_fetch_tomorrow(cJSON **out_json)
         return ESP_FAIL;
     }
 
-    // Determine tomorrow's date by normalising to today's midnight then advancing one day.
-    // Using mktime to normalise handles DST transitions correctly.
-    time_t now = time(NULL);
-    struct tm tm_info;
-    localtime_r(&now, &tm_info);
-    tm_info.tm_hour = 0;
-    tm_info.tm_min  = 0;
-    tm_info.tm_sec  = 0;
-    tm_info.tm_mday += 1;
-    mktime(&tm_info);
-    char tomorrow[11];
-    strftime(tomorrow, sizeof(tomorrow), "%Y-%m-%d", &tm_info);
-
     // Extract result.watts  — keys are "YYYY-MM-DD HH:MM:SS"
     cJSON *result  = cJSON_GetObjectItemCaseSensitive(raw, "result");
     cJSON *watts   = cJSON_GetObjectItemCaseSensitive(result, "watts");
     cJSON *wh_day  = cJSON_GetObjectItemCaseSensitive(result, "watt_hours_day");
 
     cJSON *out = cJSON_CreateObject();
-    cJSON_AddStringToObject(out, "date", tomorrow);
+    cJSON_AddStringToObject(out, "date", target_date);
 
     cJSON *estimates = cJSON_AddArrayToObject(out, "estimates");
 
     if (cJSON_IsObject(watts)) {
         cJSON *entry;
         cJSON_ArrayForEach(entry, watts) {
-            // Key format: "2024-01-15 09:00:00" — only include tomorrow's entries
+            // Key format: "2024-01-15 09:00:00" — only include target_date's entries
             const char *key = entry->string;
             if (!key || strlen(key) < 16) continue;
-            if (strncmp(key, tomorrow, 10) != 0) continue;
+            if (strncmp(key, target_date, 10) != 0) continue;
 
             // Extract "HH:MM" from the key
             char time_str[6];
@@ -182,7 +176,7 @@ esp_err_t solar_forecast_fetch_tomorrow(cJSON **out_json)
 
     int total_wh = 0;
     if (cJSON_IsObject(wh_day)) {
-        cJSON *day_entry = cJSON_GetObjectItemCaseSensitive(wh_day, tomorrow);
+        cJSON *day_entry = cJSON_GetObjectItemCaseSensitive(wh_day, target_date);
         if (day_entry) {
             total_wh = (int)day_entry->valuedouble;
         }
@@ -191,10 +185,27 @@ esp_err_t solar_forecast_fetch_tomorrow(cJSON **out_json)
 
     cJSON_Delete(raw);
 
-    save_hourly_solar(tomorrow, estimates);
+    save_hourly_solar(target_date, estimates);
 
     *out_json = out;
     return ESP_OK;
+}
+
+esp_err_t solar_forecast_fetch_tomorrow(cJSON **out_json)
+{
+    // Normalise to today's midnight then advance one day. mktime handles DST.
+    time_t now = time(NULL);
+    struct tm tm_info;
+    localtime_r(&now, &tm_info);
+    tm_info.tm_hour = 0;
+    tm_info.tm_min  = 0;
+    tm_info.tm_sec  = 0;
+    tm_info.tm_mday += 1;
+    mktime(&tm_info);
+    char tomorrow[11];
+    strftime(tomorrow, sizeof(tomorrow), "%Y-%m-%d", &tm_info);
+
+    return solar_forecast_fetch(tomorrow, out_json);
 }
 
 char *solar_forecast_hourly_json(const char *date_str)
@@ -221,4 +232,81 @@ char *solar_forecast_hourly_json(const char *date_str)
     char *json = cJSON_PrintUnformatted(root);
     cJSON_Delete(root);
     return json; // caller must free
+}
+
+static void today_date(char *buf, size_t len)
+{
+    time_t now = time(NULL);
+    struct tm tm_info;
+    localtime_r(&now, &tm_info);
+    strftime(buf, len, "%Y-%m-%d", &tm_info);
+}
+
+// Fetch the current day's solar forecast, then compute the current day's
+// consumption forecast once the fetch has completed.
+static void run_daily_forecast_job(void)
+{
+    char today[11];
+    today_date(today, sizeof(today));
+
+    cJSON *forecast = NULL;
+    esp_err_t err = solar_forecast_fetch(today, &forecast);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "Daily solar fetch for %s failed: 0x%x", today, err);
+        return;
+    }
+    cJSON_Delete(forecast);
+
+    esp_err_t cf_err = consumption_forecast_compute(today);
+    if (cf_err != ESP_OK && cf_err != ESP_ERR_NOT_FOUND)
+        ESP_LOGW(TAG, "consumption_forecast_compute(%s) failed: 0x%x", today, cf_err);
+}
+
+static void schedule_next_daily_job(void)
+{
+    time_t now = time(NULL);
+    struct tm tm_info;
+    localtime_r(&now, &tm_info);
+    tm_info.tm_hour = DAILY_JOB_HOUR;
+    tm_info.tm_min  = 0;
+    tm_info.tm_sec  = 0;
+    time_t next = mktime(&tm_info);   // today at DAILY_JOB_HOUR (mktime normalises DST)
+    if (next <= now) {
+        tm_info.tm_mday += 1;
+        next = mktime(&tm_info);      // already past today's slot — use tomorrow's
+    }
+    uint64_t delay_us = (uint64_t)(next - now) * 1000000ULL;
+    esp_timer_start_once(s_daily_timer, delay_us);
+    ESP_LOGI(TAG, "Daily forecast job scheduled in %llu s", (unsigned long long)(next - now));
+}
+
+static void on_daily_timer(void *arg)
+{
+    run_daily_forecast_job();
+    schedule_next_daily_job();
+}
+
+esp_err_t solar_forecast_start_daily_job(void)
+{
+    esp_timer_create_args_t daily_args = {
+        .callback = on_daily_timer,
+        .arg      = NULL,
+        .name     = "solar_forecast_daily",
+    };
+    esp_err_t err = esp_timer_create(&daily_args, &s_daily_timer);
+    if (err != ESP_OK)
+        return err;
+
+    // Boot catch-up: if today's forecast is missing, run the job once now.
+    char today[11];
+    today_date(today, sizeof(today));
+    char path[64];
+    snprintf(path, sizeof(path), "%s/solar-forecast-%s", LFS_BASE, today);
+    if (access(path, F_OK) != 0) {
+        ESP_LOGI(TAG, "No solar forecast for %s — running daily job now", today);
+        run_daily_forecast_job();
+    }
+
+    schedule_next_daily_job();
+    return ESP_OK;
 }

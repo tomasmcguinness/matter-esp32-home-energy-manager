@@ -9,9 +9,14 @@ type ConsumptionForecast = { date: string; slots: ConsumptionSlot[] }
 type SurplusSlot = { hour_ts: number; surplus_w: number }
 type SurplusForecast = { date: string; slots: SurplusSlot[] }
 
-function tomorrow() {
+// function tomorrow() {
+//   const d = new Date()
+//   d.setDate(d.getDate() + 1)
+//   return d.toISOString().slice(0, 10)
+// }
+
+function today() {
   const d = new Date()
-  d.setDate(d.getDate() + 1)
   return d.toISOString().slice(0, 10)
 }
 
@@ -158,12 +163,12 @@ function Forecast() {
   const [conLoading, setConLoading] = useState(false)
   const [conError, setConError] = useState<string | null>(null)
   const [conResult, setConResult] = useState<ConsumptionForecast | null>(null)
-  const [conDate, setConDate] = useState(tomorrow())
+  const [conDate, setConDate] = useState(today())
 
   const [surplusLoading, setSurplusLoading] = useState(false)
   const [surplusError, setSurplusError] = useState<string | null>(null)
   const [surplusResult, setSurplusResult] = useState<SurplusForecast | null>(null)
-  const [surplusDate, setSurplusDate] = useState(tomorrow())
+  const [surplusDate, setSurplusDate] = useState(today())
 
   function loadSurplusForecast() {
     setSurplusLoading(true)
