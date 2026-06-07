@@ -16,14 +16,14 @@ esp_err_t solar_forecast_fetch(const char *target_date, cJSON **out_json);
 // Convenience wrapper around solar_forecast_fetch() for tomorrow's date.
 esp_err_t solar_forecast_fetch_tomorrow(cJSON **out_json);
 
-// Runs the nightly operation once for the day ahead: fetch the solar forecast,
+// Runs the nightly operation once for the current date: fetch the solar forecast,
 // compute the consumption forecast, then derive and save the surplus forecast.
 // Each step overwrites any existing file for that date. Returns the solar fetch
 // error if that critical step fails, otherwise ESP_OK.
 esp_err_t solar_forecast_run_daily_job(void);
 
 // Starts the recurring 2 AM job that runs solar_forecast_run_daily_job(). If no
-// solar forecast exists for the day ahead yet, runs the job once immediately
+// solar forecast exists for the current day yet, runs the job once immediately
 // (boot catch-up). Call after SNTP sync.
 esp_err_t solar_forecast_start_daily_job(void);
 

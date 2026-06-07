@@ -235,24 +235,21 @@ char *solar_forecast_hourly_json(const char *date_str)
     return json; // caller must free
 }
 
-// Date of the day ahead — the nightly job forecasts for tomorrow.
-static void tomorrow_date(char *buf, size_t len)
+static void today_date(char *buf, size_t len)
 {
     time_t now = time(NULL);
     struct tm tm_info;
     localtime_r(&now, &tm_info);
-    tm_info.tm_mday += 1;
-    mktime(&tm_info);
     strftime(buf, len, "%Y-%m-%d", &tm_info);
 }
 
-// The nightly operation: for the day ahead, fetch the solar forecast, compute the
+// The nightly operation: for the current date, fetch the solar forecast, compute the
 // consumption forecast from prior data, then derive and save the surplus forecast.
 // Each writer overwrites any existing file for that date.
 esp_err_t solar_forecast_run_daily_job(void)
 {
     char target[11];
-    tomorrow_date(target, sizeof(target));
+    today_date(target, sizeof(target));
 
     cJSON *forecast = NULL;
     esp_err_t err = solar_forecast_fetch(target, &forecast);
@@ -310,9 +307,9 @@ esp_err_t solar_forecast_start_daily_job(void)
     if (err != ESP_OK)
         return err;
 
-    // Boot catch-up: if the day-ahead forecast is missing, run the job once now.
+    // Boot catch-up: if the current day's forecast is missing, run the job once now.
     char target[11];
-    tomorrow_date(target, sizeof(target));
+    today_date(target, sizeof(target));
     char path[64];
     snprintf(path, sizeof(path), "%s/solar-forecast-%s", LFS_BASE, target);
     if (access(path, F_OK) != 0) {

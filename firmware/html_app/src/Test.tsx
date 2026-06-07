@@ -6,6 +6,10 @@ function yesterday() {
   return d.toISOString().slice(0, 10)
 }
 
+function today() {
+  return new Date().toISOString().slice(0, 10)
+}
+
 function tomorrow() {
   const d = new Date()
   d.setDate(d.getDate() + 1)
@@ -100,7 +104,7 @@ function Test() {
     setDaily({ loading: true, result: null, error: null })
     fetch('/api/test/run-daily-job', { method: 'POST' })
       .then(r => r.ok ? r.json() : r.text().then(t => Promise.reject(t)))
-      .then(() => setDaily({ loading: false, result: `Nightly forecast job complete for ${tomorrow()} (solar, consumption, surplus).`, error: null }))
+      .then(() => setDaily({ loading: false, result: `Nightly forecast job complete for ${today()} (solar, consumption, surplus).`, error: null }))
       .catch((e: unknown) => setDaily({ loading: false, result: null, error: String(e) }))
   }
 
@@ -123,7 +127,7 @@ function Test() {
       <div style={CARD}>
         <div style={{ fontWeight: 600, fontSize: 15, color: '#1e293b', marginBottom: 4 }}>Run Nightly Forecast Job</div>
         <div style={{ fontSize: 13, color: '#64748b', marginBottom: 12 }}>
-          Trigger the full nightly pipeline for the day ahead: fetch the solar forecast, compute the
+          Trigger the full nightly pipeline for the current date: fetch the solar forecast, compute the
           consumption forecast, then derive and save the surplus forecast. Overwrites any existing files for that day.
         </div>
         <button onClick={triggerDailyJob} disabled={daily.loading} style={{ ...BTN(daily.loading), marginLeft: 0 }}>
