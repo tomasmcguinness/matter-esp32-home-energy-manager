@@ -1,19 +1,16 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 
 type Estimate = { time: string; watts: number }
 type ForecastResult = { date: string; estimates: Estimate[]; total_wh: number }
+
+type SolarSlot = { hour_ts: number; power_w: number }
+type SolarForecast = { date: string; slots: SolarSlot[] }
 
 type ConsumptionSlot = { hour_ts: number; power_w: number }
 type ConsumptionForecast = { date: string; slots: ConsumptionSlot[] }
 
 type SurplusSlot = { hour_ts: number; surplus_w: number }
 type SurplusForecast = { date: string; slots: SurplusSlot[] }
-
-// function tomorrow() {
-//   const d = new Date()
-//   d.setDate(d.getDate() + 1)
-//   return d.toISOString().slice(0, 10)
-// }
 
 function today() {
   const d = new Date()
@@ -170,12 +167,38 @@ function Forecast() {
   const [surplusResult, setSurplusResult] = useState<SurplusForecast | null>(null)
   const [surplusDate, setSurplusDate] = useState(today())
 
+  function loadSolarForecast() {
+    setLoading(true)
+    setError(null)
+    fetch(`/api/forecast/solar?date=${today()}`)
+      .then(r => r.ok ? r.json() as Promise<SolarForecast> : r.text().then(t => Promise.reject(t)))
+      .then(data => {
+        if (data.slots.length === 0) { setResult(null); setLoading(false); return }
+        const estimates = data.slots.map(s => ({
+          time: `${String(new Date(s.hour_ts * 1000).getHours()).padStart(2, '0')}:00`,
+          watts: Math.round(s.power_w),
+        }))
+        const total_wh = data.slots.reduce((sum, s) => sum + s.power_w, 0)
+        setResult({ date: data.date, estimates, total_wh })
+        setLoading(false)
+      })
+      .catch((e: unknown) => { setError(String(e)); setLoading(false) })
+  }
+
   function loadSurplusForecast() {
     setSurplusLoading(true)
     setSurplusError(null)
     fetch(`/api/forecast/surplus?date=${surplusDate}`)
-      .then(r => r.ok ? r.json() as Promise<SurplusForecast> : r.text().then(t => Promise.reject(t)))
-      .then(data => { setSurplusResult(data); setSurplusLoading(false) })
+      .then(r => {
+        // A 404 means a required forecast (solar or consumption) isn't ready yet —
+        // that's the "still learning" state, not an error.
+        if (r.status === 404) { setSurplusResult(null); setSurplusLoading(false); return null }
+        return r.ok ? r.json() as Promise<SurplusForecast> : r.text().then(t => Promise.reject(t))
+      })
+      .then(data => {
+        if (data === null) return
+        setSurplusResult(data.slots.length > 0 ? data : null); setSurplusLoading(false)
+      })
       .catch((e: unknown) => { setSurplusError(String(e)); setSurplusLoading(false) })
   }
 
@@ -184,7 +207,7 @@ function Forecast() {
     setConError(null)
     fetch(`/api/forecast/consumption?date=${conDate}`)
       .then(r => r.ok ? r.json() as Promise<ConsumptionForecast> : r.text().then(t => Promise.reject(t)))
-      .then(data => { setConResult(data); setConLoading(false) })
+      .then(data => { setConResult(data.slots.length > 0 ? data : null); setConLoading(false) })
       .catch((e: unknown) => { setConError(String(e)); setConLoading(false) })
   }
 
@@ -199,6 +222,14 @@ function Forecast() {
         setLoading(false)
       })
   }
+
+  // Render the automatically-loaded daily forecasts as soon as the tab opens.
+  useEffect(() => {
+    loadSolarForecast()
+    loadConsumptionForecast()
+    loadSurplusForecast()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
   const totalKwh = result ? (result.total_wh / 1000).toFixed(2) : null
   const peakWatts = result ? Math.max(...result.estimates.map(e => e.watts)) : null
@@ -272,7 +303,7 @@ function Forecast() {
 
       {!result && !loading && !error && (
         <div style={{ padding: '48px 0', textAlign: 'center', color: '#94a3b8', fontSize: 13 }}>
-          Press the button above to fetch today's solar generation forecast.
+          No stored solar forecast for today yet. Press the button above to fetch it.
         </div>
       )}
 
@@ -352,7 +383,7 @@ function Forecast() {
 
       {!conResult && !conLoading && !conError && (
         <div style={{ padding: '48px 0', textAlign: 'center', color: '#94a3b8', fontSize: 13 }}>
-          Select a date and press Load to view the consumption forecast.
+          Not enough history yet — a consumption forecast appears after the first full day of logged data.
         </div>
       )}
 
@@ -431,7 +462,7 @@ function Forecast() {
 
       {!surplusResult && !surplusLoading && !surplusError && (
         <div style={{ padding: '48px 0', textAlign: 'center', color: '#94a3b8', fontSize: 13 }}>
-          Select a date and press Load to view the surplus forecast.
+          Surplus appears once both solar and consumption forecasts exist for this date.
         </div>
       )}
     </div>

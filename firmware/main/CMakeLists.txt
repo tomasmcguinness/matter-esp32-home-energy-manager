@@ -11,6 +11,7 @@ idf_component_register(SRCS
         "value_cache.cpp"
         "solar_forecast.c"
         "consumption_forecast.c"
+        "surplus_forecast.c"
         "commands/pairing_command.cpp"
     INCLUDE_DIRS "."
     PRIV_INCLUDE_DIRS  "." "${ESP_MATTER_PATH}/examples/common/utils"

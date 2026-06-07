@@ -6,6 +6,7 @@
 #include <inttypes.h>
 #include <dirent.h>
 #include <math.h>
+#include <unistd.h>
 
 #include "esp_http_server.h"
 #include "esp_log.h"
@@ -18,6 +19,7 @@
 #include "node_power_logger.h"
 #include "solar_forecast.h"
 #include "consumption_forecast.h"
+#include "surplus_forecast.h"
 #include "matter_controller.h"
 #include "ws_server.h"
 
@@ -1289,6 +1291,16 @@ static esp_err_t test_consumption_forecast_compute_handler(httpd_req_t *req)
     return httpd_resp_sendstr(req, "{}");
 }
 
+// Runs the full nightly forecast pipeline now (solar fetch + consumption + surplus
+// for the day ahead) — the same operation the 2 AM timer performs.
+static esp_err_t test_run_daily_job_handler(httpd_req_t *req)
+{
+    esp_err_t err = solar_forecast_run_daily_job();
+    if (err != ESP_OK) { httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Daily job failed"); return ESP_FAIL; }
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_sendstr(req, "{}");
+}
+
 static esp_err_t forecast_consumption_get_handler(httpd_req_t *req)
 {
     char date[16] = {0};
@@ -1312,6 +1324,34 @@ static esp_err_t forecast_consumption_get_handler(httpd_req_t *req)
     }
 
     char *json = consumption_forecast_json(date);
+    if (!json) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "OOM");
+        return ESP_FAIL;
+    }
+    httpd_resp_set_type(req, "application/json");
+    esp_err_t err = httpd_resp_sendstr(req, json);
+    free(json);
+    return err;
+}
+
+static esp_err_t forecast_solar_get_handler(httpd_req_t *req)
+{
+    char date[16] = {0};
+    size_t qlen = httpd_req_get_url_query_len(req);
+    if (qlen > 0 && qlen < 32) {
+        char query[32];
+        if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK)
+            httpd_query_key_value(query, "date", date, sizeof(date));
+    }
+    if (!date[0]) {
+        // Default to today — the daily job stores the current day's forecast.
+        time_t now = time(NULL);
+        struct tm tm_info;
+        localtime_r(&now, &tm_info);
+        strftime(date, sizeof(date), "%Y-%m-%d", &tm_info);
+    }
+
+    char *json = solar_forecast_hourly_json(date);
     if (!json) {
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "OOM");
         return ESP_FAIL;
@@ -1367,57 +1407,15 @@ static esp_err_t forecast_surplus_get_handler(httpd_req_t *req)
         strftime(date, sizeof(date), "%Y-%m-%d", &tm_info);
     }
 
-    // Load solar forecast (hourly binary)
-    char solar_path[64];
-    snprintf(solar_path, sizeof(solar_path), "/littlefs/solar-forecast-%s", date);
-    FILE *sf = fopen(solar_path, "rb");
-    if (!sf) {
-        httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "Solar forecast not found for date");
+    char *json = surplus_forecast_json(date);
+    if (!json) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "OOM");
         return ESP_FAIL;
     }
-    int32_t solar_mw[24] = {0};
-    uint32_t solar_ts[24] = {0};
-    {
-        power_record_t rec;
-        while (fread(&rec, sizeof(rec), 1, sf) == 1) {
-            struct tm t; time_t ts = (time_t)rec.unix_minute;
-            localtime_r(&ts, &t);
-            int h = t.tm_hour;
-            solar_mw[h]  = rec.power_mw;
-            solar_ts[h]  = rec.unix_minute;
-        }
-    }
-    fclose(sf);
-
-    // Load consumption forecast (hourly binary)
-    char con_path[64];
-    snprintf(con_path, sizeof(con_path), "/littlefs/consumption-forecast-%s", date);
-    FILE *cf = fopen(con_path, "rb");
-    if (!cf) {
-        httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "Consumption forecast not found for date");
-        return ESP_FAIL;
-    }
-    int32_t con_mw[24] = {0};
-    {
-        power_record_t rec;
-        while (fread(&rec, sizeof(rec), 1, cf) == 1) {
-            struct tm t; time_t ts = (time_t)rec.unix_minute;
-            localtime_r(&ts, &t);
-            con_mw[t.tm_hour] = rec.power_mw;
-        }
-    }
-    fclose(cf);
-
-    cJSON *root = cJSON_CreateObject();
-    cJSON_AddStringToObject(root, "date", date);
-    cJSON *slots = cJSON_AddArrayToObject(root, "slots");
-    for (int h = 0; h < 24; h++) {
-        cJSON *obj = cJSON_CreateObject();
-        cJSON_AddNumberToObject(obj, "hour_ts",  (double)solar_ts[h]);
-        cJSON_AddNumberToObject(obj, "surplus_w", (solar_mw[h] - con_mw[h]) / 1000.0);
-        cJSON_AddItemToArray(slots, obj);
-    }
-    return send_json(req, root, 200);
+    httpd_resp_set_type(req, "application/json");
+    esp_err_t send_err = httpd_resp_sendstr(req, json);
+    free(json);
+    return send_err;
 }
 
 static esp_err_t edge_post_handler(httpd_req_t *req)
@@ -1928,12 +1926,14 @@ esp_err_t web_server_start(void)
     const httpd_uri_t topology_solar_put = {.uri = "/api/topology/solar", .method = HTTP_PUT, .handler = topology_solar_put_handler};
     const httpd_uri_t edge_post = {.uri = "/api/edges", .method = HTTP_POST, .handler = edge_post_handler};
     const httpd_uri_t edge_delete = {.uri = "/api/edges/*", .method = HTTP_DELETE, .handler = edge_delete_handler};
+    const httpd_uri_t forecast_solar_get = {.uri = "/api/forecast/solar", .method = HTTP_GET, .handler = forecast_solar_get_handler};
     const httpd_uri_t forecast_solar_fetch = {.uri = "/api/forecast/solar/fetch", .method = HTTP_POST, .handler = forecast_solar_fetch_handler};
     const httpd_uri_t forecast_consumption_get = {.uri = "/api/forecast/consumption", .method = HTTP_GET, .handler = forecast_consumption_get_handler};
     const httpd_uri_t forecast_surplus_get = {.uri = "/api/forecast/surplus", .method = HTTP_GET, .handler = forecast_surplus_get_handler};
     const httpd_uri_t test_generate_sample_data = {.uri = "/api/test/generate-sample-data", .method = HTTP_POST, .handler = test_generate_sample_data_handler};
     const httpd_uri_t test_rollup_hourly = {.uri = "/api/test/rollup-hourly", .method = HTTP_POST, .handler = test_rollup_hourly_handler};
     const httpd_uri_t test_consumption_forecast_compute = {.uri = "/api/test/consumption-forecast/compute", .method = HTTP_POST, .handler = test_consumption_forecast_compute_handler};
+    const httpd_uri_t test_run_daily_job = {.uri = "/api/test/run-daily-job", .method = HTTP_POST, .handler = test_run_daily_job_handler};
     const httpd_uri_t debug_files_list = {.uri = "/debug/files", .method = HTTP_GET, .handler = debug_files_list_handler};
     const httpd_uri_t debug_files_get = {.uri = "/debug/files/*", .method = HTTP_GET, .handler = debug_files_get_handler};
     const httpd_uri_t debug_ping6 = {.uri = "/debug/ping6", .method = HTTP_GET, .handler = debug_ping6_get_handler};
@@ -1962,12 +1962,14 @@ esp_err_t web_server_start(void)
     httpd_register_uri_handler(server, &topology_solar_put);
     httpd_register_uri_handler(server, &edge_post);
     httpd_register_uri_handler(server, &edge_delete);
+    httpd_register_uri_handler(server, &forecast_solar_get);
     httpd_register_uri_handler(server, &forecast_solar_fetch);
     httpd_register_uri_handler(server, &forecast_consumption_get);
     httpd_register_uri_handler(server, &forecast_surplus_get);
     httpd_register_uri_handler(server, &test_generate_sample_data);
     httpd_register_uri_handler(server, &test_rollup_hourly);
     httpd_register_uri_handler(server, &test_consumption_forecast_compute);
+    httpd_register_uri_handler(server, &test_run_daily_job);
     httpd_register_uri_handler(server, &debug_files_list);
     httpd_register_uri_handler(server, &debug_files_get);
     httpd_register_uri_handler(server, &debug_ping6);

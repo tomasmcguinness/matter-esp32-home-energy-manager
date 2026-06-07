@@ -341,6 +341,23 @@ export const handlers = [
     return HttpResponse.json({})
   }),
 
+  http.post('/api/test/run-daily-job', () => {
+    return HttpResponse.json({})
+  }),
+
+  http.get('/api/forecast/solar', ({ request }) => {
+    const url = new URL(request.url)
+    const date = url.searchParams.get('date') ?? new Date().toISOString().slice(0, 10)
+    const [y, mo, d] = date.split('-').map(Number)
+    const slots = Array.from({ length: 24 }, (_, h) => {
+      const x = (h - 13) / 4
+      const power_w = h >= 6 && h <= 20 ? Math.round(3500 * Math.exp(-x * x)) : 0
+      const hour_ts = Math.floor(new Date(y, mo - 1, d, h).getTime() / 1000)
+      return { hour_ts, power_w }
+    })
+    return HttpResponse.json({ date, slots })
+  }),
+
   http.post('/api/forecast/solar/fetch', () => {
     const today = new Date().toISOString().slice(0, 10)
     const estimates = []

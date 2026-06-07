@@ -22,13 +22,26 @@ function fmtW(w: number): string {
   return abs >= 1000 ? `${sign}${(abs / 1000).toFixed(abs % 1000 ? 1 : 0)}kW` : `${sign}${abs}W`
 }
 
-function PowerChart({ records }: { records: PowerRecord[] }) {
+// Records are logged once a minute; anything more than this between consecutive
+// samples means at least one minute is missing — i.e. a "no data" gap.
+const GAP_THRESHOLD_S = 90
+
+// The time window the chart spans: local midnight of the day, to the end of the
+// day — clamped to "now" for today, since the remaining hours are the future,
+// not missing data.
+function dayBounds(date: string): { start: number; end: number } {
+  const start = Math.floor(new Date(`${date}T00:00:00`).getTime() / 1000)
+  const now = Math.floor(Date.now() / 1000)
+  const fullEnd = start + 86400
+  return { start, end: now > start && now < fullEnd ? now : fullEnd }
+}
+
+function PowerChart({ records, date }: { records: PowerRecord[]; date: string }) {
   if (records.length === 0) {
     return <p style={{ color: '#94a3b8', fontSize: 13 }}>No recordings for this day.</p>
   }
 
-  const minT = records[0].minute
-  const maxT = records[records.length - 1].minute
+  const { start: minT, end: maxT } = dayBounds(date)
   const spanT = maxT - minT || 1
 
   const rawMax = Math.max(0, ...records.map(r => r.power_w))
@@ -40,14 +53,31 @@ function PowerChart({ records }: { records: PowerRecord[] }) {
   const xPos = (t: number) => PAD.left + ((t - minT) / spanT) * PLOT_W
   const yPos = (p: number) => PAD.top + PLOT_H - ((p - yMin) / yRange) * PLOT_H
   const zeroY = yPos(0)
-
-  const polyPoints = records.map(r => `${xPos(r.minute).toFixed(1)},${yPos(r.power_w).toFixed(1)}`).join(' ')
-
-  // Fill closes back through the zero axis
-  const firstX = xPos(records[0].minute).toFixed(1)
-  const lastX  = xPos(records[records.length - 1].minute).toFixed(1)
   const zeroYStr = zeroY.toFixed(1)
-  const fillPoints = `${firstX},${zeroYStr} ${polyPoints} ${lastX},${zeroYStr}`
+
+  // Split the records into contiguous segments, breaking wherever consecutive
+  // minutes are further apart than the logging cadence. Each segment is drawn as
+  // its own line/fill so the chart never bridges a gap with a misleading line.
+  const segments: PowerRecord[][] = []
+  let cur: PowerRecord[] = []
+  for (const r of records) {
+    if (cur.length && r.minute - cur[cur.length - 1].minute > GAP_THRESHOLD_S) {
+      segments.push(cur)
+      cur = []
+    }
+    cur.push(r)
+  }
+  if (cur.length) segments.push(cur)
+
+  // No-data spans: before the first sample, between segments, and after the last
+  // sample up to the end of the window. These get flagged in red.
+  const noData: { from: number; to: number }[] = []
+  if (records[0].minute - minT > GAP_THRESHOLD_S)
+    noData.push({ from: minT, to: records[0].minute })
+  for (let i = 1; i < segments.length; i++)
+    noData.push({ from: segments[i - 1][segments[i - 1].length - 1].minute, to: segments[i][0].minute })
+  if (maxT - records[records.length - 1].minute > GAP_THRESHOLD_S)
+    noData.push({ from: records[records.length - 1].minute, to: maxT })
 
   // Y axis ticks — one step above and below zero
   const absExtent = Math.max(Math.abs(yMax), Math.abs(yMin))
@@ -56,15 +86,15 @@ function PowerChart({ records }: { records: PowerRecord[] }) {
   for (let p = yMin; p <= yMax; p += yStep)
     yTicks.push({ y: yPos(p), label: fmtW(p) })
 
-  // X axis: one tick per hour
+  // X axis: one tick per hour across the whole day window
   const startHour = Math.ceil(minT / 3600)
   const endHour   = Math.floor(maxT / 3600)
   const xTicks: { x: number; label: string }[] = []
   for (let h = startHour; h <= endHour; h++) {
     const t = h * 3600
     if (t < minT || t > maxT) continue
-    const date = new Date(t * 1000)
-    const label = `${date.getHours().toString().padStart(2, '0')}:00`
+    const d = new Date(t * 1000)
+    const label = `${d.getHours().toString().padStart(2, '0')}:00`
     xTicks.push({ x: xPos(t), label })
   }
 
@@ -76,24 +106,41 @@ function PowerChart({ records }: { records: PowerRecord[] }) {
           stroke={t.label === '0W' ? '#94a3b8' : '#e2e8f0'} strokeWidth={t.label === '0W' ? 1.5 : 1} />
       ))}
 
-      {/* Filled area (between line and zero axis) */}
-      <polygon points={fillPoints} fill="rgba(59,130,246,0.08)" />
-
-      {/* Power line */}
-      <polyline points={polyPoints} fill="none" stroke="#3b82f6" strokeWidth={1.5}
-        strokeLinejoin="round" strokeLinecap="round" />
-
-      {/* Y axis */}
+      {/* Axes (drawn before the no-data markers so the red strip sits on top) */}
       <line x1={PAD.left} y1={PAD.top} x2={PAD.left} y2={PAD.top + PLOT_H}
         stroke="#cbd5e1" strokeWidth={1} />
+      <line x1={PAD.left} y1={PAD.top + PLOT_H} x2={PAD.left + PLOT_W} y2={PAD.top + PLOT_H}
+        stroke="#cbd5e1" strokeWidth={1} />
+
+      {/* No-data spans: a faint band plus a solid red strip along the x axis */}
+      {noData.map((g, i) => (
+        <g key={`gap-${i}`}>
+          <rect x={xPos(g.from)} y={PAD.top} width={Math.max(0, xPos(g.to) - xPos(g.from))} height={PLOT_H}
+            fill="rgba(239,68,68,0.10)" />
+          <line x1={xPos(g.from)} y1={PAD.top + PLOT_H} x2={xPos(g.to)} y2={PAD.top + PLOT_H}
+            stroke="#ef4444" strokeWidth={3} />
+        </g>
+      ))}
+
+      {/* One filled area + line per contiguous segment of real data */}
+      {segments.map((seg, i) => {
+        const poly = seg.map(r => `${xPos(r.minute).toFixed(1)},${yPos(r.power_w).toFixed(1)}`).join(' ')
+        const fx = xPos(seg[0].minute).toFixed(1)
+        const lx = xPos(seg[seg.length - 1].minute).toFixed(1)
+        return (
+          <g key={`seg-${i}`}>
+            <polygon points={`${fx},${zeroYStr} ${poly} ${lx},${zeroYStr}`} fill="rgba(59,130,246,0.08)" />
+            <polyline points={poly} fill="none" stroke="#3b82f6" strokeWidth={1.5}
+              strokeLinejoin="round" strokeLinecap="round" />
+          </g>
+        )
+      })}
+
+      {/* Axis tick labels */}
       {yTicks.map(t => (
         <text key={t.label} x={PAD.left - 6} y={t.y + 4}
           textAnchor="end" fontSize={10} fill="#94a3b8">{t.label}</text>
       ))}
-
-      {/* X axis */}
-      <line x1={PAD.left} y1={PAD.top + PLOT_H} x2={PAD.left + PLOT_W} y2={PAD.top + PLOT_H}
-        stroke="#cbd5e1" strokeWidth={1} />
       {xTicks.map(t => (
         <text key={t.label} x={t.x} y={SVG_H - 6}
           textAnchor="middle" fontSize={10} fill="#94a3b8">{t.label}</text>
@@ -162,7 +209,7 @@ function connectedNodes(nodes: SavedNodeConfig[], edges: SavedEdgeConfig[]): Con
 
 // Fetch a day's power records from the given endpoint and chart them. The grid
 // reads its own stream; every other connected node reads its per-node stream.
-function ProfileSection({ url }: { url: string }) {
+function ProfileSection({ url, date }: { url: string; date: string }) {
   const [records, setRecords] = useState<PowerRecord[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -184,7 +231,7 @@ function ProfileSection({ url }: { url: string }) {
 
   if (error) return <div className="alert alert-danger">{error}</div>
   if (loading) return <p style={{ color: '#94a3b8', fontSize: 13 }}>Loading…</p>
-  return <PowerChart records={records} />
+  return <PowerChart records={records} date={date} />
 }
 
 function NodeCard({ node, date }: { node: ConnectedNode; date: string }) {
@@ -197,7 +244,7 @@ function NodeCard({ node, date }: { node: ConnectedNode; date: string }) {
         {node.label}{node.role === 'grid' ? ' (Grid)' : ''}
       </h2>
       <div style={{ border: '1px solid #e2e8f0', borderRadius: 8, padding: '12px 16px', background: '#fff' }}>
-        <ProfileSection url={url} />
+        <ProfileSection url={url} date={date} />
       </div>
     </div>
   )

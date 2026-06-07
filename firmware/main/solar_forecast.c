@@ -14,6 +14,7 @@
 
 #include "power_logger.h"
 #include "consumption_forecast.h"
+#include "surplus_forecast.h"
 
 static const char *TAG = "solar_forecast";
 
@@ -234,32 +235,44 @@ char *solar_forecast_hourly_json(const char *date_str)
     return json; // caller must free
 }
 
-static void today_date(char *buf, size_t len)
+// Date of the day ahead — the nightly job forecasts for tomorrow.
+static void tomorrow_date(char *buf, size_t len)
 {
     time_t now = time(NULL);
     struct tm tm_info;
     localtime_r(&now, &tm_info);
+    tm_info.tm_mday += 1;
+    mktime(&tm_info);
     strftime(buf, len, "%Y-%m-%d", &tm_info);
 }
 
-// Fetch the current day's solar forecast, then compute the current day's
-// consumption forecast once the fetch has completed.
-static void run_daily_forecast_job(void)
+// The nightly operation: for the day ahead, fetch the solar forecast, compute the
+// consumption forecast from prior data, then derive and save the surplus forecast.
+// Each writer overwrites any existing file for that date.
+esp_err_t solar_forecast_run_daily_job(void)
 {
-    char today[11];
-    today_date(today, sizeof(today));
+    char target[11];
+    tomorrow_date(target, sizeof(target));
 
     cJSON *forecast = NULL;
-    esp_err_t err = solar_forecast_fetch(today, &forecast);
+    esp_err_t err = solar_forecast_fetch(target, &forecast);
     if (err != ESP_OK) {
-        ESP_LOGW(TAG, "Daily solar fetch for %s failed: 0x%x", today, err);
-        return;
+        ESP_LOGW(TAG, "Daily solar fetch for %s failed: 0x%x", target, err);
+        return err;
     }
     cJSON_Delete(forecast);
 
-    esp_err_t cf_err = consumption_forecast_compute(today);
-    if (cf_err != ESP_OK && cf_err != ESP_ERR_NOT_FOUND)
-        ESP_LOGW(TAG, "consumption_forecast_compute(%s) failed: 0x%x", today, cf_err);
+    esp_err_t cf_err = consumption_forecast_compute(target);
+    if (cf_err != ESP_OK) {
+        ESP_LOGW(TAG, "consumption_forecast_compute(%s): 0x%x — skipping surplus", target, cf_err);
+        return ESP_OK;  // solar saved; no consumption history yet to derive surplus
+    }
+
+    esp_err_t sf_err = surplus_forecast_compute(target);
+    if (sf_err != ESP_OK)
+        ESP_LOGW(TAG, "surplus_forecast_compute(%s): 0x%x", target, sf_err);
+
+    return ESP_OK;
 }
 
 static void schedule_next_daily_job(void)
@@ -282,7 +295,7 @@ static void schedule_next_daily_job(void)
 
 static void on_daily_timer(void *arg)
 {
-    run_daily_forecast_job();
+    solar_forecast_run_daily_job();
     schedule_next_daily_job();
 }
 
@@ -297,14 +310,14 @@ esp_err_t solar_forecast_start_daily_job(void)
     if (err != ESP_OK)
         return err;
 
-    // Boot catch-up: if today's forecast is missing, run the job once now.
-    char today[11];
-    today_date(today, sizeof(today));
+    // Boot catch-up: if the day-ahead forecast is missing, run the job once now.
+    char target[11];
+    tomorrow_date(target, sizeof(target));
     char path[64];
-    snprintf(path, sizeof(path), "%s/solar-forecast-%s", LFS_BASE, today);
+    snprintf(path, sizeof(path), "%s/solar-forecast-%s", LFS_BASE, target);
     if (access(path, F_OK) != 0) {
-        ESP_LOGI(TAG, "No solar forecast for %s — running daily job now", today);
-        run_daily_forecast_job();
+        ESP_LOGI(TAG, "No solar forecast for %s — running daily job now", target);
+        solar_forecast_run_daily_job();
     }
 
     schedule_next_daily_job();

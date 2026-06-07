@@ -1,5 +1,6 @@
 #include "consumption_forecast.h"
 
+#include <stdbool.h>
 #include <stdio.h>
 #include <string.h>
 #include <time.h>
@@ -11,9 +12,38 @@
 
 static const char *TAG = "consumption_forecast";
 
-#define LFS_BASE       "/littlefs"
-#define LOOKBACK_WEEKS 4
-#define HOURS_PER_DAY  24
+#define LFS_BASE         "/littlefs"
+#define LOOKBACK_WEEKS   4
+#define HOURS_PER_DAY    24
+#define RECENT_SCAN_DAYS 14   // how far back the cold-start fallback looks
+#define RECENT_MAX_DAYS  7    // stop after this many days with data
+
+// Accumulate one prior day's hourly grid file into the running per-hour totals.
+// Returns true if the file existed (and was read), false otherwise.
+static bool accumulate_day(const char *date, int64_t sum_mw[HOURS_PER_DAY],
+                           uint32_t count[HOURS_PER_DAY])
+{
+    char path[64];
+    snprintf(path, sizeof(path), "%s/grid-hourly-%s", LFS_BASE, date);
+
+    FILE *f = fopen(path, "rb");
+    if (!f) {
+        ESP_LOGD(TAG, "No hourly data for %s, skipping", date);
+        return false;
+    }
+
+    power_record_t rec;
+    while (fread(&rec, sizeof(rec), 1, f) == 1) {
+        struct tm rec_tm;
+        time_t t = (time_t)rec.unix_minute;
+        localtime_r(&t, &rec_tm);
+        int h = rec_tm.tm_hour;
+        sum_mw[h] += rec.power_mw;
+        count[h]++;
+    }
+    fclose(f);
+    return true;
+}
 
 esp_err_t consumption_forecast_compute(const char *target_date)
 {
@@ -28,7 +58,9 @@ esp_err_t consumption_forecast_compute(const char *target_date)
     int64_t  sum_mw[HOURS_PER_DAY]   = {0};
     uint32_t count[HOURS_PER_DAY]    = {0};
     int      days_used               = 0;
+    const char *method               = "same-weekday";
 
+    // Pass 1: same weekday over the last LOOKBACK_WEEKS weeks (best accuracy).
     for (int w = 1; w <= LOOKBACK_WEEKS; w++) {
         struct tm prior_tm = target_tm;
         prior_tm.tm_mday -= w * 7;
@@ -37,30 +69,29 @@ esp_err_t consumption_forecast_compute(const char *target_date)
         char prior_date[11];
         strftime(prior_date, sizeof(prior_date), "%Y-%m-%d", &prior_tm);
 
-        char path[64];
-        snprintf(path, sizeof(path), "%s/grid-hourly-%s", LFS_BASE, prior_date);
+        if (accumulate_day(prior_date, sum_mw, count))
+            days_used++;
+    }
 
-        FILE *f = fopen(path, "rb");
-        if (!f) {
-            ESP_LOGD(TAG, "No hourly data for %s, skipping", prior_date);
-            continue;
-        }
+    // Pass 2 (cold-start fallback): if no same-weekday data exists, average the
+    // most recent days that have data regardless of weekday.
+    if (days_used == 0) {
+        for (int d = 1; d <= RECENT_SCAN_DAYS && days_used < RECENT_MAX_DAYS; d++) {
+            struct tm prior_tm = target_tm;
+            prior_tm.tm_mday -= d;
+            mktime(&prior_tm);
 
-        power_record_t rec;
-        while (fread(&rec, sizeof(rec), 1, f) == 1) {
-            struct tm rec_tm;
-            time_t t = (time_t)rec.unix_minute;
-            localtime_r(&t, &rec_tm);
-            int h = rec_tm.tm_hour;
-            sum_mw[h] += rec.power_mw;
-            count[h]++;
+            char prior_date[11];
+            strftime(prior_date, sizeof(prior_date), "%Y-%m-%d", &prior_tm);
+
+            if (accumulate_day(prior_date, sum_mw, count))
+                days_used++;
         }
-        fclose(f);
-        days_used++;
+        method = "recent-days fallback";
     }
 
     if (days_used == 0) {
-        ESP_LOGW(TAG, "No prior same-weekday data for %s", target_date);
+        ESP_LOGW(TAG, "No prior data for %s (true cold-start)", target_date);
         return ESP_ERR_NOT_FOUND;
     }
 
@@ -91,7 +122,7 @@ esp_err_t consumption_forecast_compute(const char *target_date)
     }
     fclose(out);
 
-    ESP_LOGI(TAG, "Forecast for %s: %d prior day(s), %d gap hour(s)", target_date, days_used, gaps);
+    ESP_LOGI(TAG, "Forecast for %s [%s]: %d prior day(s), %d gap hour(s)", target_date, method, days_used, gaps);
     return ESP_OK;
 }
 
