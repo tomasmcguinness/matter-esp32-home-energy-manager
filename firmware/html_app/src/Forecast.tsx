@@ -6,11 +6,14 @@ type ForecastResult = { date: string; estimates: Estimate[]; total_wh: number }
 type SolarSlot = { hour_ts: number; power_w: number }
 type SolarForecast = { date: string; slots: SolarSlot[] }
 
-type ConsumptionSlot = { hour_ts: number; power_w: number }
-type ConsumptionForecast = { date: string; slots: ConsumptionSlot[] }
-
 type SurplusSlot = { hour_ts: number; surplus_w: number }
-type SurplusForecast = { date: string; slots: SurplusSlot[] }
+type SurplusForecast = {
+  date: string
+  slots: SurplusSlot[]
+  learning?: boolean
+  usable_days?: number
+  mature_days?: number
+}
 
 function today() {
   const d = new Date()
@@ -68,49 +71,6 @@ function ForecastChart({ estimates }: { estimates: Estimate[] }) {
   )
 }
 
-function ConsumptionChart({ slots }: { slots: ConsumptionSlot[] }) {
-  if (slots.length === 0) {
-    return <p style={{ color: '#94a3b8', fontSize: 13 }}>No consumption data.</p>
-  }
-
-  const maxW = Math.max(...slots.map(s => Math.abs(s.power_w)))
-  const barW = PLOT_W / slots.length
-
-  return (
-    <svg viewBox={`0 0 ${SVG_W} ${SVG_H}`} style={{ width: '100%', fontFamily: 'inherit' }}>
-      <text x={PAD.left - 8} y={PAD.top} textAnchor="end" fontSize={10} fill="#94a3b8">
-        {Math.round(maxW / 1000 * 10) / 10}kW
-      </text>
-      <text x={PAD.left - 8} y={PAD.top + PLOT_H} textAnchor="end" fontSize={10} fill="#94a3b8">0</text>
-
-      {slots.map((s, i) => {
-        const barH = maxW > 0 ? (Math.abs(s.power_w) / maxW) * PLOT_H : 0
-        const x = PAD.left + i * barW
-        const y = PAD.top + PLOT_H - barH
-        const hour = new Date(s.hour_ts * 1000).getHours()
-        const showLabel = i % 3 === 0
-        return (
-          <g key={s.hour_ts}>
-            <rect x={x + 1} y={y} width={barW - 2} height={barH}
-              fill={s.power_w < 0 ? '#10b981' : '#3b82f6'} rx={2} opacity={0.85} />
-            {showLabel && (
-              <text x={x + barW / 2} y={PAD.top + PLOT_H + 14} textAnchor="middle" fontSize={10} fill="#94a3b8">
-                {String(hour).padStart(2, '0')}:00
-              </text>
-            )}
-          </g>
-        )
-      })}
-
-      <line
-        x1={PAD.left} y1={PAD.top + PLOT_H}
-        x2={PAD.left + PLOT_W} y2={PAD.top + PLOT_H}
-        stroke="#e2e8f0" strokeWidth={1}
-      />
-    </svg>
-  )
-}
-
 function SurplusChart({ slots }: { slots: SurplusSlot[] }) {
   if (slots.length === 0) return <p style={{ color: '#94a3b8', fontSize: 13 }}>No surplus data.</p>
 
@@ -157,11 +117,6 @@ function Forecast() {
   const [error, setError] = useState<string | null>(null)
   const [result, setResult] = useState<ForecastResult | null>(null)
 
-  const [conLoading, setConLoading] = useState(false)
-  const [conError, setConError] = useState<string | null>(null)
-  const [conResult, setConResult] = useState<ConsumptionForecast | null>(null)
-  const [conDate, setConDate] = useState(today())
-
   const [surplusLoading, setSurplusLoading] = useState(false)
   const [surplusError, setSurplusError] = useState<string | null>(null)
   const [surplusResult, setSurplusResult] = useState<SurplusForecast | null>(null)
@@ -202,31 +157,9 @@ function Forecast() {
       .catch((e: unknown) => { setSurplusError(String(e)); setSurplusLoading(false) })
   }
 
-  function loadConsumptionForecast() {
-    setConLoading(true)
-    setConError(null)
-    fetch(`/api/forecast/consumption?date=${conDate}`)
-      .then(r => r.ok ? r.json() as Promise<ConsumptionForecast> : r.text().then(t => Promise.reject(t)))
-      .then(data => { setConResult(data.slots.length > 0 ? data : null); setConLoading(false) })
-      .catch((e: unknown) => { setConError(String(e)); setConLoading(false) })
-  }
-
-  function fetchForecast() {
-    setLoading(true)
-    setError(null)
-    fetch('/api/forecast/solar/fetch', { method: 'POST' })
-      .then(r => r.ok ? r.json() as Promise<ForecastResult> : r.text().then(t => Promise.reject(t)))
-      .then(data => { setResult(data); setLoading(false) })
-      .catch((e: unknown) => {
-        setError(e instanceof Error ? e.message : String(e))
-        setLoading(false)
-      })
-  }
-
   // Render the automatically-loaded daily forecasts as soon as the tab opens.
   useEffect(() => {
     loadSolarForecast()
-    loadConsumptionForecast()
     loadSurplusForecast()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
@@ -248,23 +181,6 @@ function Forecast() {
             Estimated PV generation for today via Forecast.Solar
           </p>
         </div>
-        <button
-          onClick={fetchForecast}
-          disabled={loading}
-          style={{
-            padding: '9px 18px',
-            borderRadius: 8,
-            border: 'none',
-            background: loading ? '#cbd5e1' : '#f59e0b',
-            color: '#fff',
-            fontSize: 13,
-            fontWeight: 600,
-            cursor: loading ? 'not-allowed' : 'pointer',
-            transition: 'background .15s',
-          }}
-        >
-          {loading ? 'Fetching…' : 'Fetch Today\'s Forecast'}
-        </button>
       </div>
 
       {error && (
@@ -309,92 +225,12 @@ function Forecast() {
 
       <hr style={{ margin: '32px 0', border: 'none', borderTop: '1px solid #e2e8f0' }} />
 
-      {/* Consumption Forecast */}
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 24 }}>
-        <div>
-          <h2 style={{ margin: 0, fontSize: 18, fontWeight: 700, color: '#1e293b' }}>Consumption Forecast</h2>
-          <p style={{ margin: '4px 0 0', fontSize: 13, color: '#64748b' }}>
-            Predicted hourly grid consumption based on same-weekday history
-          </p>
-        </div>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-          <input
-            type="date"
-            value={conDate}
-            onChange={e => setConDate(e.target.value)}
-            style={{ padding: '7px 10px', borderRadius: 6, border: '1px solid #cbd5e1', fontSize: 13, color: '#1e293b' }}
-          />
-          <button
-            onClick={loadConsumptionForecast}
-            disabled={conLoading}
-            style={{
-              padding: '9px 18px',
-              borderRadius: 8,
-              border: 'none',
-              background: conLoading ? '#cbd5e1' : '#3b82f6',
-              color: '#fff',
-              fontSize: 13,
-              fontWeight: 600,
-              cursor: conLoading ? 'not-allowed' : 'pointer',
-              transition: 'background .15s',
-            }}
-          >
-            {conLoading ? 'Loading…' : 'Load'}
-          </button>
-        </div>
-      </div>
-
-      {conError && (
-        <div style={{ marginBottom: 20, padding: '10px 14px', background: '#fef2f2', border: '1px solid #fca5a5', borderRadius: 8, fontSize: 13, color: '#b91c1c' }}>
-          {conError}
-        </div>
-      )}
-
-      {conResult && (
-        <>
-          <div style={{ display: 'flex', gap: 16, marginBottom: 24 }}>
-            <div style={{ flex: 1, background: '#eff6ff', border: '1px solid #bfdbfe', borderRadius: 10, padding: '16px 20px' }}>
-              <div style={{ fontSize: 11, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '.08em', color: '#1d4ed8', marginBottom: 4 }}>Total</div>
-              <div style={{ fontSize: 24, fontWeight: 700, color: '#1e293b' }}>
-                {(conResult.slots.reduce((s, sl) => s + Math.max(0, sl.power_w), 0) / 1000).toFixed(2)}
-                <span style={{ fontSize: 14, fontWeight: 400, color: '#64748b' }}> kWh</span>
-              </div>
-            </div>
-            <div style={{ flex: 1, background: '#eff6ff', border: '1px solid #bfdbfe', borderRadius: 10, padding: '16px 20px' }}>
-              <div style={{ fontSize: 11, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '.08em', color: '#1d4ed8', marginBottom: 4 }}>Peak Hour</div>
-              <div style={{ fontSize: 24, fontWeight: 700, color: '#1e293b' }}>
-                {(() => {
-                  const peak = conResult.slots.reduce((a, b) => b.power_w > a.power_w ? b : a)
-                  return `${String(new Date(peak.hour_ts * 1000).getHours()).padStart(2, '0')}:00`
-                })()}
-                <span style={{ fontSize: 13, fontWeight: 400, color: '#64748b' }}> · {Math.round(conResult.slots.reduce((a, b) => b.power_w > a.power_w ? b : a).power_w)} W</span>
-              </div>
-            </div>
-            <div style={{ flex: 1, background: '#eff6ff', border: '1px solid #bfdbfe', borderRadius: 10, padding: '16px 20px' }}>
-              <div style={{ fontSize: 11, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '.08em', color: '#1d4ed8', marginBottom: 4 }}>Date</div>
-              <div style={{ fontSize: 18, fontWeight: 700, color: '#1e293b' }}>{conResult.date}</div>
-            </div>
-          </div>
-          <div style={{ background: '#fff', border: '1px solid #e2e8f0', borderRadius: 10, padding: '16px 20px' }}>
-            <ConsumptionChart slots={conResult.slots} />
-          </div>
-        </>
-      )}
-
-      {!conResult && !conLoading && !conError && (
-        <div style={{ padding: '48px 0', textAlign: 'center', color: '#94a3b8', fontSize: 13 }}>
-          Not enough history yet — a consumption forecast appears after the first full day of logged data.
-        </div>
-      )}
-
-      <hr style={{ margin: '32px 0', border: 'none', borderTop: '1px solid #e2e8f0' }} />
-
       {/* Surplus Forecast */}
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 24 }}>
         <div>
           <h2 style={{ margin: 0, fontSize: 18, fontWeight: 700, color: '#1e293b' }}>Surplus Forecast</h2>
           <p style={{ margin: '4px 0 0', fontSize: 13, color: '#64748b' }}>
-            Predicted hourly surplus (solar − consumption). Green = export, red = import.
+            Predicted hourly surplus, learned from the solar forecast. Green = export, red = import.
           </p>
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
@@ -435,6 +271,15 @@ function Forecast() {
         const peakDeficit = surplusResult.slots.reduce((a, b) => b.surplus_w < a.surplus_w ? b : a)
         return (
           <>
+            {surplusResult.learning && (
+              <div style={{ marginBottom: 16, padding: '10px 14px', background: '#fffbeb', border: '1px solid #fde68a', borderRadius: 8, fontSize: 13, color: '#92400e' }}>
+                Model still learning{
+                  surplusResult.usable_days !== undefined && surplusResult.mature_days !== undefined
+                    ? ` — ${surplusResult.usable_days} of ${surplusResult.mature_days} days of history`
+                    : ''
+                }. Predictions improve as more days are logged.
+              </div>
+            )}
             <div style={{ display: 'flex', gap: 16, marginBottom: 24 }}>
               <div style={{ flex: 1, background: '#f0fdf4', border: '1px solid #86efac', borderRadius: 10, padding: '16px 20px' }}>
                 <div style={{ fontSize: 11, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '.08em', color: '#166534', marginBottom: 4 }}>Peak Export</div>

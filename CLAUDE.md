@@ -70,12 +70,13 @@ Core principle: **the handle IS the role.** Roles are not stored as device metad
 - **Open-Meteo** for both the solar PV forecast and weather features (`temperature_2m`, `cloud_cover`). Free, no API key, generous limits.
 - Put forecast providers behind a thin abstraction. Solcast Hobbyist is the fallback for the solar piece if Open-Meteo accuracy proves insufficient after comparison.
 - End-of-day cron builds the next-day prediction; add a morning refresh (solar forecasts sharpen closer to the day).
-- Predict consumption and fetch the solar forecast **separately**, then compute `surplus = solar − consumption`. Do not predict surplus directly.
+- **Surplus is predicted directly** from the solar forecast via an on-device regression (see ML approach). The earlier `surplus = solar − consumption` subtraction is kept only as the cold-start fallback until the regression has enough history. (This supersedes the original "do not predict surplus directly" rule — predicting it directly avoids stacking solar-forecast error on top of consumption-prediction error.)
 
 ### ML approach
 
-- **Baseline first:** "same weekday, averaged over the last N weeks" at 15-min buckets. ML must beat this baseline before it is worth adding.
-- Next step after baseline: gradient boosting (per time-of-day bucket) with lag + weather + calendar features. On-device inference, off-device training.
+- **Surplus regression (current):** on-device linear model `surplus[h] = a[h]·solar_forecast[h] + b[h][dow]`. A per-hour slope `a[h]` (pooled over all training days) maps issued-forecast watts to actual surplus; a per-(hour, day-of-week) intercept `b[h][dow]` captures the baseload floor. The training label is **negated net grid power** (`−grid_hourly`, i.e. export). Trained nightly from paired `solar-forecast-*` + `grid-hourly-*` history; persisted to `/littlefs/surplus-model`. Implemented in `firmware/main/surplus_model.{c,h}`; consumed by `surplus_forecast_compute`.
+- **Consumption baseline (fallback):** "same weekday, averaged over the last N weeks" — `consumption_forecast.c`. Feeds the cold-start `solar − consumption` fallback.
+- Next step if the linear model underperforms: gradient boosting (per time-of-day bucket) with lag + weather + calendar features. On-device inference, off-device training.
 - Realistic accuracy: 15–30% MAPE on hourly consumption. Daily totals predict far better than hourly shape.
 
 ### Scheduler
@@ -89,9 +90,9 @@ Core principle: **the handle IS the role.** Roles are not stored as device metad
 
 1. Log consumption + solar actuals (1-min, per-day files).
 2. Pull the daily solar forecast and store it.
-3. Same-weekday-average consumption baseline.
-4. Compute predicted surplus (solar forecast − consumption forecast).
+3. Same-weekday-average consumption baseline (now the surplus cold-start fallback).
+4. Predict surplus directly via on-device regression on the solar forecast; fall back to `solar − consumption` until trained.
 5. Appliance window optimiser against shaped profiles.
-6. Replace the baseline with the gradient-boosting model only if it does not beat the baseline meaningfully.
+6. Replace the linear regression with the gradient-boosting model only if it does not beat it meaningfully.
 
 <!-- PROJECT CONTEXT END -->

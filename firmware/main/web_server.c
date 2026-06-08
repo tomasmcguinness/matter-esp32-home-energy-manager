@@ -20,6 +20,7 @@
 #include "solar_forecast.h"
 #include "consumption_forecast.h"
 #include "surplus_forecast.h"
+#include "surplus_model.h"
 #include "matter_controller.h"
 #include "ws_server.h"
 
@@ -1381,9 +1382,17 @@ static esp_err_t forecast_solar_fetch_handler(httpd_req_t *req)
     char tomorrow[11];
     strftime(tomorrow, sizeof(tomorrow), "%Y-%m-%d", &tm_info);
 
+    // Mirror the nightly job: refit the regression, refresh the consumption
+    // fallback, then derive tomorrow's surplus.
+    surplus_model_train(56);
+
     esp_err_t cf_err = consumption_forecast_compute(tomorrow);
     if (cf_err != ESP_OK && cf_err != ESP_ERR_NOT_FOUND)
         ESP_LOGW(TAG, "consumption_forecast_compute failed: 0x%x", cf_err);
+
+    esp_err_t sf_err = surplus_forecast_compute(tomorrow);
+    if (sf_err != ESP_OK && sf_err != ESP_ERR_NOT_FOUND)
+        ESP_LOGW(TAG, "surplus_forecast_compute failed: 0x%x", sf_err);
 
     return send_json(req, forecast, 200);
 }
@@ -1416,6 +1425,31 @@ static esp_err_t forecast_surplus_get_handler(httpd_req_t *req)
     esp_err_t send_err = httpd_resp_sendstr(req, json);
     free(json);
     return send_err;
+}
+
+// Dump the trained surplus regression (slopes + per-weekday intercepts) for
+// inspection.
+static esp_err_t forecast_surplus_model_get_handler(httpd_req_t *req)
+{
+    char *json = surplus_model_json();
+    if (!json) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "OOM");
+        return ESP_FAIL;
+    }
+    httpd_resp_set_type(req, "application/json");
+    esp_err_t send_err = httpd_resp_sendstr(req, json);
+    free(json);
+    return send_err;
+}
+
+// Refit the surplus regression from history now and report the usable-day count.
+static esp_err_t test_surplus_model_train_handler(httpd_req_t *req)
+{
+    int days = surplus_model_train(56);
+    char body[64];
+    snprintf(body, sizeof(body), "{\"usable_days\":%d}", days);
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_sendstr(req, body);
 }
 
 static esp_err_t edge_post_handler(httpd_req_t *req)
@@ -1930,6 +1964,8 @@ esp_err_t web_server_start(void)
     const httpd_uri_t forecast_solar_fetch = {.uri = "/api/forecast/solar/fetch", .method = HTTP_POST, .handler = forecast_solar_fetch_handler};
     const httpd_uri_t forecast_consumption_get = {.uri = "/api/forecast/consumption", .method = HTTP_GET, .handler = forecast_consumption_get_handler};
     const httpd_uri_t forecast_surplus_get = {.uri = "/api/forecast/surplus", .method = HTTP_GET, .handler = forecast_surplus_get_handler};
+    const httpd_uri_t forecast_surplus_model_get = {.uri = "/api/forecast/surplus/model", .method = HTTP_GET, .handler = forecast_surplus_model_get_handler};
+    const httpd_uri_t test_surplus_model_train = {.uri = "/api/test/surplus-model/train", .method = HTTP_POST, .handler = test_surplus_model_train_handler};
     const httpd_uri_t test_generate_sample_data = {.uri = "/api/test/generate-sample-data", .method = HTTP_POST, .handler = test_generate_sample_data_handler};
     const httpd_uri_t test_rollup_hourly = {.uri = "/api/test/rollup-hourly", .method = HTTP_POST, .handler = test_rollup_hourly_handler};
     const httpd_uri_t test_consumption_forecast_compute = {.uri = "/api/test/consumption-forecast/compute", .method = HTTP_POST, .handler = test_consumption_forecast_compute_handler};
@@ -1966,6 +2002,8 @@ esp_err_t web_server_start(void)
     httpd_register_uri_handler(server, &forecast_solar_fetch);
     httpd_register_uri_handler(server, &forecast_consumption_get);
     httpd_register_uri_handler(server, &forecast_surplus_get);
+    httpd_register_uri_handler(server, &forecast_surplus_model_get);
+    httpd_register_uri_handler(server, &test_surplus_model_train);
     httpd_register_uri_handler(server, &test_generate_sample_data);
     httpd_register_uri_handler(server, &test_rollup_hourly);
     httpd_register_uri_handler(server, &test_consumption_forecast_compute);

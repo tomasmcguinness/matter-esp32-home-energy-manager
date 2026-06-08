@@ -15,6 +15,7 @@
 #include "power_logger.h"
 #include "consumption_forecast.h"
 #include "surplus_forecast.h"
+#include "surplus_model.h"
 
 static const char *TAG = "solar_forecast";
 
@@ -259,11 +260,16 @@ esp_err_t solar_forecast_run_daily_job(void)
     }
     cJSON_Delete(forecast);
 
+    // Refit the surplus regression from the latest history (yesterday's
+    // grid-hourly was rolled up at midnight, so the fit is fresh each night).
+    surplus_model_train(56);
+
+    // Consumption forecast is now only the cold-start fallback for surplus, so a
+    // failure here is non-fatal — surplus_forecast_compute uses the model when
+    // it's confident and only needs consumption otherwise.
     esp_err_t cf_err = consumption_forecast_compute(target);
-    if (cf_err != ESP_OK) {
-        ESP_LOGW(TAG, "consumption_forecast_compute(%s): 0x%x — skipping surplus", target, cf_err);
-        return ESP_OK;  // solar saved; no consumption history yet to derive surplus
-    }
+    if (cf_err != ESP_OK)
+        ESP_LOGW(TAG, "consumption_forecast_compute(%s): 0x%x (fallback only)", target, cf_err);
 
     esp_err_t sf_err = surplus_forecast_compute(target);
     if (sf_err != ESP_OK)

@@ -9,6 +9,7 @@
 #include "cJSON.h"
 
 #include "power_logger.h"
+#include "surplus_model.h"
 
 static const char *TAG = "surplus_forecast";
 
@@ -41,7 +42,13 @@ static bool load_hourly(const char *prefix, const char *date,
     return true;
 }
 
-esp_err_t surplus_forecast_compute(const char *date_str)
+// Cold-start fallback: surplus = solar forecast - consumption forecast, the
+// approach used before the regression model had enough history to trust. Fills
+// out_mw[]/out_ts[]. Returns ESP_ERR_NOT_FOUND if either input forecast is
+// missing.
+static esp_err_t surplus_from_subtraction(const char *date_str,
+                                          int32_t out_mw[HOURS_PER_DAY],
+                                          uint32_t out_ts[HOURS_PER_DAY])
 {
     int32_t  solar_mw[HOURS_PER_DAY] = {0};
     uint32_t solar_ts[HOURS_PER_DAY] = {0};
@@ -67,6 +74,28 @@ esp_err_t surplus_forecast_compute(const char *date_str)
     midnight_tm.tm_sec  = 0;
     time_t midnight = mktime(&midnight_tm);
 
+    for (int h = 0; h < HOURS_PER_DAY; h++) {
+        out_mw[h] = solar_mw[h] - con_mw[h];
+        out_ts[h] = solar_ts[h] ? solar_ts[h] : (uint32_t)(midnight + h * 3600);
+    }
+    return ESP_OK;
+}
+
+esp_err_t surplus_forecast_compute(const char *date_str)
+{
+    int32_t  out_mw[HOURS_PER_DAY] = {0};
+    uint32_t out_ts[HOURS_PER_DAY] = {0};
+    const char *method = "regression";
+
+    // Predict surplus directly from the solar forecast; fall back to
+    // solar - consumption until the model has enough history to be trusted.
+    if (!surplus_model_predict(date_str, out_mw, out_ts)) {
+        method = "fallback (solar - consumption)";
+        esp_err_t err = surplus_from_subtraction(date_str, out_mw, out_ts);
+        if (err != ESP_OK)
+            return err;
+    }
+
     char path[64];
     snprintf(path, sizeof(path), "%s/surplus-%s", LFS_BASE, date_str);
 
@@ -78,14 +107,14 @@ esp_err_t surplus_forecast_compute(const char *date_str)
 
     for (int h = 0; h < HOURS_PER_DAY; h++) {
         power_record_t rec = {
-            .unix_minute = solar_ts[h] ? solar_ts[h] : (uint32_t)(midnight + h * 3600),
-            .power_mw    = solar_mw[h] - con_mw[h],
+            .unix_minute = out_ts[h],
+            .power_mw    = out_mw[h],
         };
         fwrite(&rec, sizeof(rec), 1, out);
     }
     fclose(out);
 
-    ESP_LOGI(TAG, "Surplus forecast computed for %s", date_str);
+    ESP_LOGI(TAG, "Surplus forecast computed for %s [%s]", date_str, method);
     return ESP_OK;
 }
 
@@ -96,6 +125,16 @@ char *surplus_forecast_json(const char *date_str)
 
     cJSON *root = cJSON_CreateObject();
     cJSON_AddStringToObject(root, "date", date_str);
+
+    // Surface the regression's maturity so the UI can flag "still learning"
+    // while it builds up history (it is used from day one, just not yet mature).
+    uint16_t usable_days = 0;
+    bool     mature      = false;
+    surplus_model_status(&usable_days, &mature);
+    cJSON_AddNumberToObject(root, "usable_days", usable_days);
+    cJSON_AddNumberToObject(root, "mature_days", SURPLUS_MODEL_MATURE_DAYS);
+    cJSON_AddBoolToObject(root, "learning", !mature);
+
     cJSON *slots = cJSON_AddArrayToObject(root, "slots");
 
     FILE *f = fopen(path, "rb");
