@@ -25,12 +25,17 @@ let edgeConfigs: EdgeConfig[] = [
 let devices: Device[] = [
   {
     nodeId: 10000,
-    vendorName: 'Modbus',
-    productName: 'TCP Adapter',
+    vendorName: 'Solax',
+    productName: 'Hybrid Inverter',
+    // Mirrors a real hybrid inverter behind a Modbus adapter: the Solar Power
+    // endpoint owns child electrical-sensor endpoints for each PV string and a
+    // child that also carries Power Source (0x0011) for the battery.
     endpoints: [
-      { endpointId: 0, label: 'Root Node',        included: false, deviceTypes: [0x0016], parts: [1, 2] },
-      { endpointId: 1, label: 'Solax Inverter',   included: false, deviceTypes: [0x0017], parts: [] },
-      { endpointId: 2, label: 'FeedIn CT Clamp',  included: false, deviceTypes: [0x0510], parts: [] },
+      { endpointId: 0,     label: 'Root Node',      included: false, deviceTypes: [0x0016],                 parts: [13481, 13482, 13483, 13484] },
+      { endpointId: 13481, label: 'Solax Inverter', included: false, deviceTypes: [0x0017, 0x0011, 0x0510], parts: [13482, 13483, 13484] },
+      { endpointId: 13482, label: 'PV String 1',    included: false, deviceTypes: [0x0510],                 parts: [] },
+      { endpointId: 13483, label: 'PV String 2',    included: false, deviceTypes: [0x0510],                 parts: [] },
+      { endpointId: 13484, label: 'Battery',        included: false, deviceTypes: [0x0510, 0x0011],         parts: [] },
     ],
     hasSubscription: true,
   },
@@ -144,12 +149,18 @@ export const handlers = [
       const nodeId = n.settings?.nodeId
       const endpointId = n.settings?.endpointId
       if (typeof nodeId !== 'number' || typeof endpointId !== 'number') return n
+      // PV strings export DC power; the battery is signed (negative = charging here).
+      const type = n.settings?.type
+      const activePower =
+        type === 'pvString' ? 1800000 :
+        type === 'battery'  ? -2500000 :
+        1000000
       return {
         ...n,
         values: [
-          { clusterId: 144, attributeId: 0x04, value: 230000 },  // 230.0 V
-          { clusterId: 144, attributeId: 0x05, value: 4350 },    // 4.35 A
-          { clusterId: 144, attributeId: 0x08, value: 1000000 }, // 1000.0 W
+          { clusterId: 144, attributeId: 0x04, value: 230000 },     // 230.0 V
+          { clusterId: 144, attributeId: 0x05, value: 4350 },       // 4.35 A
+          { clusterId: 144, attributeId: 0x08, value: activePower },
         ],
       }
     })
@@ -250,13 +261,43 @@ export const handlers = [
     const nodeY = cuY
     const nodeId = 'solar_inverter'
     const edgeId = 'solar_inverter-power-out-consumer_unit-solar_input'
-    const settings = { label: body.label, type: 'device', nodeId: body.nodeId, endpointId: body.endpointId }
-    const existing = nodeConfigs.find(n => n.id === nodeId)
-    if (existing) {
-      existing.x = nodeX; existing.y = nodeY; existing.settings = settings
-    } else {
-      nodeConfigs.push({ id: nodeId, x: nodeX, y: nodeY, settings })
+    const settings = { label: body.label, type: 'solarInverter', nodeId: body.nodeId, endpointId: body.endpointId }
+
+    const upsertNode = (id: string, x: number, y: number, s: Record<string, unknown>) => {
+      const e = nodeConfigs.find(n => n.id === id)
+      if (e) { e.x = x; e.y = y; e.settings = s } else { nodeConfigs.push({ id, x, y, settings: s }) }
     }
+    const upsertEdge = (e: EdgeConfig) => {
+      if (!edgeConfigs.find(x => x.id === e.id)) edgeConfigs.push(e)
+    }
+
+    upsertNode(nodeId, nodeX, nodeY, settings)
+    upsertEdge({ id: edgeId, source: nodeId, sourceHandle: 'power-out', target: 'consumer_unit', targetHandle: 'solar_input' })
+
+    // Mirror the firmware: surface the inverter's child PV-string / battery endpoints
+    // as their own nodes wired to the inverter. Battery = child carrying Power Source.
+    const POWER_SOURCE_DT = 0x0011
+    const dev = devices.find(d => d.nodeId === body.nodeId)
+    const solarEp = dev?.endpoints.find(e => e.endpointId === body.endpointId)
+    let pvIndex = 0
+    for (const childId of solarEp?.parts ?? []) {
+      const child = dev?.endpoints.find(e => e.endpointId === childId)
+      if (!child) continue
+      const isBattery = child.deviceTypes?.includes(POWER_SOURCE_DT)
+      const isSensor = child.deviceTypes?.includes(0x0510)
+      if (!isBattery && !isSensor) continue
+      if (isBattery) {
+        const id = `battery_${childId}`
+        upsertNode(id, nodeX, nodeY + 160, { label: 'Battery', type: 'battery', nodeId: body.nodeId, endpointId: childId })
+        upsertEdge({ id: `solar_inverter-battery-${id}-power-in`, source: nodeId, sourceHandle: 'battery', target: id, targetHandle: 'power-in' })
+      } else {
+        const id = `pv_string_${childId}`
+        upsertNode(id, nodeX + 220, nodeY - 60 + pvIndex * 90, { label: `PV String ${pvIndex + 1}`, type: 'pvString', nodeId: body.nodeId, endpointId: childId })
+        upsertEdge({ id: `${id}-power-out-solar_inverter-dc_in`, source: id, sourceHandle: 'power-out', target: nodeId, targetHandle: 'dc_in' })
+        pvIndex++
+      }
+    }
+
     return HttpResponse.json({
       node: { id: nodeId, x: nodeX, y: nodeY, settings },
       edge: { id: edgeId, source: nodeId, sourceHandle: 'power-out', target: 'consumer_unit', targetHandle: 'solar_input' },
@@ -403,14 +444,19 @@ export const handlers = [
   powerWs.addEventListener('connection', ({ client }) => {
     console.log('Connected!');
 
-    const interval = setInterval(() => {
-      const kw = parseFloat((Math.random() * 1 + 2).toFixed(2))
-      console.log("Sending " + kw);
-
+    // Push ElectricalPowerMeasurement ActivePower (cluster 144, attr 0x08) updates
+    // in the firmware's `attribute_update` shape so node power + edge flow animate.
+    // The battery value sweeps through zero so charge/discharge direction flips.
+    let tick = 0
+    const send = (endpointId: number, value: number) =>
       client.send(JSON.stringify({
-        type: 'power_update',
-        data: { nodeId: 10000, endpointId: 2, kw },
+        type: 'attribute_update',
+        data: { nodeId: 10000, endpointId, clusterId: 144, attributeId: 0x08, value },
       }))
+    const interval = setInterval(() => {
+      tick++
+      send(13482, Math.round(1500000 + Math.random() * 600000))   // PV String 1 DC, W·1000
+      send(13484, Math.round(2600000 * Math.sin(tick / 3)))       // Battery: ± charge/discharge
     }, 5000)
 
     // Simulate a device being commissioned 8 seconds after connection

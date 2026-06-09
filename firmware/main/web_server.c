@@ -1085,6 +1085,139 @@ static esp_err_t topology_grid_put_handler(httpd_req_t *req)
     return send_json(req, resp, 200);
 }
 
+// Matter device type ids used to classify a hybrid inverter's child endpoints.
+#define DEVICE_TYPE_POWER_SOURCE      0x0011
+#define DEVICE_TYPE_ELECTRICAL_SENSOR 0x0510
+
+// Walk the child endpoints (the "parts") of the chosen Solar Power endpoint and
+// create a topology node + edge for each: a child carrying the Power Source device
+// type is the battery (hangs off the inverter's "battery" handle); any other
+// electrical-sensor child is a PV string (feeds the inverter's "dc_in" handle).
+// Best-effort: failures to upsert an individual child are logged and skipped so
+// the inverter itself still configures.
+static void topology_solar_build_children(uint64_t matter_node_id, uint16_t solar_ep_id,
+                                          float inv_x, float inv_y)
+{
+    char *full_json = device_manager_get_all_json();
+    if (!full_json)
+        return;
+    cJSON *full = cJSON_Parse(full_json);
+    free(full_json);
+    if (!full)
+        return;
+
+    cJSON *dev_arr = cJSON_GetObjectItemCaseSensitive(full, "devices");
+    cJSON *endpoints = NULL;
+    cJSON *parts = NULL;
+    cJSON *dev;
+    cJSON_ArrayForEach(dev, dev_arr)
+    {
+        cJSON *nid_j = cJSON_GetObjectItemCaseSensitive(dev, "nodeId");
+        if (!cJSON_IsNumber(nid_j) || (uint64_t)nid_j->valuedouble != matter_node_id)
+            continue;
+        endpoints = cJSON_GetObjectItemCaseSensitive(dev, "endpoints");
+        cJSON *ep;
+        cJSON_ArrayForEach(ep, endpoints)
+        {
+            cJSON *eid_j = cJSON_GetObjectItemCaseSensitive(ep, "endpointId");
+            if (cJSON_IsNumber(eid_j) && (uint16_t)eid_j->valuedouble == solar_ep_id)
+            {
+                parts = cJSON_GetObjectItemCaseSensitive(ep, "parts");
+                break;
+            }
+        }
+        break;
+    }
+
+    if (cJSON_IsArray(parts))
+    {
+        int pv_index = 0;
+        cJSON *part_id_j;
+        cJSON_ArrayForEach(part_id_j, parts)
+        {
+            if (!cJSON_IsNumber(part_id_j))
+                continue;
+            uint16_t child_ep = (uint16_t)part_id_j->valuedouble;
+
+            // Look up this child endpoint's device types to classify it.
+            bool is_battery = false;
+            bool is_sensor = false;
+            cJSON *ep;
+            cJSON_ArrayForEach(ep, endpoints)
+            {
+                cJSON *eid_j = cJSON_GetObjectItemCaseSensitive(ep, "endpointId");
+                if (!cJSON_IsNumber(eid_j) || (uint16_t)eid_j->valuedouble != child_ep)
+                    continue;
+                cJSON *types = cJSON_GetObjectItemCaseSensitive(ep, "deviceTypes");
+                cJSON *t;
+                cJSON_ArrayForEach(t, types)
+                {
+                    int dt = (int)t->valuedouble;
+                    if (dt == DEVICE_TYPE_POWER_SOURCE) is_battery = true;
+                    if (dt == DEVICE_TYPE_ELECTRICAL_SENSOR) is_sensor = true;
+                }
+                break;
+            }
+            if (!is_battery && !is_sensor)
+                continue; // not a metered child; skip
+
+            char node_id[48];
+            char edge_id[160];
+            float cx, cy;
+            cJSON *cs = cJSON_CreateObject();
+            cJSON_AddNumberToObject(cs, "nodeId", (double)matter_node_id);
+            cJSON_AddNumberToObject(cs, "endpointId", (double)child_ep);
+
+            if (is_battery)
+            {
+                snprintf(node_id, sizeof(node_id), "battery_%u", (unsigned)child_ep);
+                cJSON_AddStringToObject(cs, "label", "Battery");
+                cJSON_AddStringToObject(cs, "type", "battery");
+                cx = inv_x;
+                cy = inv_y + 160.0f;
+            }
+            else
+            {
+                snprintf(node_id, sizeof(node_id), "pv_string_%u", (unsigned)child_ep);
+                char pv_label[24];
+                snprintf(pv_label, sizeof(pv_label), "PV String %d", pv_index + 1);
+                cJSON_AddStringToObject(cs, "label", pv_label);
+                cJSON_AddStringToObject(cs, "type", "pvString");
+                cx = inv_x + 220.0f;
+                cy = inv_y - 60.0f + (float)pv_index * 90.0f;
+                pv_index++;
+            }
+
+            char *cs_str = cJSON_PrintUnformatted(cs);
+            cJSON_Delete(cs);
+            if (node_manager_upsert(node_id, cx, cy, cs_str) != ESP_OK)
+            {
+                ESP_LOGW(TAG, "Failed to upsert solar child node %s", node_id);
+                free(cs_str);
+                continue;
+            }
+            free(cs_str);
+
+            esp_err_t eerr;
+            if (is_battery)
+            {
+                // Battery hangs off the inverter; power flows either way.
+                snprintf(edge_id, sizeof(edge_id), "solar_inverter-battery-%s-power-in", node_id);
+                eerr = node_manager_upsert_edge(edge_id, "solar_inverter", node_id, "battery", "power-in");
+            }
+            else
+            {
+                snprintf(edge_id, sizeof(edge_id), "%s-power-out-solar_inverter-dc_in", node_id);
+                eerr = node_manager_upsert_edge(edge_id, node_id, "solar_inverter", "power-out", "dc_in");
+            }
+            if (eerr != ESP_OK)
+                ESP_LOGW(TAG, "Failed to upsert solar child edge for %s", node_id);
+        }
+    }
+
+    cJSON_Delete(full);
+}
+
 static esp_err_t topology_solar_put_handler(httpd_req_t *req)
 {
     if (req->content_len <= 0 || req->content_len > MAX_POST_BODY)
@@ -1156,7 +1289,7 @@ static esp_err_t topology_solar_put_handler(httpd_req_t *req)
 
     cJSON *settings = cJSON_CreateObject();
     cJSON_AddStringToObject(settings, "label", label);
-    cJSON_AddStringToObject(settings, "type", "device");
+    cJSON_AddStringToObject(settings, "type", "solarInverter");
     cJSON_AddNumberToObject(settings, "nodeId", matter_node_id);
     cJSON_AddNumberToObject(settings, "endpointId", matter_ep_id);
     char *settings_str = cJSON_PrintUnformatted(settings);
@@ -1180,6 +1313,14 @@ static esp_err_t topology_solar_put_handler(httpd_req_t *req)
         return ESP_FAIL;
     }
 
+    // A hybrid inverter exposes its PV strings and battery as child endpoints under
+    // the Solar Power endpoint. Surface each as its own topology node wired to the
+    // inverter: PV strings feed DC power in (electrical-sensor-only children), the
+    // battery sits off the inverter (the child also carrying a Power Source device
+    // type, 0x0011). EPM ActivePower for these endpoints already flows via the
+    // wildcard-endpoint subscription, so the nodes render live once they exist.
+    topology_solar_build_children((uint64_t)matter_node_id, (uint16_t)matter_ep_id, node_x, node_y);
+
     cJSON *resp = cJSON_CreateObject();
 
     cJSON *node_obj = cJSON_AddObjectToObject(resp, "node");
@@ -1188,7 +1329,7 @@ static esp_err_t topology_solar_put_handler(httpd_req_t *req)
     cJSON_AddNumberToObject(node_obj, "y", node_y);
     cJSON *resp_settings = cJSON_AddObjectToObject(node_obj, "settings");
     cJSON_AddStringToObject(resp_settings, "label", label);
-    cJSON_AddStringToObject(resp_settings, "type", "device");
+    cJSON_AddStringToObject(resp_settings, "type", "solarInverter");
     cJSON_AddNumberToObject(resp_settings, "nodeId", matter_node_id);
     cJSON_AddNumberToObject(resp_settings, "endpointId", matter_ep_id);
 

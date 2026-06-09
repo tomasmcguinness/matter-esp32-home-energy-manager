@@ -60,7 +60,7 @@ function powerFromAttribute(clusterId: number, attributeId: number, value: numbe
 }
 
 function DeviceNode({ data }: { data: DeviceNodeData }) {
-  
+
   return (
     <>
       <Handle type="target" position={Position.Left} id="power-in" />
@@ -78,9 +78,78 @@ function DeviceNode({ data }: { data: DeviceNodeData }) {
   )
 }
 
+// The Solar Power inverter. PV strings feed DC power into `dc_in` (left); the
+// battery hangs off `battery` (bottom); AC output leaves via `power-out` (right)
+// into the consumer unit's solar_input. Body shows the inverter's own AC power.
+function SolarInverterNode({ data }: { data: DeviceNodeData }) {
+  return (
+    <>
+      <Handle type="target" position={Position.Left} id="dc_in" />
+      <Handle type="source" position={Position.Bottom} id="battery" />
+      <div style={{ padding: '4px 10px', background: '#fef9c3', borderBottom: '1px solid #fde68a', fontSize: 12, fontWeight: 600, color: '#1e293b', whiteSpace: 'nowrap' }}>
+        ☀ {data.label}
+      </div>
+      <div style={{ minWidth: '100px', padding: '5px 10px', display: 'grid', gridTemplateColumns: 'auto 1fr', columnGap: 8, rowGap: 2, fontSize: 12 }}>
+        <span style={{ color: '#94a3b8' }}>V</span><span style={{textAlign: 'right'}}>{fmt(data.power?.voltage, 'V')}</span>
+        <span style={{ color: '#94a3b8' }}>P</span><span style={{textAlign: 'right'}}>{fmt(data.power?.power, 'W')}</span>
+      </div>
+      <Handle type="source" position={Position.Right} id="power-out" />
+    </>
+  )
+}
+
+// A single PV string / MPPT input. Shows live DC generation flowing into the inverter.
+function PvStringNode({ data }: { data: DeviceNodeData }) {
+  return (
+    <>
+      <div style={{ padding: '4px 10px', background: '#dcfce7', borderBottom: '1px solid #bbf7d0', fontSize: 12, fontWeight: 600, color: '#166534', whiteSpace: 'nowrap' }}>
+        ▦ {data.label}
+      </div>
+      <div style={{ minWidth: '90px', padding: '5px 10px', display: 'flex', justifyContent: 'space-between', gap: 8, fontSize: 12 }}>
+        <span style={{ color: '#94a3b8' }}>DC</span><span>{fmt(data.power?.power, 'W')}</span>
+      </div>
+      <Handle type="source" position={Position.Right} id="power-out" />
+    </>
+  )
+}
+
+// The home battery, hanging off the inverter. Renders charge/discharge power and
+// direction from the sign of ActivePower. Convention: positive = discharging to
+// the house, negative = charging. Flip here if the inverter reports the opposite.
+function BatteryNode({ data }: { data: DeviceNodeData }) {
+  const w = data.power?.power
+  let label = 'Idle'
+  let color = '#94a3b8'
+  let bg = '#f1f5f9'
+  if (w !== undefined && w !== 0) {
+    const discharging = w > 0
+    label = discharging ? `Discharging ${fmt(Math.abs(w), 'W')}` : `Charging ${fmt(Math.abs(w), 'W')}`
+    color = discharging ? '#a32d2d' : '#3b6d11'
+    bg = discharging ? '#fcebeb' : '#eaf3de'
+  }
+  return (
+    <>
+      <Handle type="target" position={Position.Top} id="power-in" />
+      <div style={{ padding: '4px 10px', background: '#e0e7ff', borderBottom: '1px solid #c7d2fe', fontSize: 12, fontWeight: 600, color: '#1e293b', whiteSpace: 'nowrap' }}>
+        🔋 {data.label}
+      </div>
+      <div style={{ minWidth: '120px', padding: '6px 10px', fontSize: 12, fontWeight: 600, color, background: bg, borderRadius: 4, margin: 6, textAlign: 'center' }}>
+        {label}
+      </div>
+    </>
+  )
+}
+
 // Appliance nodes are functionally identical to device nodes on the canvas (a metered
 // endpoint with a power-in handle); they only differ by their semantic role/type.
-const nodeTypes = { consumerUnit: ConsumerUnitNode, device: DeviceNode, appliance: DeviceNode }
+const nodeTypes = {
+  consumerUnit: ConsumerUnitNode,
+  device: DeviceNode,
+  appliance: DeviceNode,
+  solarInverter: SolarInverterNode,
+  pvString: PvStringNode,
+  battery: BatteryNode,
+}
 
 type SavedNodeConfig = { id: string; x: number; y: number; settings: Record<string, unknown>; values?: ValueEntry[] }
 type SavedEdgeConfig = { id: string; source: string; target: string; sourceHandle?: string; targetHandle?: string }
