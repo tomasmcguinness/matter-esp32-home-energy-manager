@@ -345,6 +345,35 @@ export const handlers = [
     return HttpResponse.json({})
   }),
 
+  http.get('/api/appliance/profiles', () => {
+    // node_11 (Oven) has a learned profile; a second appliance is still learning.
+    return HttpResponse.json({
+      appliances: [
+        {
+          graph_id: 'node_11',
+          trained: true,
+          standby_w: 3,
+          avg_program_power_w: 1820,
+          std_program_power_w: 210,
+          avg_program_len_min: 112,
+          std_program_len_min: 9,
+          program_count: 14,
+          days_with_data: 26,
+          trained_unix: Math.floor(Date.now() / 1000) - 3600,
+          window_days: 30,
+        },
+        {
+          graph_id: 'node_42',
+          trained: false,
+        },
+      ],
+    })
+  }),
+
+  http.post('/api/test/appliance-profiles/train', () => {
+    return HttpResponse.json({ trained: true })
+  }),
+
   http.get('/api/forecast/solar', ({ request }) => {
     const url = new URL(request.url)
     const date = url.searchParams.get('date') ?? new Date().toISOString().slice(0, 10)

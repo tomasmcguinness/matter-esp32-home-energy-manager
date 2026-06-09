@@ -16,6 +16,7 @@
 #include "consumption_forecast.h"
 #include "surplus_forecast.h"
 #include "surplus_model.h"
+#include "appliance_profile.h"
 
 static const char *TAG = "solar_forecast";
 
@@ -263,6 +264,10 @@ esp_err_t solar_forecast_run_daily_job(void)
     // Refit the surplus regression from the latest history (yesterday's
     // grid-hourly was rolled up at midnight, so the fit is fresh each night).
     surplus_model_train(56);
+
+    // Refresh each appliance's usage profile (standby / program power / length)
+    // from the last 30 days of per-node minute history. Non-fatal best-effort.
+    appliance_profile_train_all(30);
 
     // Consumption forecast is now only the cold-start fallback for surplus, so a
     // failure here is non-fatal — surplus_forecast_compute uses the model when

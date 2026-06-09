@@ -21,6 +21,7 @@
 #include "consumption_forecast.h"
 #include "surplus_forecast.h"
 #include "surplus_model.h"
+#include "appliance_profile.h"
 #include "matter_controller.h"
 #include "ws_server.h"
 
@@ -1452,6 +1453,58 @@ static esp_err_t test_surplus_model_train_handler(httpd_req_t *req)
     return httpd_resp_sendstr(req, body);
 }
 
+// Return one appliance's learned usage profile (standby / program power / length).
+static esp_err_t appliance_profile_get_handler(httpd_req_t *req)
+{
+    char id[48] = {0};
+    size_t qlen = httpd_req_get_url_query_len(req);
+    if (qlen > 0 && qlen < 96)
+    {
+        char query[96];
+        if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK)
+            httpd_query_key_value(query, "id", id, sizeof(id));
+    }
+    if (!id[0])
+    {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Missing id");
+        return ESP_FAIL;
+    }
+
+    char *json = appliance_profile_json(id);
+    if (!json)
+    {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "OOM");
+        return ESP_FAIL;
+    }
+    httpd_resp_set_type(req, "application/json");
+    esp_err_t err = httpd_resp_sendstr(req, json);
+    free(json);
+    return err;
+}
+
+// Return every appliance's learned usage profile.
+static esp_err_t appliance_profiles_get_handler(httpd_req_t *req)
+{
+    char *json = appliance_profile_all_json();
+    if (!json)
+    {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "OOM");
+        return ESP_FAIL;
+    }
+    httpd_resp_set_type(req, "application/json");
+    esp_err_t err = httpd_resp_sendstr(req, json);
+    free(json);
+    return err;
+}
+
+// Re-derive every appliance profile from history now (test hook).
+static esp_err_t test_appliance_profiles_train_handler(httpd_req_t *req)
+{
+    appliance_profile_train_all(30);
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_sendstr(req, "{\"trained\":true}");
+}
+
 static esp_err_t edge_post_handler(httpd_req_t *req)
 {
     if (req->content_len <= 0 || req->content_len > MAX_POST_BODY)
@@ -1928,7 +1981,7 @@ esp_err_t web_server_start(void)
     config.lru_purge_enable = true;
     config.uri_match_fn = uri_match_segments;
     config.stack_size = 12288;
-    config.max_uri_handlers = 40;
+    config.max_uri_handlers = 44;
     config.max_resp_headers = 20;
 
     httpd_handle_t server = NULL;
@@ -1966,6 +2019,9 @@ esp_err_t web_server_start(void)
     const httpd_uri_t forecast_surplus_get = {.uri = "/api/forecast/surplus", .method = HTTP_GET, .handler = forecast_surplus_get_handler};
     const httpd_uri_t forecast_surplus_model_get = {.uri = "/api/forecast/surplus/model", .method = HTTP_GET, .handler = forecast_surplus_model_get_handler};
     const httpd_uri_t test_surplus_model_train = {.uri = "/api/test/surplus-model/train", .method = HTTP_POST, .handler = test_surplus_model_train_handler};
+    const httpd_uri_t appliance_profile_get = {.uri = "/api/appliance/profile", .method = HTTP_GET, .handler = appliance_profile_get_handler};
+    const httpd_uri_t appliance_profiles_get = {.uri = "/api/appliance/profiles", .method = HTTP_GET, .handler = appliance_profiles_get_handler};
+    const httpd_uri_t test_appliance_profiles_train = {.uri = "/api/test/appliance-profiles/train", .method = HTTP_POST, .handler = test_appliance_profiles_train_handler};
     const httpd_uri_t test_generate_sample_data = {.uri = "/api/test/generate-sample-data", .method = HTTP_POST, .handler = test_generate_sample_data_handler};
     const httpd_uri_t test_rollup_hourly = {.uri = "/api/test/rollup-hourly", .method = HTTP_POST, .handler = test_rollup_hourly_handler};
     const httpd_uri_t test_consumption_forecast_compute = {.uri = "/api/test/consumption-forecast/compute", .method = HTTP_POST, .handler = test_consumption_forecast_compute_handler};
@@ -2004,6 +2060,9 @@ esp_err_t web_server_start(void)
     httpd_register_uri_handler(server, &forecast_surplus_get);
     httpd_register_uri_handler(server, &forecast_surplus_model_get);
     httpd_register_uri_handler(server, &test_surplus_model_train);
+    httpd_register_uri_handler(server, &appliance_profile_get);
+    httpd_register_uri_handler(server, &appliance_profiles_get);
+    httpd_register_uri_handler(server, &test_appliance_profiles_train);
     httpd_register_uri_handler(server, &test_generate_sample_data);
     httpd_register_uri_handler(server, &test_rollup_hourly);
     httpd_register_uri_handler(server, &test_consumption_forecast_compute);
