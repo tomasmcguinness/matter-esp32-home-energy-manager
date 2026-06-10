@@ -4,11 +4,12 @@ title: Predict surplus directly via on-device regression on solar forecast
 status: Done
 assignee: []
 created_date: '2026-06-08 05:42'
-updated_date: '2026-06-08 06:02'
+updated_date: '2026-06-10 06:04'
 labels:
   - forecasting
   - ml
 dependencies: []
+ordinal: 3000
 ---
 
 ## Description
