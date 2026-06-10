@@ -22,6 +22,7 @@
 #include "surplus_forecast.h"
 #include "surplus_model.h"
 #include "appliance_profile.h"
+#include "scheduler.h"
 #include "matter_controller.h"
 #include "ws_server.h"
 
@@ -1638,6 +1639,39 @@ static esp_err_t appliance_profiles_get_handler(httpd_req_t *req)
     return err;
 }
 
+// Suggested appliance schedule for a day: slides each appliance's learned run
+// across that day's surplus forecast. Defaults to tomorrow (matching the
+// surplus forecast endpoint) when no ?date= is given.
+static esp_err_t schedule_get_handler(httpd_req_t *req)
+{
+    char date[16] = {0};
+    size_t qlen = httpd_req_get_url_query_len(req);
+    if (qlen > 0 && qlen < 32) {
+        char query[32];
+        if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK)
+            httpd_query_key_value(query, "date", date, sizeof(date));
+    }
+    if (!date[0]) {
+        time_t now = time(NULL);
+        struct tm tm_info;
+        localtime_r(&now, &tm_info);
+        tm_info.tm_hour = 0; tm_info.tm_min = 0; tm_info.tm_sec = 0;
+        tm_info.tm_mday += 1;
+        mktime(&tm_info);
+        strftime(date, sizeof(date), "%Y-%m-%d", &tm_info);
+    }
+
+    char *json = scheduler_json(date);
+    if (!json) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "OOM");
+        return ESP_FAIL;
+    }
+    httpd_resp_set_type(req, "application/json");
+    esp_err_t err = httpd_resp_sendstr(req, json);
+    free(json);
+    return err;
+}
+
 // Re-derive every appliance profile from history now (test hook).
 static esp_err_t test_appliance_profiles_train_handler(httpd_req_t *req)
 {
@@ -2122,7 +2156,7 @@ esp_err_t web_server_start(void)
     config.lru_purge_enable = true;
     config.uri_match_fn = uri_match_segments;
     config.stack_size = 12288;
-    config.max_uri_handlers = 44;
+    config.max_uri_handlers = 46;
     config.max_resp_headers = 20;
 
     httpd_handle_t server = NULL;
@@ -2162,6 +2196,7 @@ esp_err_t web_server_start(void)
     const httpd_uri_t test_surplus_model_train = {.uri = "/api/test/surplus-model/train", .method = HTTP_POST, .handler = test_surplus_model_train_handler};
     const httpd_uri_t appliance_profile_get = {.uri = "/api/appliance/profile", .method = HTTP_GET, .handler = appliance_profile_get_handler};
     const httpd_uri_t appliance_profiles_get = {.uri = "/api/appliance/profiles", .method = HTTP_GET, .handler = appliance_profiles_get_handler};
+    const httpd_uri_t schedule_get = {.uri = "/api/schedule", .method = HTTP_GET, .handler = schedule_get_handler};
     const httpd_uri_t test_appliance_profiles_train = {.uri = "/api/test/appliance-profiles/train", .method = HTTP_POST, .handler = test_appliance_profiles_train_handler};
     const httpd_uri_t test_generate_sample_data = {.uri = "/api/test/generate-sample-data", .method = HTTP_POST, .handler = test_generate_sample_data_handler};
     const httpd_uri_t test_rollup_hourly = {.uri = "/api/test/rollup-hourly", .method = HTTP_POST, .handler = test_rollup_hourly_handler};
@@ -2203,6 +2238,7 @@ esp_err_t web_server_start(void)
     httpd_register_uri_handler(server, &test_surplus_model_train);
     httpd_register_uri_handler(server, &appliance_profile_get);
     httpd_register_uri_handler(server, &appliance_profiles_get);
+    httpd_register_uri_handler(server, &schedule_get);
     httpd_register_uri_handler(server, &test_appliance_profiles_train);
     httpd_register_uri_handler(server, &test_generate_sample_data);
     httpd_register_uri_handler(server, &test_rollup_hourly);

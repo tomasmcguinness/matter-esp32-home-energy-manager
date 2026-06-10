@@ -258,7 +258,7 @@ int appliance_profile_train(const char *graph_id, int window_days)
 // ---------------------------------------------------------------------------
 // Topology enumeration: an appliance is any node wired to the consumer unit
 // whose CU handle is not the grid, solar or battery (and not the grid meter).
-typedef void (*appliance_visit_fn)(const char *graph_id, void *ctx);
+typedef void (*appliance_visit_fn)(const char *graph_id, const char *name, void *ctx);
 
 static bool handle_is_appliance(const char *handle)
 {
@@ -267,6 +267,26 @@ static bool handle_is_appliance(const char *handle)
     if (strncmp(handle, "solar", 5) == 0)   return false;
     if (strncmp(handle, "battery", 7) == 0) return false;
     return true;
+}
+
+// Find a node's user-facing name from its settings (name, then label). Returns
+// NULL if the node or a usable label isn't present.
+static const char *node_display_name(cJSON *nodes, const char *id)
+{
+    cJSON *n = NULL;
+    cJSON_ArrayForEach(n, nodes) {
+        const char *nid = json_str(n, "id");
+        if (!nid || strcmp(nid, id) != 0) continue;
+        cJSON *settings = cJSON_GetObjectItemCaseSensitive(n, "settings");
+        if (settings) {
+            const char *nm = json_str(settings, "name");
+            if (nm && nm[0]) return nm;
+            const char *lb = json_str(settings, "label");
+            if (lb && lb[0]) return lb;
+        }
+        return NULL;
+    }
+    return NULL;
 }
 
 static void enumerate_appliances(appliance_visit_fn fn, void *ctx)
@@ -278,6 +298,7 @@ static void enumerate_appliances(appliance_visit_fn fn, void *ctx)
     if (!root) return;
 
     cJSON *edges = cJSON_GetObjectItemCaseSensitive(root, "edges");
+    cJSON *nodes = cJSON_GetObjectItemCaseSensitive(root, "nodes");
 
     char seen[MAX_APPLIANCES][40];
     int  seen_n = 0;
@@ -307,14 +328,15 @@ static void enumerate_appliances(appliance_visit_fn fn, void *ctx)
         if (seen_n >= MAX_APPLIANCES) break;
         strcpy(seen[seen_n++], clean);
 
-        fn(clean, ctx);
+        fn(clean, node_display_name(nodes, other), ctx);
     }
 
     cJSON_Delete(root);
 }
 
-static void train_one(const char *graph_id, void *ctx)
+static void train_one(const char *graph_id, const char *name, void *ctx)
 {
+    (void)name;
     int window_days = *(int *)ctx;
     appliance_profile_train(graph_id, window_days);
 }
@@ -322,6 +344,33 @@ static void train_one(const char *graph_id, void *ctx)
 void appliance_profile_train_all(int window_days)
 {
     enumerate_appliances(train_one, &window_days);
+}
+
+// Collector for appliance_enumerate(): copies each appliance's id and name into
+// caller-supplied parallel arrays, up to the cap.
+typedef struct {
+    char (*ids)[APPLIANCE_ID_MAX_LEN];
+    char (*names)[APPLIANCE_NAME_MAX_LEN];
+    size_t max;
+    size_t n;
+} collect_ctx_t;
+
+static void collect_one(const char *graph_id, const char *name, void *ctx)
+{
+    collect_ctx_t *c = (collect_ctx_t *)ctx;
+    if (c->n >= c->max) return;
+    snprintf(c->ids[c->n], APPLIANCE_ID_MAX_LEN, "%s", graph_id);
+    snprintf(c->names[c->n], APPLIANCE_NAME_MAX_LEN, "%s", (name && name[0]) ? name : graph_id);
+    c->n++;
+}
+
+size_t appliance_enumerate(char ids[][APPLIANCE_ID_MAX_LEN],
+                           char names[][APPLIANCE_NAME_MAX_LEN],
+                           size_t max)
+{
+    collect_ctx_t c = { ids, names, max, 0 };
+    enumerate_appliances(collect_one, &c);
+    return c.n;
 }
 
 // ---------------------------------------------------------------------------
@@ -339,6 +388,14 @@ static bool load_profile(const char *id, appliance_profile_t *prof)
         prof->version != APPLIANCE_PROFILE_VERSION)
         return false;
     return true;
+}
+
+bool appliance_profile_load(const char *graph_id, appliance_profile_t *out)
+{
+    char id[40];
+    if (!out || !sanitize_token(graph_id, id, sizeof(id)))
+        return false;
+    return load_profile(id, out);
 }
 
 // Build a cJSON object for one appliance (always returns an object; "trained"
@@ -383,8 +440,9 @@ char *appliance_profile_json(const char *graph_id)
     return json; // caller must free
 }
 
-static void append_one(const char *graph_id, void *ctx)
+static void append_one(const char *graph_id, const char *name, void *ctx)
 {
+    (void)name;
     cJSON *arr = (cJSON *)ctx;
     cJSON_AddItemToArray(arr, profile_to_cjson(graph_id));
 }

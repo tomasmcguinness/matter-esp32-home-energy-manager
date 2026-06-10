@@ -1,5 +1,7 @@
 #pragma once
 
+#include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 #ifdef __cplusplus
@@ -41,6 +43,23 @@ int appliance_profile_train(const char *graph_id, int window_days);
 // Enumerate every appliance node in the topology graph (any node wired to the
 // consumer unit that is not the grid, solar or battery) and train each.
 void appliance_profile_train_all(int window_days);
+
+// Buffer sizes for appliance_enumerate(): graph ids are filesystem-safe tokens
+// (<=32 chars); names come from the node's settings label and may carry emoji.
+#define APPLIANCE_ID_MAX_LEN   40
+#define APPLIANCE_NAME_MAX_LEN 64
+
+// List the appliance nodes in the topology graph (same set trained nightly).
+// Fills ids[i] with the stable graph id and names[i] with the user-facing name
+// (settings.name, falling back to settings.label, then the id). Returns the
+// number written (capped at max). Used by the scheduler.
+size_t appliance_enumerate(char ids[][APPLIANCE_ID_MAX_LEN],
+                           char names[][APPLIANCE_NAME_MAX_LEN],
+                           size_t max);
+
+// Load one appliance's persisted profile from /littlefs/profile-<graph_id> into
+// out, validating the magic/version. Returns false if absent or invalid.
+bool appliance_profile_load(const char *graph_id, appliance_profile_t *out);
 
 // Read back one appliance's persisted profile as JSON. Caller must free.
 // Shape: {"trained":bool,"graph_id":"..","standby_w":F,"avg_program_power_w":F,
