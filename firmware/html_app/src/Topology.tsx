@@ -2,6 +2,7 @@ import { ReactFlow, ReactFlowProvider, Background, BackgroundVariant, useNodesSt
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { PowerFlowEdge } from './PowerFlowEdge'
 import { GridModal } from './GridModal'
+import { AddLoadModal, type AddedLoad } from './AddLoadModal'
 import { useWebSocket, type WsMessage } from './useWebSocket'
 import { DnDProvider, useDnD } from './DnDContext';
 
@@ -167,6 +168,55 @@ function BatteryNode({ data }: { data: DeviceNodeData }) {
   )
 }
 
+// A Henley block: an unmetered junction that splits one incoming feed (power-in,
+// left) across several outputs (out_1..out_N, right). The output count is
+// configurable via the +/- buttons and spaced down the right edge like the
+// consumer unit's circuit handles.
+function HenleyNode({ id, data }: { id: string; data: { label: string; outputs?: number } }) {
+  const { updateNodeData } = useReactFlow()
+  const outputs = data.outputs ?? 2
+
+  const setOutputs = (n: number) => {
+    const next = Math.max(1, Math.min(8, n))
+    if (next === outputs) return
+    updateNodeData(id, { outputs: next })
+    // Settings endpoint takes the raw settings object; backend replaces it
+    // wholesale, so send every field.
+    fetch(`/api/nodes/${id}/settings`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ label: data.label, type: 'henley', outputs: next }),
+    }).catch(() => { })
+  }
+
+  const btn: React.CSSProperties = {
+    width: 18, height: 18, lineHeight: '14px', padding: 0,
+    border: '1px solid #e2e8f0', borderRadius: 4, background: '#fff', cursor: 'pointer',
+  }
+
+  return (
+    <>
+      <Handle type="target" position={Position.Left} id="power-in" />
+      <div style={{ padding: '5px 10px', background: '#fef3c7', border: '1px solid #fcd34d', borderRadius: 4, fontSize: 12, fontWeight: 600, color: '#1e293b', whiteSpace: 'nowrap', display: 'flex', alignItems: 'center', gap: 8 }}>
+        <span>⧉ {data.label}</span>
+        <span className="nodrag" style={{ display: 'flex', gap: 2 }}>
+          <button style={btn} onClick={() => setOutputs(outputs - 1)} disabled={outputs <= 1} title="Remove output">−</button>
+          <button style={btn} onClick={() => setOutputs(outputs + 1)} disabled={outputs >= 8} title="Add output">+</button>
+        </span>
+      </div>
+      {Array.from({ length: outputs }, (_, i) => (
+        <Handle
+          key={i}
+          type="source"
+          position={Position.Right}
+          id={`out_${i + 1}`}
+          style={{ top: `${((i + 1) * 100) / (outputs + 1)}%` }}
+        />
+      ))}
+    </>
+  )
+}
+
 // Appliance nodes are functionally identical to device nodes on the canvas (a metered
 // endpoint with a power-in handle); they only differ by their semantic role/type.
 const nodeTypes = {
@@ -176,6 +226,7 @@ const nodeTypes = {
   solarInverter: SolarInverterNode,
   pvString: PvStringNode,
   battery: BatteryNode,
+  henley: HenleyNode,
 }
 
 type SavedNodeConfig = { id: string; x: number; y: number; settings: Record<string, unknown>; values?: ValueEntry[] }
@@ -237,6 +288,11 @@ function Topology() {
   const [nodes, setNodes, onNodesChange] = useNodesState(initialNodes)
   const [edges, setEdges, onEdgesChangeBase] = useEdgesState(initialEdges)
   const [gridModalOpen, setGridModalOpen] = useState(false)
+  const [edgeMenu, setEdgeMenu] = useState<{ edge: Edge; x: number; y: number } | null>(null)
+  const [paneMenu, setPaneMenu] = useState<{ x: number; y: number } | null>(null)
+  // Flow-space position where an "Add load" node should be created (captured from
+  // the right-click), held while the picker modal is open.
+  const [pendingLoadPos, setPendingLoadPos] = useState<{ x: number; y: number } | null>(null)
   const [toasts, setToasts] = useState<Toast[]>([])
   const reactFlowInstance = useRef<ReactFlowInstance | null>(null)
   const nodeIdCounter = useRef(10)
@@ -424,6 +480,92 @@ function Topology() {
     }).catch(() => { })
   }, [setEdges]);
 
+  // Right-clicking an edge opens a small menu to insert an inline node, splitting
+  // the edge into two. Position is captured in screen coords for the menu and
+  // reused as the dropped node's flow position.
+  const onEdgeContextMenu = useCallback((event: React.MouseEvent, edge: Edge) => {
+    event.preventDefault()
+    setEdgeMenu({ edge, x: event.clientX, y: event.clientY })
+  }, [])
+
+  // Split A -> B into A -> Henley -> B: create the junction node, drop the
+  // original edge, and wire two new edges. Persists each step via the existing
+  // node/edge endpoints (graph is the source of truth).
+  const splitEdgeWithHenley = useCallback((edge: Edge, screenX: number, screenY: number) => {
+    const henleyId = `node_${++nodeIdCounter.current}`
+    const position = screenToFlowPosition({ x: screenX, y: screenY })
+    const label = 'Henley Block'
+
+    const newNode: Node = {
+      id: henleyId,
+      type: 'henley',
+      position,
+      draggable: true,
+      data: { label, outputs: 2 },
+    }
+    setNodes(prev => [...prev, newNode])
+    fetch(`/api/nodes/${henleyId}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ x: position.x, y: position.y, settings: { label, type: 'henley', outputs: 2 } }),
+    }).catch(() => { })
+
+    fetch(`/api/edges/${edge.id}`, { method: 'DELETE' }).catch(() => { })
+
+    const mkId = (s: string, sh: string | null | undefined, t: string, th: string | null | undefined) =>
+      [s, sh, t, th].filter(Boolean).join('-')
+
+    // A -> Henley keeps A's outgoing handle; Henley -> B keeps B's incoming handle.
+    const e1: Edge = { id: mkId(edge.source, edge.sourceHandle, henleyId, 'power-in'), source: edge.source, sourceHandle: edge.sourceHandle ?? null, target: henleyId, targetHandle: 'power-in', type: 'powerFlow', data: { kw: 0 } }
+    const e2: Edge = { id: mkId(henleyId, 'out_1', edge.target, edge.targetHandle), source: henleyId, sourceHandle: 'out_1', target: edge.target, targetHandle: edge.targetHandle ?? null, type: 'powerFlow', data: { kw: 0 } }
+
+    setEdges(eds => addEdge(e2, addEdge(e1, eds.filter(x => x.id !== edge.id))))
+
+    for (const e of [e1, e2]) {
+      fetch('/api/edges', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id: e.id, source: e.source, target: e.target, sourceHandle: e.sourceHandle ?? null, targetHandle: e.targetHandle ?? null }),
+      }).catch(() => { })
+    }
+
+    setEdgeMenu(null)
+  }, [screenToFlowPosition, setNodes, setEdges])
+
+  // Right-clicking empty canvas offers "Add load": pick a metered device and
+  // drop it where the user clicked. The edge to a Henley output is then drawn by
+  // hand (persisted by onConnect).
+  const onPaneContextMenu = useCallback((event: MouseEvent | React.MouseEvent) => {
+    event.preventDefault()
+    setPaneMenu({ x: event.clientX, y: event.clientY })
+  }, [])
+
+  const handleAddLoad = useCallback((device: AddedLoad) => {
+    const pos = pendingLoadPos
+    setPendingLoadPos(null)
+    if (!pos) return
+    const id = `node_${++nodeIdCounter.current}`
+    const position = screenToFlowPosition({ x: pos.x, y: pos.y })
+    const label = device.name || device.label
+
+    setNodes(prev => [...prev, {
+      id,
+      type: 'device',
+      position,
+      draggable: true,
+      data: { label, nodeId: device.nodeId, endpointId: device.endpointId },
+    }])
+    fetch(`/api/nodes/${id}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        x: position.x,
+        y: position.y,
+        settings: { label: device.label, name: device.name, type: 'device', nodeId: device.nodeId, endpointId: device.endpointId },
+      }),
+    }).catch(() => { })
+  }, [pendingLoadPos, screenToFlowPosition, setNodes])
+
   const onInit = useCallback((instance: ReactFlowInstance) => {
     reactFlowInstance.current = instance
     fetch('/api/nodes')
@@ -449,6 +591,7 @@ function Topology() {
               label: (n.settings?.name as string) || (n.settings?.label as string) || n.id,
               nodeId: n.settings?.nodeId as number | undefined,
               endpointId: n.settings?.endpointId as number | undefined,
+              ...(typeof n.settings?.outputs === 'number' ? { outputs: n.settings.outputs } : {}),
               ...(hasPower ? { power } : {}),
               ...(batteryPercent !== undefined ? { batteryPercent } : {}),
             },
@@ -499,6 +642,8 @@ function Topology() {
           edgeTypes={edgeTypes}
           onInit={onInit}
           onNodeDoubleClick={onNodeDoubleClick}
+          onEdgeContextMenu={onEdgeContextMenu}
+          onPaneContextMenu={onPaneContextMenu}
           onNodeDragStop={onNodeDragStop}
           onDrop={onDrop}
           nodesDraggable={true}
@@ -517,6 +662,40 @@ function Topology() {
           onSave={() => setGridModalOpen(false)}
           onCancel={() => setGridModalOpen(false)}
         />
+      )}
+
+      {edgeMenu && (
+        <>
+          {/* Backdrop closes the menu on any outside click. */}
+          <div onClick={() => setEdgeMenu(null)} style={{ position: 'fixed', inset: 0, zIndex: 99 }} />
+          <div style={{ position: 'fixed', top: edgeMenu.y, left: edgeMenu.x, zIndex: 100, background: '#fff', border: '1px solid #e2e8f0', borderRadius: 8, boxShadow: '0 4px 16px rgba(0,0,0,.14)', padding: 4, minWidth: 180 }}>
+            <button
+              onClick={() => splitEdgeWithHenley(edgeMenu.edge, edgeMenu.x, edgeMenu.y)}
+              style={{ display: 'block', width: '100%', textAlign: 'left', padding: '8px 12px', border: 'none', background: 'none', cursor: 'pointer', fontSize: 13, color: '#1e293b', borderRadius: 6 }}
+            >
+              ⧉ Insert Henley block
+            </button>
+          </div>
+        </>
+      )}
+
+      {paneMenu && (
+        <>
+          {/* Backdrop closes the menu on any outside click. */}
+          <div onClick={() => setPaneMenu(null)} style={{ position: 'fixed', inset: 0, zIndex: 99 }} />
+          <div style={{ position: 'fixed', top: paneMenu.y, left: paneMenu.x, zIndex: 100, background: '#fff', border: '1px solid #e2e8f0', borderRadius: 8, boxShadow: '0 4px 16px rgba(0,0,0,.14)', padding: 4, minWidth: 160 }}>
+            <button
+              onClick={() => { setPendingLoadPos(paneMenu); setPaneMenu(null) }}
+              style={{ display: 'block', width: '100%', textAlign: 'left', padding: '8px 12px', border: 'none', background: 'none', cursor: 'pointer', fontSize: 13, color: '#1e293b', borderRadius: 6 }}
+            >
+              + Add load
+            </button>
+          </div>
+        </>
+      )}
+
+      {pendingLoadPos && (
+        <AddLoadModal onAdd={handleAddLoad} onCancel={() => setPendingLoadPos(null)} />
       )}
 
       <ToastStack toasts={toasts} onDismiss={dismissToast} />
