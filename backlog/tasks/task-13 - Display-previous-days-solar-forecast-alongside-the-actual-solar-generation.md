@@ -4,9 +4,8 @@ title: Display previous day's solar forecast alongside the actual solar generati
 status: To Do
 assignee: []
 created_date: '2026-06-01 06:05'
-updated_date: '2026-06-06 07:25'
+updated_date: '2026-06-10 13:55'
 labels: []
-milestone: m-3
 dependencies:
   - TASK-14
 ordinal: 3000
