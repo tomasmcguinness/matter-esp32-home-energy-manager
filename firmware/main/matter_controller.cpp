@@ -61,9 +61,9 @@ static constexpr uint32_t kBasicInfoCluster = 0x0028;
 static constexpr uint32_t kBasicInfoVendorName = 0x0002;
 static constexpr uint32_t kBasicInfoProductName = 0x0004;
 
-void processElectricalPowerMeasurementUpdate(uint64_t node_id,
-                                           const chip::app::ConcreteDataAttributePath &path,
-                                           chip::TLV::TLVReader *data);
+static void cache_and_broadcast_attribute(uint64_t node_id,
+                                          const chip::app::ConcreteDataAttributePath &path,
+                                          chip::TLV::TLVReader *data);
 
 uint64_t matter_controller_allocate_node_id(void)
 {
@@ -503,34 +503,35 @@ static void on_attribute_data_cb(uint64_t node_id,
     if (!data || status.mStatus != Status::Success)
         return;
 
-    // Process ElectrialPowerMeasurement updates.
+    // Cache + broadcast the attributes the UI consumes: ElectricalPowerMeasurement
+    // (voltage/current/power) and the Power Source battery state of charge.
     //
-    if (path.mClusterId == ElectricalPowerMeasurement::Id) {
-        processElectricalPowerMeasurementUpdate(node_id, path, data);
+    if (path.mClusterId == ElectricalPowerMeasurement::Id ||
+        path.mClusterId == PowerSource::Id) {
+        cache_and_broadcast_attribute(node_id, path, data);
     }
-     
+
     return;
 }
 
-void processElectricalPowerMeasurementUpdate(uint64_t node_id,
-                                             const chip::app::ConcreteDataAttributePath &path,
-                                             chip::TLV::TLVReader *data)
+// Persist the latest value of a subscribed attribute into the ValueCache and push
+// it to websocket clients in the firmware's `attribute_update` shape. Deliberately
+// cluster/attribute-generic: the cache and the UI key purely off cluster+attribute
+// ids, so adding a new attribute path to the subscription is enough to surface it.
+// node_power_logger polls the cache on a timer for per-minute averages, so logging
+// does not hang off the report cadence here.
+static void cache_and_broadcast_attribute(uint64_t node_id,
+                                          const chip::app::ConcreteDataAttributePath &path,
+                                          chip::TLV::TLVReader *data)
 {
     ESP_LOGI(TAG, "Received attribute update for node 0x%016llX, endpoint 0x%04X, cluster 0x%04X, attribute 0x%04X", node_id, path.mEndpointId, path.mClusterId, path.mAttributeId);
 
-    // Ignore anything that isn't from the ElectrialPowerMeasurement cluster for the time being.
-    //
-    if (path.mClusterId != ElectricalPowerMeasurement::Id) {
-        return;
-    }
-
+    // Nullable attributes (e.g. BatPercentRemaining when SoC is unknown) report
+    // as NULL; nothing to cache, so skip.
     if (data->GetType() == chip::TLV::kTLVType_Null) {
         return;
     }
 
-    // We need to decided how to "AI" this data at this point.
-    // At this point, all we know is that an Electrial Power Measurement cluster has sent some data.
-    //
     int64_t raw_value = 0;
 
     // If we don't get a value, ignore the update.
@@ -539,10 +540,6 @@ void processElectricalPowerMeasurementUpdate(uint64_t node_id,
         return;
     }
 
-    // Cache the latest value. node_power_logger polls the cache on a timer and
-    // persists per-minute averages for every stream (grid included), so logging
-    // no longer hangs off the report cadence here.
-    //
     ValueCache::instance().put(node_id, path.mEndpointId, path.mClusterId, path.mAttributeId, raw_value);
 
     ESP_LOGI(TAG, "Sending 'attribute_update' for node 0x%016llX, endpoint: 0x%02X, cluster 0x%04X, attribute 0x%04X", node_id, path.mEndpointId, path.mClusterId, path.mAttributeId);
@@ -602,15 +599,18 @@ static void establish_subscription(uint64_t node_id)
         auto *args = reinterpret_cast<uint64_t *>(arg);
 
         ScopedMemoryBufferWithSize<AttributePathParams> attr_paths;
-        attr_paths.Alloc(3);
+        attr_paths.Alloc(4);
 
         // Endpoint left as wildcard (kInvalidEndpointId): subscribe to
         // these attributes on every endpoint of the node that exposes
-        // the ElectricalPowerMeasurement cluster.
+        // the relevant cluster.
         //
         attr_paths[0] = AttributePathParams(ElectricalPowerMeasurement::Id, ElectricalPowerMeasurement::Attributes::Voltage::Id);
         attr_paths[1] = AttributePathParams(ElectricalPowerMeasurement::Id, ElectricalPowerMeasurement::Attributes::ActiveCurrent::Id);
         attr_paths[2] = AttributePathParams(ElectricalPowerMeasurement::Id, ElectricalPowerMeasurement::Attributes::ActivePower::Id);
+        // Battery state of charge. Only battery power sources expose this optional
+        // attribute, so wildcarding the endpoint is harmless on other endpoints.
+        attr_paths[3] = AttributePathParams(PowerSource::Id, PowerSource::Attributes::BatPercentRemaining::Id);
 
         ScopedMemoryBufferWithSize<EventPathParams> event_paths;
         event_paths.Alloc(0);

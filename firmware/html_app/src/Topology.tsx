@@ -36,13 +36,18 @@ function ConsumerUnitNode({ data }: { data: { label: string } }) {
 }
 
 type PowerMeasurement = { voltage?: number, current?: number, power?: number }
-type DeviceNodeData = { label: string; nodeId?: number; endpointId?: number; power?: PowerMeasurement }
+type DeviceNodeData = { label: string; nodeId?: number; endpointId?: number; power?: PowerMeasurement; batteryPercent?: number }
 
 // ElectricalPowerMeasurement cluster (0x0090) and its attribute ids.
 const EPM_CLUSTER = 144
 const EPM_VOLTAGE = 0x04
 const EPM_CURRENT = 0x05
 const EPM_POWER = 0x08
+
+// Power Source cluster (0x002F). BatPercentRemaining is a nullable uint8 in
+// half-percent units (0..200), so state of charge = value / 2.
+const POWER_SOURCE_CLUSTER = 0x2f
+const BAT_PERCENT_REMAINING = 0x0c
 
 // A cached attribute value as delivered by /api/nodes and by websocket updates.
 type ValueEntry = { clusterId: number; attributeId: number; value: number }
@@ -57,6 +62,16 @@ function powerFromAttribute(clusterId: number, attributeId: number, value: numbe
     else if (attributeId === EPM_POWER) pm.power = value
   }
   return pm
+}
+
+// Map a Power Source BatPercentRemaining report to a 0..100 state of charge, or
+// undefined for any other attribute. Half-percent units are halved and clamped.
+function batteryPercentFromAttribute(clusterId: number, attributeId: number, value: number): number | undefined {
+  if (clusterId === POWER_SOURCE_CLUSTER && attributeId === BAT_PERCENT_REMAINING) {
+    console.log('PowerSource update received!')
+    return Math.max(0, Math.min(100, value / 2))
+  }
+  return undefined
 }
 
 function DeviceNode({ data }: { data: DeviceNodeData }) {
@@ -127,12 +142,24 @@ function BatteryNode({ data }: { data: DeviceNodeData }) {
     color = discharging ? '#a32d2d' : '#3b6d11'
     bg = discharging ? '#fcebeb' : '#eaf3de'
   }
+  // State of charge gauge. Fill colour tracks how full the battery is, reusing
+  // the green/amber/red palette already used for charge/discharge above.
+  const pct = data.batteryPercent
+  const socColor = pct === undefined ? '#94a3b8' : pct >= 50 ? '#3b6d11' : pct >= 20 ? '#b45309' : '#a32d2d'
   return (
     <>
       <Handle type="target" position={Position.Top} id="power-in" />
       <div style={{ padding: '4px 10px', background: '#e0e7ff', borderBottom: '1px solid #c7d2fe', fontSize: 12, fontWeight: 600, color: '#1e293b', whiteSpace: 'nowrap' }}>
         🔋 {data.label}
       </div>
+      {pct !== undefined && (
+        <div style={{ padding: '6px 10px 0', textAlign: 'center' }}>
+          <div style={{ fontSize: 20, fontWeight: 700, color: socColor, lineHeight: 1 }}>{Math.round(pct)}%</div>
+          <div style={{ marginTop: 5, height: 8, borderRadius: 4, background: '#e2e8f0', overflow: 'hidden' }}>
+            <div style={{ width: `${pct}%`, height: '100%', background: socColor, borderRadius: 4, transition: 'width .4s ease' }} />
+          </div>
+        </div>
+      )}
       <div style={{ minWidth: '120px', padding: '6px 10px', fontSize: 12, fontWeight: 600, color, background: bg, borderRadius: 4, margin: 6, textAlign: 'center' }}>
         {label}
       </div>
@@ -153,6 +180,16 @@ const nodeTypes = {
 
 type SavedNodeConfig = { id: string; x: number; y: number; settings: Record<string, unknown>; values?: ValueEntry[] }
 type SavedEdgeConfig = { id: string; source: string; target: string; sourceHandle?: string; targetHandle?: string }
+
+// Which node's measurement drives an edge's power label. A source node's reading
+// is the flow on the edge only when it leaves via the source's `power-out` handle.
+// Anything leaving a different handle (e.g. the inverter's `battery` tap) is
+// metered by the node at the other end, so we use the target there instead. This
+// stops a node that fans out across several handles (inverter → CU and
+// inverter → battery) from stamping its single reading onto every outgoing edge.
+function edgePowerNodeId(e: { source: string; sourceHandle?: string | null; target: string }): string {
+  return e.sourceHandle === 'power-out' ? e.source : e.target
+}
 
 type DeviceSpec = {
   nodeId: number,
@@ -218,7 +255,7 @@ function Topology() {
   }, [dismissToast])
 
   const handleWsMessage = useCallback((msg: WsMessage) => {
-    //console.log('[ws]', msg)
+    console.log('[ws]', msg)
 
     if (msg.type === 'device_commissioned') {
       console.log('Handling device_commissioned message')
@@ -230,9 +267,8 @@ function Topology() {
 
       const d = msg.data as { nodeId: number; endpointId: number; clusterId: number; attributeId: number; value: number }
 
-      console.log('[WS]', { d });
-
       const powerMeasurement = powerFromAttribute(d.clusterId, d.attributeId, d.value)
+      const batteryPercent = batteryPercentFromAttribute(d.clusterId, d.attributeId, d.value)
 
       if (d.clusterId === EPM_CLUSTER) // Electrical Power Measurement
       {
@@ -245,13 +281,21 @@ function Topology() {
         const measuredNode = getNodes().find(n => n.data.nodeId === d.nodeId && n.data.endpointId === d.endpointId)
 
         if (measuredNode && powerMeasurement.power !== undefined) {
-          // The metered node may be the source (meter → CU) or target (CU → appliance).
+          // Only update edges this node actually meters (see edgePowerNodeId).
           setEdges(eds => eds.map(e =>
-            e.source === measuredNode.id || e.target === measuredNode.id
+            edgePowerNodeId(e) === measuredNode.id
               ? { ...e, data: { ...(e.data ?? {}), kw: powerMeasurement.power! / 1000000 } }
               : e
           ))
         }
+      }
+      else if (batteryPercent !== undefined) // Power Source state of charge
+      {
+        setNodes(nds => nds.map(n =>
+          n.data.nodeId === d.nodeId && n.data.endpointId === d.endpointId
+            ? { ...n, data: { ...n.data, batteryPercent } }
+            : n
+        ))
       }
     }
   }, [addToast])
@@ -374,6 +418,8 @@ function Topology() {
             (acc, v) => ({ ...acc, ...powerFromAttribute(v.clusterId, v.attributeId, v.value) }), {})
           const hasPower = Object.keys(power).length > 0
           if (hasPower) powerByNode.set(n.id, power)
+          const batteryPercent = (n.values ?? []).reduce<number | undefined>(
+            (acc, v) => batteryPercentFromAttribute(v.clusterId, v.attributeId, v.value) ?? acc, undefined)
           return {
             id: n.id,
             type: typeof n.settings?.type === 'string' ? n.settings.type as string : undefined,
@@ -385,6 +431,7 @@ function Topology() {
               nodeId: n.settings?.nodeId as number | undefined,
               endpointId: n.settings?.endpointId as number | undefined,
               ...(hasPower ? { power } : {}),
+              ...(batteryPercent !== undefined ? { batteryPercent } : {}),
             },
           }
         })
@@ -400,7 +447,7 @@ function Topology() {
           setEdges(data.edges.map(e => {
             // The metered node may be at either end: a meter feeds into the CU
             // (it is the source), an appliance hangs off the CU (it is the target).
-            const power = powerByNode.get(e.source) ?? powerByNode.get(e.target)
+            const power = powerByNode.get(edgePowerNodeId(e))
             return {
               id: e.id,
               source: e.source,

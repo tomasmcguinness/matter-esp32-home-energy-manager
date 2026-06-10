@@ -161,6 +161,8 @@ export const handlers = [
           { clusterId: 144, attributeId: 0x04, value: 230000 },     // 230.0 V
           { clusterId: 144, attributeId: 0x05, value: 4350 },       // 4.35 A
           { clusterId: 144, attributeId: 0x08, value: activePower },
+          // Battery state of charge: Power Source BatPercentRemaining, half-percent units.
+          ...(type === 'battery' ? [{ clusterId: 0x2f, attributeId: 0x0c, value: 156 }] : []), // 78%
         ],
       }
     })
@@ -448,15 +450,17 @@ export const handlers = [
     // in the firmware's `attribute_update` shape so node power + edge flow animate.
     // The battery value sweeps through zero so charge/discharge direction flips.
     let tick = 0
-    const send = (endpointId: number, value: number) =>
+    const send = (endpointId: number, value: number, clusterId = 144, attributeId = 0x08) =>
       client.send(JSON.stringify({
         type: 'attribute_update',
-        data: { nodeId: 10000, endpointId, clusterId: 144, attributeId: 0x08, value },
+        data: { nodeId: 10000, endpointId, clusterId, attributeId, value },
       }))
     const interval = setInterval(() => {
       tick++
       send(13482, Math.round(1500000 + Math.random() * 600000))   // PV String 1 DC, W·1000
       send(13484, Math.round(2600000 * Math.sin(tick / 3)))       // Battery: ± charge/discharge
+      // Battery state of charge, half-percent units (0..200), drifting around 75%.
+      send(13484, Math.round(150 + 30 * Math.sin(tick / 5)), 0x2f, 0x0c)
     }, 5000)
 
     // Simulate a device being commissioned 8 seconds after connection
