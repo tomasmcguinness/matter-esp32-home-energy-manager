@@ -6,6 +6,7 @@
 #include <freertos/task.h>
 
 #include <esp_log.h>
+#include <esp_timer.h>
 #include <esp_matter.h>
 #include <esp_matter_controller_client.h>
 #include <esp_matter_controller_console.h>
@@ -54,6 +55,13 @@ static constexpr uint64_t kFirstDeviceNodeId = 1;
 static constexpr uint16_t kSubMinIntervalSec = 1;
 static constexpr uint16_t kSubMaxIntervalSec = 30;
 
+// Live attribute updates are coalesced and broadcast to WebSocket clients on
+// this timer rather than per Matter report, bounding both frame count and
+// client renders regardless of how chatty the meters are. Logging is unaffected
+// (node_power_logger polls ValueCache directly).
+static constexpr uint64_t kWsBroadcastPeriodUs = 1000000; // 1s
+static esp_timer_handle_t s_ws_broadcast_timer = nullptr;
+
 static constexpr uint32_t kDescriptorCluster = 0x001D;
 static constexpr uint32_t kDescriptorDeviceTypeList = 0x0000;
 static constexpr uint32_t kDescriptorPartsList = 0x0003;
@@ -61,9 +69,11 @@ static constexpr uint32_t kBasicInfoCluster = 0x0028;
 static constexpr uint32_t kBasicInfoVendorName = 0x0002;
 static constexpr uint32_t kBasicInfoProductName = 0x0004;
 
-static void cache_and_broadcast_attribute(uint64_t node_id,
-                                          const chip::app::ConcreteDataAttributePath &path,
-                                          chip::TLV::TLVReader *data);
+static void cache_attribute(uint64_t node_id,
+                            const chip::app::ConcreteDataAttributePath &path,
+                            chip::TLV::TLVReader *data);
+
+static void on_ws_broadcast_timer(void *arg);
 
 uint64_t matter_controller_allocate_node_id(void)
 {
@@ -449,6 +459,24 @@ esp_err_t matter_controller_start(void)
 
     chip::DeviceLayer::PlatformMgr().UnlockChipStack();
 
+    if (!s_ws_broadcast_timer) {
+        esp_timer_create_args_t ws_args = {
+            .callback = on_ws_broadcast_timer,
+            .arg      = nullptr,
+            .name     = "ws_attr_batch",
+        };
+        err = esp_timer_create(&ws_args, &s_ws_broadcast_timer);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "ws broadcast timer create failed: 0x%x", err);
+            return err;
+        }
+        err = esp_timer_start_periodic(s_ws_broadcast_timer, kWsBroadcastPeriodUs);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "ws broadcast timer start failed: 0x%x", err);
+            return err;
+        }
+    }
+
     ESP_LOGI(TAG, "Matter controller started");
     return ESP_OK;
 }
@@ -506,23 +534,23 @@ static void on_attribute_data_cb(uint64_t node_id,
     // Cache + broadcast the attributes the UI consumes: ElectricalPowerMeasurement
     // (voltage/current/power) and the Power Source battery state of charge.
     //
-    if (path.mClusterId == ElectricalPowerMeasurement::Id ||
-        path.mClusterId == PowerSource::Id) {
-        cache_and_broadcast_attribute(node_id, path, data);
+    if (path.mClusterId == ElectricalPowerMeasurement::Id || path.mClusterId == PowerSource::Id) {
+        cache_attribute(node_id, path, data);
     }
 
     return;
 }
 
-// Persist the latest value of a subscribed attribute into the ValueCache and push
-// it to websocket clients in the firmware's `attribute_update` shape. Deliberately
-// cluster/attribute-generic: the cache and the UI key purely off cluster+attribute
-// ids, so adding a new attribute path to the subscription is enough to surface it.
-// node_power_logger polls the cache on a timer for per-minute averages, so logging
-// does not hang off the report cadence here.
-static void cache_and_broadcast_attribute(uint64_t node_id,
-                                          const chip::app::ConcreteDataAttributePath &path,
-                                          chip::TLV::TLVReader *data)
+// Persist the latest value of a subscribed attribute into the ValueCache.
+// Deliberately cluster/attribute-generic: the cache and the UI key purely off
+// cluster+attribute ids, so adding a new attribute path to the subscription is
+// enough to surface it. WebSocket clients are updated by on_ws_broadcast_timer,
+// which coalesces the whole cache into one `attribute_batch` frame; node_power_logger
+// polls the cache on its own timer for per-minute averages. Neither hangs off the
+// report cadence here.
+static void cache_attribute(uint64_t node_id,
+                            const chip::app::ConcreteDataAttributePath &path,
+                            chip::TLV::TLVReader *data)
 {
     ESP_LOGI(TAG, "Received attribute update for node 0x%016llX, endpoint 0x%04X, cluster 0x%04X, attribute 0x%04X", node_id, path.mEndpointId, path.mClusterId, path.mAttributeId);
 
@@ -532,23 +560,73 @@ static void cache_and_broadcast_attribute(uint64_t node_id,
         return;
     }
 
-    int64_t raw_value = 0;
-
-    // If we don't get a value, ignore the update.
+    // TLVReader::Get(int64_t&) only accepts signed-integer element types; an
+    // unsigned-encoded attribute (e.g. BatPercentRemaining, a uint8) would
+    // return CHIP_ERROR_WRONG_TLV_TYPE and be silently dropped. Branch on the
+    // TLV type and read unsigned values via the uint64_t overload. All attributes
+    // we cache fit comfortably in int64_t, so the cast is safe.
     //
-    if (data->Get(raw_value) != CHIP_NO_ERROR) {
+    int64_t raw_value = 0;
+    switch (data->GetType()) {
+    case chip::TLV::kTLVType_SignedInteger:
+        if (data->Get(raw_value) != CHIP_NO_ERROR) {
+            return;
+        }
+        break;
+    case chip::TLV::kTLVType_UnsignedInteger: {
+        uint64_t u = 0;
+        if (data->Get(u) != CHIP_NO_ERROR) {
+            return;
+        }
+        raw_value = static_cast<int64_t>(u);
+        break;
+    }
+    default:
+        // Not an integer we cache; ignore the update.
         return;
     }
 
+    ESP_LOGI(TAG, "Caching value %lld for node 0x%016llX, endpoint 0x%04X, cluster 0x%04X, attribute 0x%04X", raw_value, node_id, path.mEndpointId, path.mClusterId, path.mAttributeId);
+    
     ValueCache::instance().put(node_id, path.mEndpointId, path.mClusterId, path.mAttributeId, raw_value);
+}
 
-    ESP_LOGI(TAG, "Sending 'attribute_update' for node 0x%016llX, endpoint: 0x%02X, cluster 0x%04X, attribute 0x%04X", node_id, path.mEndpointId, path.mClusterId, path.mAttributeId);
+// Coalesce the whole ValueCache into a single `attribute_batch` WebSocket frame.
+// Runs on s_ws_broadcast_timer so the UI sees a bounded update rate (one frame per
+// period) instead of one frame per Matter report. Skips the broadcast when there is
+// nothing valid to send.
+static void on_ws_broadcast_timer(void *arg)
+{
+    std::vector<ValueCacheEntry> entries = ValueCache::instance().snapshot();
 
-    char json[128];
+    cJSON *root = cJSON_CreateObject();
+    if (!root) return;
+    cJSON_AddStringToObject(root, "type", "attribute_batch");
+    cJSON *data = cJSON_AddArrayToObject(root, "data");
 
-    snprintf(json, sizeof(json), "{\"type\":\"attribute_update\",\"data\":{\"nodeId\":%llu,\"endpointId\":%u, \"clusterId\":%u, \"attributeId\":%u, \"value\":%lld}}", (unsigned long long)node_id, (unsigned)path.mEndpointId, path.mClusterId, path.mAttributeId, raw_value);
+    size_t valid = 0;
+    for (const ValueCacheEntry &e : entries) {
+        if (!e.valid) continue;
+        cJSON *item = cJSON_CreateObject();
+        if (!item) continue;
+        cJSON_AddNumberToObject(item, "nodeId", (double)e.node_id);
+        cJSON_AddNumberToObject(item, "endpointId", e.endpoint_id);
+        cJSON_AddNumberToObject(item, "clusterId", e.cluster_id);
+        cJSON_AddNumberToObject(item, "attributeId", e.attribute_id);
+        cJSON_AddNumberToObject(item, "value", (double)e.value);
+        cJSON_AddItemToArray(data, item);
+        valid++;
+    }
 
-    ws_server_broadcast(json, strlen(json));
+    if (valid > 0) {
+        char *json = cJSON_PrintUnformatted(root);
+        if (json) {
+            ws_server_broadcast(json, strlen(json));
+            cJSON_free(json);
+        }
+    }
+
+    cJSON_Delete(root);
 }
 
 void matter_controller_seed_value_cache(void)

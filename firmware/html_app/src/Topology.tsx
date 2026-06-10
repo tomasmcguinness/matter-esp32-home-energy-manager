@@ -262,43 +262,62 @@ function Topology() {
       const d = msg.data as { productName?: string; vendorName?: string }
       const name = [d.vendorName, d.productName].filter(Boolean).join(' ')
       addToast(`New device commissioned: ${name || 'Unknown device'}`)
-    } else {
-      //console.log('[ws]', 'Handling attribute update message')
+      return
+    }
 
-      const d = msg.data as { nodeId: number; endpointId: number; clusterId: number; attributeId: number; value: number }
+    // The firmware coalesces attribute reports into one `attribute_batch` frame;
+    // a single `attribute_update` is normalised to a one-element batch so both
+    // shapes share a path. Accumulate per measured endpoint first, then apply the
+    // whole batch in a single setNodes / setEdges pass — one render per frame
+    // instead of one render per attribute.
+    type AttrEntry = { nodeId: number; endpointId: number; clusterId: number; attributeId: number; value: number }
+    const entries: AttrEntry[] = msg.type === 'attribute_batch'
+      ? (msg.data as AttrEntry[])
+      : [msg.data as AttrEntry]
 
-      const powerMeasurement = powerFromAttribute(d.clusterId, d.attributeId, d.value)
-      const batteryPercent = batteryPercentFromAttribute(d.clusterId, d.attributeId, d.value)
+    const powerByKey = new Map<string, PowerMeasurement>()
+    const batteryByKey = new Map<string, number>()
+    for (const d of entries) {
+      const key = `${d.nodeId}:${d.endpointId}`
+      const pm = powerFromAttribute(d.clusterId, d.attributeId, d.value)
+      if (Object.keys(pm).length > 0) powerByKey.set(key, { ...(powerByKey.get(key) ?? {}), ...pm })
+      const bp = batteryPercentFromAttribute(d.clusterId, d.attributeId, d.value)
+      if (bp !== undefined) batteryByKey.set(key, bp)
+    }
 
-      if (d.clusterId === EPM_CLUSTER) // Electrical Power Measurement
-      {
-        setNodes(nds => nds.map(n =>
-          n.data.nodeId === d.nodeId && n.data.endpointId === d.endpointId
-            ? { ...n, data: { ...n.data, power: { ...(n.data.power ?? {}), ...powerMeasurement } } }
-            : n
-        ))
+    if (powerByKey.size === 0 && batteryByKey.size === 0) return
 
-        const measuredNode = getNodes().find(n => n.data.nodeId === d.nodeId && n.data.endpointId === d.endpointId)
-
-        if (measuredNode && powerMeasurement.power !== undefined) {
-          // Only update edges this node actually meters (see edgePowerNodeId).
-          setEdges(eds => eds.map(e =>
-            edgePowerNodeId(e) === measuredNode.id
-              ? { ...e, data: { ...(e.data ?? {}), kw: powerMeasurement.power! / 1000000 } }
-              : e
-          ))
-        }
+    setNodes(nds => nds.map(n => {
+      const key = `${n.data.nodeId}:${n.data.endpointId}`
+      const power = powerByKey.get(key)
+      const battery = batteryByKey.get(key)
+      if (!power && battery === undefined) return n
+      return {
+        ...n,
+        data: {
+          ...n.data,
+          ...(power ? { power: { ...(n.data.power ?? {}), ...power } } : {}),
+          ...(battery !== undefined ? { batteryPercent: battery } : {}),
+        },
       }
-      else if (batteryPercent !== undefined) // Power Source state of charge
-      {
-        setNodes(nds => nds.map(n =>
-          n.data.nodeId === d.nodeId && n.data.endpointId === d.endpointId
-            ? { ...n, data: { ...n.data, batteryPercent } }
-            : n
-        ))
+    }))
+
+    if (powerByKey.size > 0) {
+      // Map metered React Flow node ids to the power this batch carried, then
+      // update only the edges those nodes meter (see edgePowerNodeId).
+      const powerByRfId = new Map<string, PowerMeasurement>()
+      for (const n of getNodes()) {
+        const power = powerByKey.get(`${n.data.nodeId}:${n.data.endpointId}`)
+        if (power && power.power !== undefined) powerByRfId.set(n.id, power)
+      }
+      if (powerByRfId.size > 0) {
+        setEdges(eds => eds.map(e => {
+          const power = powerByRfId.get(edgePowerNodeId(e))
+          return power ? { ...e, data: { ...(e.data ?? {}), kw: power.power! / 1000000 } } : e
+        }))
       }
     }
-  }, [addToast])
+  }, [addToast, setNodes, setEdges, getNodes])
 
   const wsState = useWebSocket(handleWsMessage)
 
