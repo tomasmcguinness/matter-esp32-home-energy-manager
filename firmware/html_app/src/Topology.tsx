@@ -512,11 +512,14 @@ function Topology() {
     setPaneMenu(null)
   }, [screenToFlowPosition, setNodes])
 
-  // Right-clicking a sub consumer unit offers a delete action. Other node types
-  // have no node-level menu (they're removed via select + Delete). 'henley' is
-  // accepted for legacy graphs that predate the sub-CU.
+  // Right-clicking a sub consumer unit or a load offers a delete action. Loads are
+  // device/appliance nodes; the protected main CU / meter (deletable === false) get
+  // no menu. Other node types have none either. 'henley' is accepted for legacy
+  // graphs that predate the sub-CU.
   const onNodeContextMenu = useCallback((event: React.MouseEvent, node: Node) => {
-    if (node.type !== 'subConsumerUnit' && node.type !== 'henley') return
+    const MENU_TYPES = ['subConsumerUnit', 'henley', 'device', 'appliance']
+    if (!MENU_TYPES.includes(node.type ?? '')) return
+    if (node.deletable === false) return
     event.preventDefault()
     setNodeMenu({ node, x: event.clientX, y: event.clientY })
   }, [])
@@ -541,6 +544,20 @@ function Topology() {
 
       return currentEdges.filter(e => !removedNodeIds.has(e.source) && !removedNodeIds.has(e.target))
     })
+    setNodeMenu(null)
+  }, [setEdges, setNodes])
+
+  // Delete a single load: remove the node and the edges connected to it. A load
+  // hangs off one CU/sub-CU circuit handle and has no downstream children, so
+  // there is nothing to cascade — same node+edge removal as the Delete-key path.
+  const deleteLoad = useCallback((loadId: string) => {
+    setEdges(currentEdges => {
+      const removedEdges = currentEdges.filter(e => e.source === loadId || e.target === loadId)
+      removedEdges.forEach(e => fetch(`/api/edges/${e.id}`, { method: 'DELETE' }).catch(() => { }))
+      return currentEdges.filter(e => e.source !== loadId && e.target !== loadId)
+    })
+    setNodes(nds => nds.filter(n => n.id !== loadId))
+    fetch(`/api/nodes/${loadId}`, { method: 'DELETE' }).catch(() => { })
     setNodeMenu(null)
   }, [setEdges, setNodes])
 
@@ -674,12 +691,21 @@ function Topology() {
           {/* Backdrop closes the menu on any outside click. */}
           <div onClick={() => setNodeMenu(null)} style={{ position: 'fixed', inset: 0, zIndex: 99 }} />
           <div style={{ position: 'fixed', top: nodeMenu.y, left: nodeMenu.x, zIndex: 100, background: '#fff', border: '1px solid #e2e8f0', borderRadius: 8, boxShadow: '0 4px 16px rgba(0,0,0,.14)', padding: 4, minWidth: 180 }}>
-            <button
-              onClick={() => deleteSubConsumerUnit(nodeMenu.node.id)}
-              style={{ display: 'block', width: '100%', textAlign: 'left', padding: '8px 12px', border: 'none', background: 'none', cursor: 'pointer', fontSize: 13, color: '#b91c1c', borderRadius: 6 }}
-            >
-              🗑 Delete sub consumer unit
-            </button>
+            {nodeMenu.node.type === 'subConsumerUnit' || nodeMenu.node.type === 'henley' ? (
+              <button
+                onClick={() => deleteSubConsumerUnit(nodeMenu.node.id)}
+                style={{ display: 'block', width: '100%', textAlign: 'left', padding: '8px 12px', border: 'none', background: 'none', cursor: 'pointer', fontSize: 13, color: '#b91c1c', borderRadius: 6 }}
+              >
+                🗑 Delete sub consumer unit
+              </button>
+            ) : (
+              <button
+                onClick={() => deleteLoad(nodeMenu.node.id)}
+                style={{ display: 'block', width: '100%', textAlign: 'left', padding: '8px 12px', border: 'none', background: 'none', cursor: 'pointer', fontSize: 13, color: '#b91c1c', borderRadius: 6 }}
+              >
+                🗑 Delete load
+              </button>
+            )}
           </div>
         </>
       )}
