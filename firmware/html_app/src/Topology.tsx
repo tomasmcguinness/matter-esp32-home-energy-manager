@@ -289,6 +289,7 @@ function Topology() {
   const [edges, setEdges, onEdgesChangeBase] = useEdgesState(initialEdges)
   const [gridModalOpen, setGridModalOpen] = useState(false)
   const [edgeMenu, setEdgeMenu] = useState<{ edge: Edge; x: number; y: number } | null>(null)
+  const [nodeMenu, setNodeMenu] = useState<{ node: Node; x: number; y: number } | null>(null)
   const [paneMenu, setPaneMenu] = useState<{ x: number; y: number } | null>(null)
   // Flow-space position where an "Add load" node should be created (captured from
   // the right-click), held while the picker modal is open.
@@ -540,6 +541,65 @@ function Topology() {
     setPaneMenu({ x: event.clientX, y: event.clientY })
   }, [])
 
+  // Right-clicking a Henley block offers a delete action. Other node types have
+  // no node-level menu (they're removed via select + Delete).
+  const onNodeContextMenu = useCallback((event: React.MouseEvent, node: Node) => {
+    if (node.type !== 'henley') return
+    event.preventDefault()
+    setNodeMenu({ node, x: event.clientX, y: event.clientY })
+  }, [])
+
+  // Delete a Henley block: drop the junction and every load hanging off its
+  // outputs, but keep the consumer unit and re-establish the feed -> CU link that
+  // the Henley was inserted into (grid -> CU). The Henley has one upstream feed
+  // (power-in) and fans out across out_N to the CU plus zero or more loads.
+  const deleteHenleyBlock = useCallback((henleyId: string) => {
+    const CU = 'consumer_unit'
+    setEdges(currentEdges => {
+      const feedEdge = currentEdges.find(e => e.target === henleyId)
+      const outEdges = currentEdges.filter(e => e.source === henleyId)
+      const cuEdge = outEdges.find(e => e.target === CU)
+
+      // Loads are the output targets that aren't the consumer unit; remove them
+      // along with the Henley itself. The CU is preserved.
+      const removedNodeIds = new Set<string>([henleyId])
+      for (const e of outEdges) if (e.target !== CU) removedNodeIds.add(e.target)
+
+      const removedEdges = currentEdges.filter(e => removedNodeIds.has(e.source) || removedNodeIds.has(e.target))
+      removedEdges.forEach(e => fetch(`/api/edges/${e.id}`, { method: 'DELETE' }).catch(() => { }))
+
+      let remaining = currentEdges.filter(e => !removedNodeIds.has(e.source) && !removedNodeIds.has(e.target))
+
+      // Restore the feed -> consumer unit link the Henley was splitting, reusing
+      // the original upstream and CU handles so the grid meter stays wired in.
+      if (feedEdge && cuEdge) {
+        const restored: Edge = {
+          id: [feedEdge.source, feedEdge.sourceHandle, CU, cuEdge.targetHandle].filter(Boolean).join('-'),
+          source: feedEdge.source,
+          sourceHandle: feedEdge.sourceHandle ?? null,
+          target: CU,
+          targetHandle: cuEdge.targetHandle ?? null,
+          type: 'powerFlow',
+          data: { kw: 0 },
+        }
+        if (!remaining.some(e => e.id === restored.id)) {
+          remaining = [...remaining, restored]
+          fetch('/api/edges', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ id: restored.id, source: restored.source, target: restored.target, sourceHandle: restored.sourceHandle ?? null, targetHandle: restored.targetHandle ?? null }),
+          }).catch(() => { })
+        }
+      }
+
+      setNodes(nds => nds.filter(n => !removedNodeIds.has(n.id)))
+      removedNodeIds.forEach(id => fetch(`/api/nodes/${id}`, { method: 'DELETE' }).catch(() => { }))
+
+      return remaining
+    })
+    setNodeMenu(null)
+  }, [setEdges, setNodes])
+
   const handleAddLoad = useCallback((device: AddedLoad) => {
     const pos = pendingLoadPos
     setPendingLoadPos(null)
@@ -643,6 +703,7 @@ function Topology() {
           onInit={onInit}
           onNodeDoubleClick={onNodeDoubleClick}
           onEdgeContextMenu={onEdgeContextMenu}
+          onNodeContextMenu={onNodeContextMenu}
           onPaneContextMenu={onPaneContextMenu}
           onNodeDragStop={onNodeDragStop}
           onDrop={onDrop}
@@ -674,6 +735,21 @@ function Topology() {
               style={{ display: 'block', width: '100%', textAlign: 'left', padding: '8px 12px', border: 'none', background: 'none', cursor: 'pointer', fontSize: 13, color: '#1e293b', borderRadius: 6 }}
             >
               ⧉ Insert Henley block
+            </button>
+          </div>
+        </>
+      )}
+
+      {nodeMenu && (
+        <>
+          {/* Backdrop closes the menu on any outside click. */}
+          <div onClick={() => setNodeMenu(null)} style={{ position: 'fixed', inset: 0, zIndex: 99 }} />
+          <div style={{ position: 'fixed', top: nodeMenu.y, left: nodeMenu.x, zIndex: 100, background: '#fff', border: '1px solid #e2e8f0', borderRadius: 8, boxShadow: '0 4px 16px rgba(0,0,0,.14)', padding: 4, minWidth: 180 }}>
+            <button
+              onClick={() => deleteHenleyBlock(nodeMenu.node.id)}
+              style={{ display: 'block', width: '100%', textAlign: 'left', padding: '8px 12px', border: 'none', background: 'none', cursor: 'pointer', fontSize: 13, color: '#b91c1c', borderRadius: 6 }}
+            >
+              🗑 Delete Henley block
             </button>
           </div>
         </>
