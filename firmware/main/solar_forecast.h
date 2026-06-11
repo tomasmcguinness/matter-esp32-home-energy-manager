@@ -8,7 +8,7 @@ extern "C" {
 #endif
 
 // Fetches the solar PV generation estimate for target_date from api.forecast.solar.
-// Also saves hourly-aggregated data to /littlefs/solar-forecast-YYYY-MM-DD.
+// Also saves hourly-aggregated data to /sdcard/solar-forecast-YYYY-MM-DD.
 // On success, *out_json is a newly allocated cJSON object — caller must cJSON_Delete it.
 // Shape: { "date": "YYYY-MM-DD", "estimates": [{"time":"HH:MM","watts":N},...], "total_wh": N }
 esp_err_t solar_forecast_fetch(const char *target_date, cJSON **out_json);

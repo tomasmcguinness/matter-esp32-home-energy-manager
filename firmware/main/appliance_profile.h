@@ -12,13 +12,13 @@ extern "C" {
 #define APPLIANCE_PROFILE_VERSION 1
 
 // Learned per-appliance usage profile, derived nightly from a rolling window of
-// the appliance's per-minute power history (/littlefs/node-<graphId>-*). The
+// the appliance's per-minute power history (/sdcard/node-<graphId>-*). The
 // scheduler uses these to slide an appliance's run across the predicted surplus.
 //
 // "standby" is the idle draw when the appliance is plugged in but not running; a
 // "program" (run cycle) is a contiguous stretch where the draw rises above
 // standby. Program stats are the mean and stddev across all cycles in the window.
-// Persisted to /littlefs/profile-<graphId>.
+// Persisted to /sdcard/profile-<graphId>.
 typedef struct {
     uint32_t magic;                // APPLIANCE_PROFILE_MAGIC
     uint16_t version;              // APPLIANCE_PROFILE_VERSION
@@ -35,7 +35,7 @@ typedef struct {
 
 // Analyse one appliance's last window_days of per-minute history, derive its
 // standby power, average program power and average program length, and persist
-// the profile to /littlefs/profile-<graph_id>. Returns the number of program
+// the profile to /sdcard/profile-<graph_id>. Returns the number of program
 // cycles detected (0 if the appliance never ran in the window — a profile is
 // still written with the standby figure and zeroed program fields).
 int appliance_profile_train(const char *graph_id, int window_days);
@@ -57,7 +57,7 @@ size_t appliance_enumerate(char ids[][APPLIANCE_ID_MAX_LEN],
                            char names[][APPLIANCE_NAME_MAX_LEN],
                            size_t max);
 
-// Load one appliance's persisted profile from /littlefs/profile-<graph_id> into
+// Load one appliance's persisted profile from /sdcard/profile-<graph_id> into
 // out, validating the magic/version. Returns false if absent or invalid.
 bool appliance_profile_load(const char *graph_id, appliance_profile_t *out);
 

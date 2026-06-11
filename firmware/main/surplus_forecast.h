@@ -8,7 +8,7 @@ extern "C" {
 
 // Compute the hourly surplus (solar - consumption) for date_str from the stored
 // solar-forecast-YYYY-MM-DD and consumption-forecast-YYYY-MM-DD hourly files,
-// writing /littlefs/surplus-YYYY-MM-DD (24 power_record_t). Overwrites any existing
+// writing /sdcard/surplus-YYYY-MM-DD (24 power_record_t). Overwrites any existing
 // file. Returns ESP_ERR_NOT_FOUND if either input forecast is missing.
 esp_err_t surplus_forecast_compute(const char *date_str);
 

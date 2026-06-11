@@ -23,6 +23,7 @@
 #include "surplus_model.h"
 #include "appliance_profile.h"
 #include "scheduler.h"
+#include "sd_card.h"
 #include "matter_controller.h"
 #include "ws_server.h"
 
@@ -1364,7 +1365,7 @@ static esp_err_t test_generate_sample_data_handler(httpd_req_t *req)
     time_t midnight = mktime(&tm_info);
 
     char path[64];
-    snprintf(path, sizeof(path), "/littlefs/grid-%s", date);
+    snprintf(path, sizeof(path), "/sdcard/grid-%s", date);
 
     FILE *f = fopen(path, "wb");
     if (!f) {
@@ -1754,12 +1755,36 @@ static esp_err_t edge_delete_handler(httpd_req_t *req)
     return ESP_OK;
 }
 
+// Resolve the optional ?fs= query param to a mounted base path. "littlefs"
+// (the default) browses the internal config partition; "sdcard" browses the SD
+// card, where the per-day data files now live. Returns NULL for an unknown value.
+static const char *resolve_fs_base(httpd_req_t *req)
+{
+    char query[64];
+    char fs[16] = {0};
+    size_t qlen = httpd_req_get_url_query_len(req);
+    if (qlen > 0 && qlen < sizeof(query) &&
+        httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK)
+        httpd_query_key_value(query, "fs", fs, sizeof(fs));
+
+    if (fs[0] == '\0' || strcmp(fs, "littlefs") == 0) return LFS_BASE_PATH;
+    if (strcmp(fs, "sdcard") == 0 || strcmp(fs, "sd") == 0) return SD_CARD_MOUNT_POINT;
+    return NULL; // unknown selector
+}
+
 static esp_err_t debug_files_list_handler(httpd_req_t *req)
 {
-    DIR *dir = opendir(LFS_BASE_PATH);
+    const char *base = resolve_fs_base(req);
+    if (!base)
+    {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Unknown fs (use littlefs or sdcard)");
+        return ESP_FAIL;
+    }
+
+    DIR *dir = opendir(base);
     if (!dir)
     {
-        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Cannot open LittleFS");
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Cannot open filesystem");
         return ESP_FAIL;
     }
 
@@ -1770,7 +1795,7 @@ static esp_err_t debug_files_list_handler(httpd_req_t *req)
         if (entry->d_type != DT_REG)
             continue;
         char full[FS_PATH_MAX];
-        snprintf(full, sizeof(full), "%s/%s", LFS_BASE_PATH, entry->d_name);
+        snprintf(full, sizeof(full), "%s/%s", base, entry->d_name);
         struct stat st;
         long size = (stat(full, &st) == 0) ? (long)st.st_size : -1;
         cJSON *obj = cJSON_CreateObject();
@@ -1781,20 +1806,36 @@ static esp_err_t debug_files_list_handler(httpd_req_t *req)
     closedir(dir);
 
     cJSON *root = cJSON_CreateObject();
+    cJSON_AddStringToObject(root, "base", base);
     cJSON_AddItemToObject(root, "files", arr);
     return send_json(req, root, 200);
 }
 
 static esp_err_t debug_files_get_handler(httpd_req_t *req)
 {
-    const char *name = req->uri + strlen("/debug/files/");
-    if (!*name || strchr(name, '/'))
+    const char *base = resolve_fs_base(req);
+    if (!base)
+    {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Unknown fs (use littlefs or sdcard)");
+        return ESP_FAIL;
+    }
+
+    // req->uri carries the full path including any ?fs= query string, so copy the
+    // filename up to the '?' (or end) before validating and building the path.
+    const char *uri_name = req->uri + strlen("/debug/files/");
+    char name[FS_PATH_MAX];
+    size_t i = 0;
+    for (; uri_name[i] && uri_name[i] != '?' && i < sizeof(name) - 1; i++)
+        name[i] = uri_name[i];
+    name[i] = '\0';
+
+    if (!name[0] || strchr(name, '/'))
     {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid filename");
         return ESP_FAIL;
     }
     char fs_path[FS_PATH_MAX];
-    snprintf(fs_path, sizeof(fs_path), "%s/%s", LFS_BASE_PATH, name);
+    snprintf(fs_path, sizeof(fs_path), "%s/%s", base, name);
     httpd_resp_set_type(req, "text/plain");
     return send_file(req, fs_path);
 }

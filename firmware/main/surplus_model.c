@@ -12,8 +12,8 @@
 
 static const char *TAG = "surplus_model";
 
-#define LFS_BASE        "/littlefs"
-#define MODEL_PATH      LFS_BASE "/surplus-model"
+#define SD_BASE        "/sdcard"
+#define MODEL_PATH      SD_BASE "/surplus-model"
 
 #define SURPLUS_MODEL_MAGIC   0x53524d31u   // "SRM1"
 #define SURPLUS_MODEL_VERSION 1
@@ -31,7 +31,7 @@ static bool load_hourly_file(const char *prefix, const char *date,
                              int32_t mw[HOURS], uint32_t ts[HOURS], bool present[HOURS])
 {
     char path[64];
-    snprintf(path, sizeof(path), "%s/%s-%s", LFS_BASE, prefix, date);
+    snprintf(path, sizeof(path), "%s/%s-%s", SD_BASE, prefix, date);
 
     FILE *f = fopen(path, "rb");
     if (!f)

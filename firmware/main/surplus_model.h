@@ -40,7 +40,7 @@ typedef struct {
 } surplus_model_t;
 
 // Train from up to window_days of history ending yesterday and persist the model
-// to /littlefs/surplus-model. Returns the number of usable training days (days
+// to /sdcard/surplus-model. Returns the number of usable training days (days
 // that had both a solar forecast and grid-hourly actuals). A return < the
 // cold-start threshold means callers should keep using the fallback.
 int surplus_model_train(int window_days);

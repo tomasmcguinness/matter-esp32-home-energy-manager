@@ -9,11 +9,11 @@
 #include "power_logger.h"      // power_record_t
 #include "appliance_profile.h" // appliance_enumerate, appliance_profile_load
 
-#define LFS_BASE     "/littlefs"
+#define SD_BASE     "/sdcard"
 #define SCHED_HOURS  24
 
 // Copy a date token only if filesystem-safe ([A-Za-z0-9_-], length 1..15);
-// "YYYY-MM-DD" passes. Guards the path we build under /littlefs.
+// "YYYY-MM-DD" passes. Guards the path we build under /sdcard.
 static bool sanitize_date(const char *tok, char *out, size_t out_len)
 {
     if (!tok) return false;
@@ -34,7 +34,7 @@ static bool sanitize_date(const char *tok, char *out, size_t out_len)
 static bool load_surplus(const char *date, float surplus_w[SCHED_HOURS])
 {
     char path[64];
-    snprintf(path, sizeof(path), "%s/surplus-%s", LFS_BASE, date);
+    snprintf(path, sizeof(path), "%s/surplus-%s", SD_BASE, date);
     FILE *f = fopen(path, "rb");
     if (!f) return false;
 

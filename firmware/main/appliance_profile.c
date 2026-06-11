@@ -14,7 +14,7 @@
 
 static const char *TAG = "appliance_profile";
 
-#define LFS_BASE  "/littlefs"
+#define SD_BASE  "/sdcard"
 
 static const char *CONSUMER_UNIT_ID = "consumer_unit";
 static const char *GRID_NODE_ID     = "grid_meter";
@@ -43,7 +43,7 @@ static const char *GRID_NODE_ID     = "grid_meter";
 // ---------------------------------------------------------------------------
 
 // Copy a graph-id/date token into out only if filesystem-safe ([A-Za-z0-9_-],
-// length 1..32). Same guard node_power_logger uses before touching /littlefs.
+// length 1..32). Same guard node_power_logger uses before touching /sdcard.
 static bool sanitize_token(const char *tok, char *out, size_t out_len)
 {
     if (!tok) return false;
@@ -108,7 +108,7 @@ static bool scan_day(const char *graph_id, const char *date,
                      cycle_stats_t *st)
 {
     char path[96];
-    snprintf(path, sizeof(path), "%s/node-%s-%s", LFS_BASE, graph_id, date);
+    snprintf(path, sizeof(path), "%s/node-%s-%s", SD_BASE, graph_id, date);
     FILE *f = fopen(path, "rb");
     if (!f)
         return false;
@@ -178,7 +178,7 @@ int appliance_profile_train(const char *graph_id, int window_days)
         date_for_offset(now, d, date, sizeof(date));
 
         char path[96];
-        snprintf(path, sizeof(path), "%s/node-%s-%s", LFS_BASE, id, date);
+        snprintf(path, sizeof(path), "%s/node-%s-%s", SD_BASE, id, date);
         FILE *f = fopen(path, "rb");
         if (!f)
             continue;
@@ -239,7 +239,7 @@ int appliance_profile_train(const char *graph_id, int window_days)
     }
 
     char ppath[96];
-    snprintf(ppath, sizeof(ppath), "%s/profile-%s", LFS_BASE, id);
+    snprintf(ppath, sizeof(ppath), "%s/profile-%s", SD_BASE, id);
     FILE *out = fopen(ppath, "wb");
     if (!out) {
         ESP_LOGE(TAG, "Cannot write %s", ppath);
@@ -403,7 +403,7 @@ size_t appliance_enumerate(char ids[][APPLIANCE_ID_MAX_LEN],
 static bool load_profile(const char *id, appliance_profile_t *prof)
 {
     char path[96];
-    snprintf(path, sizeof(path), "%s/profile-%s", LFS_BASE, id);
+    snprintf(path, sizeof(path), "%s/profile-%s", SD_BASE, id);
     FILE *f = fopen(path, "rb");
     if (!f)
         return false;

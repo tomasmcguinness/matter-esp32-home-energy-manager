@@ -12,7 +12,7 @@
 
 static const char *TAG = "consumption_forecast";
 
-#define LFS_BASE         "/littlefs"
+#define SD_BASE         "/sdcard"
 #define LOOKBACK_WEEKS   4
 #define HOURS_PER_DAY    24
 #define RECENT_SCAN_DAYS 14   // how far back the cold-start fallback looks
@@ -24,7 +24,7 @@ static bool accumulate_day(const char *date, int64_t sum_mw[HOURS_PER_DAY],
                            uint32_t count[HOURS_PER_DAY])
 {
     char path[64];
-    snprintf(path, sizeof(path), "%s/grid-hourly-%s", LFS_BASE, date);
+    snprintf(path, sizeof(path), "%s/grid-hourly-%s", SD_BASE, date);
 
     FILE *f = fopen(path, "rb");
     if (!f) {
@@ -103,7 +103,7 @@ esp_err_t consumption_forecast_compute(const char *target_date)
     time_t midnight = mktime(&midnight_tm);
 
     char dst_path[64];
-    snprintf(dst_path, sizeof(dst_path), "%s/consumption-forecast-%s", LFS_BASE, target_date);
+    snprintf(dst_path, sizeof(dst_path), "%s/consumption-forecast-%s", SD_BASE, target_date);
 
     FILE *out = fopen(dst_path, "wb");
     if (!out) {
@@ -129,7 +129,7 @@ esp_err_t consumption_forecast_compute(const char *target_date)
 char *consumption_forecast_json(const char *date_str)
 {
     char path[64];
-    snprintf(path, sizeof(path), "%s/consumption-forecast-%s", LFS_BASE, date_str);
+    snprintf(path, sizeof(path), "%s/consumption-forecast-%s", SD_BASE, date_str);
 
     cJSON *root = cJSON_CreateObject();
     cJSON_AddStringToObject(root, "date", date_str);

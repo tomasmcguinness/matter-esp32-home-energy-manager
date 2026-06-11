@@ -20,7 +20,7 @@
 #include "cJSON.h"
 
 #define TAG       "node_power_logger"
-#define LFS_BASE  "/littlefs"
+#define SD_BASE  "/sdcard"
 #define SAMPLE_US (15ULL * 1000000ULL) // pull a reading every 15 s
 #define FLUSH_US  (60ULL * 1000000ULL) // flush one averaged record per minute
 
@@ -54,7 +54,7 @@ static esp_timer_handle_t    s_daily_timer;
 static void schedule_midnight_rollup(void);
 
 // Copy a node/date token into out only if it is filesystem-safe ([A-Za-z0-9_-],
-// length 1..32). Blocks '/', '.' and anything that could escape /littlefs.
+// length 1..32). Blocks '/', '.' and anything that could escape /sdcard.
 static bool sanitize_token(const char *tok, char *out, size_t out_len)
 {
     if (!tok) return false;
@@ -208,7 +208,7 @@ static void write_record(const char *graph_id, const power_record_t *rec)
     date_from_unix(rec->unix_minute, date, sizeof(date));
 
     char path[96];
-    snprintf(path, sizeof(path), "%s/node-%s-%s", LFS_BASE, graph_id, date);
+    snprintf(path, sizeof(path), "%s/node-%s-%s", SD_BASE, graph_id, date);
 
     FILE *f = fopen(path, "ab");
     if (!f) {
@@ -339,7 +339,7 @@ char *node_power_logger_day_json(const char *node_id, const char *date_str)
         sanitize_token(date_str, date, sizeof(date)))
     {
         char path[96];
-        snprintf(path, sizeof(path), "%s/node-%s-%s", LFS_BASE, node, date);
+        snprintf(path, sizeof(path), "%s/node-%s-%s", SD_BASE, node, date);
 
         FILE *f = fopen(path, "rb");
         if (f) {
@@ -362,7 +362,7 @@ char *node_power_logger_day_json(const char *node_id, const char *date_str)
 static void rollup_one(const char *graph_id, const char *date)
 {
     char src_path[96];
-    snprintf(src_path, sizeof(src_path), "%s/node-%s-%s", LFS_BASE, graph_id, date);
+    snprintf(src_path, sizeof(src_path), "%s/node-%s-%s", SD_BASE, graph_id, date);
 
     FILE *f = fopen(src_path, "rb");
     if (!f) return;
@@ -388,7 +388,7 @@ static void rollup_one(const char *graph_id, const char *date)
     fclose(f);
 
     char dst_path[96];
-    snprintf(dst_path, sizeof(dst_path), "%s/nodeh-%s-%s", LFS_BASE, graph_id, date);
+    snprintf(dst_path, sizeof(dst_path), "%s/nodeh-%s-%s", SD_BASE, graph_id, date);
 
     FILE *out = fopen(dst_path, "wb");
     if (!out) {
@@ -413,7 +413,7 @@ esp_err_t node_power_logger_rollup_hourly(const char *date_str)
     if (!sanitize_token(date_str, date, sizeof(date)))
         return ESP_ERR_INVALID_ARG;
 
-    DIR *dir = opendir(LFS_BASE);
+    DIR *dir = opendir(SD_BASE);
     if (!dir)
         return ESP_FAIL;
 
@@ -460,7 +460,7 @@ char *node_power_logger_hourly_json(const char *node_id, const char *date_str)
         sanitize_token(date_str, date, sizeof(date)))
     {
         char path[96];
-        snprintf(path, sizeof(path), "%s/nodeh-%s-%s", LFS_BASE, node, date);
+        snprintf(path, sizeof(path), "%s/nodeh-%s-%s", SD_BASE, node, date);
 
         FILE *f = fopen(path, "rb");
         if (f) {

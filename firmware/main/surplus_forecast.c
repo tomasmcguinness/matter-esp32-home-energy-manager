@@ -13,7 +13,7 @@
 
 static const char *TAG = "surplus_forecast";
 
-#define LFS_BASE      "/littlefs"
+#define SD_BASE      "/sdcard"
 #define HOURS_PER_DAY 24
 
 // Load an hourly forecast file (prefix-date) into per-hour arrays indexed by local
@@ -22,7 +22,7 @@ static bool load_hourly(const char *prefix, const char *date,
                         int32_t mw[HOURS_PER_DAY], uint32_t ts[HOURS_PER_DAY])
 {
     char path[64];
-    snprintf(path, sizeof(path), "%s/%s-%s", LFS_BASE, prefix, date);
+    snprintf(path, sizeof(path), "%s/%s-%s", SD_BASE, prefix, date);
 
     FILE *f = fopen(path, "rb");
     if (!f)
@@ -97,7 +97,7 @@ esp_err_t surplus_forecast_compute(const char *date_str)
     }
 
     char path[64];
-    snprintf(path, sizeof(path), "%s/surplus-%s", LFS_BASE, date_str);
+    snprintf(path, sizeof(path), "%s/surplus-%s", SD_BASE, date_str);
 
     FILE *out = fopen(path, "wb");
     if (!out) {
@@ -121,7 +121,7 @@ esp_err_t surplus_forecast_compute(const char *date_str)
 char *surplus_forecast_json(const char *date_str)
 {
     char path[64];
-    snprintf(path, sizeof(path), "%s/surplus-%s", LFS_BASE, date_str);
+    snprintf(path, sizeof(path), "%s/surplus-%s", SD_BASE, date_str);
 
     cJSON *root = cJSON_CreateObject();
     cJSON_AddStringToObject(root, "date", date_str);

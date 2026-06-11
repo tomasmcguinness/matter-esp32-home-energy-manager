@@ -15,10 +15,10 @@
 // data survives Matter device replacement. The grid is flagged and persisted to
 // the grid-* files power_logger owns, keeping the consumption-forecast pipeline
 // and web API unchanged. On-disk format is power_record_t throughout:
-//   node minute file : /littlefs/node-<graphId>-YYYY-MM-DD
-//   node hourly file : /littlefs/nodeh-<graphId>-YYYY-MM-DD
-//   grid minute file : /littlefs/grid-YYYY-MM-DD
-//   grid hourly file : /littlefs/grid-hourly-YYYY-MM-DD
+//   node minute file : /sdcard/node-<graphId>-YYYY-MM-DD
+//   node hourly file : /sdcard/nodeh-<graphId>-YYYY-MM-DD
+//   grid minute file : /sdcard/grid-YYYY-MM-DD
+//   grid hourly file : /sdcard/grid-hourly-YYYY-MM-DD
 
 #ifdef __cplusplus
 extern "C" {

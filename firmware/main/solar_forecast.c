@@ -20,7 +20,7 @@
 
 static const char *TAG = "solar_forecast";
 
-#define LFS_BASE "/littlefs"
+#define SD_BASE "/sdcard"
 
 #define DAILY_JOB_HOUR 2   // local hour at which the daily forecast job runs
 
@@ -70,7 +70,7 @@ static void save_hourly_solar(const char *date, cJSON *estimates)
     }
 
     char path[64];
-    snprintf(path, sizeof(path), "%s/solar-forecast-%s", LFS_BASE, date);
+    snprintf(path, sizeof(path), "%s/solar-forecast-%s", SD_BASE, date);
     FILE *f = fopen(path, "wb");
     if (!f) {
         ESP_LOGW(TAG, "Cannot write solar-forecast-%s", date);
@@ -214,7 +214,7 @@ esp_err_t solar_forecast_fetch_tomorrow(cJSON **out_json)
 char *solar_forecast_hourly_json(const char *date_str)
 {
     char path[64];
-    snprintf(path, sizeof(path), "%s/solar-forecast-%s", LFS_BASE, date_str);
+    snprintf(path, sizeof(path), "%s/solar-forecast-%s", SD_BASE, date_str);
 
     cJSON *root = cJSON_CreateObject();
     cJSON_AddStringToObject(root, "date", date_str);
@@ -322,7 +322,7 @@ esp_err_t solar_forecast_start_daily_job(void)
     char target[11];
     today_date(target, sizeof(target));
     char path[64];
-    snprintf(path, sizeof(path), "%s/solar-forecast-%s", LFS_BASE, target);
+    snprintf(path, sizeof(path), "%s/solar-forecast-%s", SD_BASE, target);
     if (access(path, F_OK) != 0) {
         ESP_LOGI(TAG, "No solar forecast for %s — running daily job now", target);
         solar_forecast_run_daily_job();

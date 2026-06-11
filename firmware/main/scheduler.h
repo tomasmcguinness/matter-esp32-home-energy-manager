@@ -25,7 +25,7 @@ typedef struct {
 
 // Build a suggested appliance schedule for date_str ("YYYY-MM-DD") by sliding
 // each appliance's learned run across that day's hourly surplus forecast
-// (/littlefs/surplus-<date>), greedily placing the largest loads first and
+// (/sdcard/surplus-<date>), greedily placing the largest loads first and
 // subtracting each placement from the remaining surplus. Fills out[] (up to
 // max) and returns the count, or -1 if the surplus forecast for that day is
 // missing.

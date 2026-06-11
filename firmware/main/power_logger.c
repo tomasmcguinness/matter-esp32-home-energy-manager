@@ -8,7 +8,7 @@
 #include "cJSON.h"
 
 #define TAG          "power_logger"
-#define LFS_BASE     "/littlefs"
+#define SD_BASE     "/sdcard"
 
 static void date_from_unix(uint32_t ts, char *buf, size_t len)
 {
@@ -24,7 +24,7 @@ void power_logger_write_grid_minute(uint32_t unix_minute, int32_t power_mw)
     date_from_unix(unix_minute, date, sizeof(date));
 
     char path[64];
-    snprintf(path, sizeof(path), "%s/grid-%s", LFS_BASE, date);
+    snprintf(path, sizeof(path), "%s/grid-%s", SD_BASE, date);
 
     FILE *f = fopen(path, "ab");
     if (!f)
@@ -41,7 +41,7 @@ void power_logger_write_grid_minute(uint32_t unix_minute, int32_t power_mw)
 char *power_logger_day_json(const char *date_str)
 {
     char path[64];
-    snprintf(path, sizeof(path), "%s/grid-%s", LFS_BASE, date_str);
+    snprintf(path, sizeof(path), "%s/grid-%s", SD_BASE, date_str);
 
     cJSON *root = cJSON_CreateObject();
     cJSON *arr  = cJSON_AddArrayToObject(root, "records");
@@ -68,7 +68,7 @@ char *power_logger_day_json(const char *date_str)
 esp_err_t power_logger_rollup_hourly(const char *date_str)
 {
     char src_path[64];
-    snprintf(src_path, sizeof(src_path), "%s/grid-%s", LFS_BASE, date_str);
+    snprintf(src_path, sizeof(src_path), "%s/grid-%s", SD_BASE, date_str);
 
     FILE *f = fopen(src_path, "rb");
     if (!f) {
@@ -97,7 +97,7 @@ esp_err_t power_logger_rollup_hourly(const char *date_str)
     fclose(f);
 
     char dst_path[64];
-    snprintf(dst_path, sizeof(dst_path), "%s/grid-hourly-%s", LFS_BASE, date_str);
+    snprintf(dst_path, sizeof(dst_path), "%s/grid-hourly-%s", SD_BASE, date_str);
 
     FILE *out = fopen(dst_path, "wb");
     if (!out) {
@@ -122,7 +122,7 @@ esp_err_t power_logger_rollup_hourly(const char *date_str)
 char *power_logger_hourly_json(const char *date_str)
 {
     char path[64];
-    snprintf(path, sizeof(path), "%s/grid-hourly-%s", LFS_BASE, date_str);
+    snprintf(path, sizeof(path), "%s/grid-hourly-%s", SD_BASE, date_str);
 
     cJSON *root = cJSON_CreateObject();
     cJSON *arr  = cJSON_AddArrayToObject(root, "records");
