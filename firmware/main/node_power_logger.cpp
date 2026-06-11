@@ -85,6 +85,25 @@ static const char *json_str(cJSON *obj, const char *key)
     return cJSON_IsString(j) ? j->valuestring : nullptr;
 }
 
+// A "distribution node" is a board that loads hang off: the main consumer unit
+// or any sub consumer unit. A metered node wired to either is a stream; an edge
+// between two distribution nodes (the CU -> sub-CU feed) is not, so the sub-CU
+// board itself is never tracked. Works for arbitrarily nested sub-boards.
+static bool is_distribution_node(cJSON *nodes, const char *id)
+{
+    if (!id) return false;
+    if (strcmp(id, CONSUMER_UNIT_ID) == 0) return true;
+    cJSON *n = nullptr;
+    cJSON_ArrayForEach(n, nodes) {
+        const char *nid = json_str(n, "id");
+        if (!nid || strcmp(nid, id) != 0) continue;
+        cJSON *settings = cJSON_GetObjectItemCaseSensitive(n, "settings");
+        const char *t = settings ? json_str(settings, "type") : nullptr;
+        return t && strcmp(t, "subConsumerUnit") == 0;
+    }
+    return false;
+}
+
 // Rebuild the set of recorded streams from the topology graph: every node wired
 // to the consumer unit that maps to a Matter endpoint, including the grid. All
 // streams are sampled identically (polled from the ValueCache); the grid is
@@ -110,10 +129,16 @@ static void refresh_streams(void)
         const char *tgt = json_str(e, "target");
         if (!src || !tgt) continue;
 
+        // The metered node is the non-distribution end of an edge that touches a
+        // distribution node. Edges between two distribution nodes (CU -> sub-CU)
+        // are the feed, not a stream, so they are skipped.
+        bool src_dist = is_distribution_node(nodes, src);
+        bool tgt_dist = is_distribution_node(nodes, tgt);
+
         std::string other;
         const char *cu_handle = nullptr;
-        if (strcmp(src, CONSUMER_UNIT_ID) == 0) { other = tgt; cu_handle = json_str(e, "sourceHandle"); }
-        else if (strcmp(tgt, CONSUMER_UNIT_ID) == 0) { other = src; cu_handle = json_str(e, "targetHandle"); }
+        if (src_dist && !tgt_dist) { other = tgt; cu_handle = json_str(e, "sourceHandle"); }
+        else if (tgt_dist && !src_dist) { other = src; cu_handle = json_str(e, "targetHandle"); }
         else continue;
 
         bool is_grid = other == GRID_NODE_ID || (cu_handle && strcmp(cu_handle, "grid") == 0);

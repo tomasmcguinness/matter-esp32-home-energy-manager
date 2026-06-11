@@ -168,24 +168,27 @@ function BatteryNode({ data }: { data: DeviceNodeData }) {
   )
 }
 
-// A Henley block: an unmetered junction that splits one incoming feed (power-in,
-// left) across several outputs (out_1..out_N, right). The output count is
-// configurable via the +/- buttons and spaced down the right edge like the
-// consumer unit's circuit handles.
-function HenleyNode({ id, data }: { id: string; data: { label: string; outputs?: number } }) {
+// A Sub Consumer Unit: a sub-distribution board fed from one incoming feed
+// (power-in, left) that fans out across several circuit handles (circuit_1..
+// circuit_N, right) which loads hang off. This mirrors a real installation where
+// a Henley splice feeds a sub-board and circuits branch from there. The circuit
+// count is configurable via the +/- buttons and uses the same `circuit_N` handle
+// ids as the main consumer unit, so the firmware's appliance detection treats
+// loads here identically to loads on the main board.
+function SubConsumerUnitNode({ id, data }: { id: string; data: { label: string; circuits?: number } }) {
   const { updateNodeData } = useReactFlow()
-  const outputs = data.outputs ?? 2
+  const circuits = data.circuits ?? 4
 
-  const setOutputs = (n: number) => {
+  const setCircuits = (n: number) => {
     const next = Math.max(1, Math.min(8, n))
-    if (next === outputs) return
-    updateNodeData(id, { outputs: next })
+    if (next === circuits) return
+    updateNodeData(id, { circuits: next })
     // Settings endpoint takes the raw settings object; backend replaces it
     // wholesale, so send every field.
     fetch(`/api/nodes/${id}/settings`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ label: data.label, type: 'henley', outputs: next }),
+      body: JSON.stringify({ label: data.label, type: 'subConsumerUnit', circuits: next }),
     }).catch(() => { })
   }
 
@@ -197,20 +200,20 @@ function HenleyNode({ id, data }: { id: string; data: { label: string; outputs?:
   return (
     <>
       <Handle type="target" position={Position.Left} id="power-in" />
-      <div style={{ padding: '5px 10px', background: '#fef3c7', border: '1px solid #fcd34d', borderRadius: 4, fontSize: 12, fontWeight: 600, color: '#1e293b', whiteSpace: 'nowrap', display: 'flex', alignItems: 'center', gap: 8 }}>
-        <span>⧉ {data.label}</span>
+      <div style={{ padding: '5px 10px', background: '#ecfeff', border: '1px solid #67e8f9', borderRadius: 4, fontSize: 12, fontWeight: 600, color: '#1e293b', whiteSpace: 'nowrap', display: 'flex', alignItems: 'center', gap: 8 }}>
+        <span>▦ {data.label}</span>
         <span className="nodrag" style={{ display: 'flex', gap: 2 }}>
-          <button style={btn} onClick={() => setOutputs(outputs - 1)} disabled={outputs <= 1} title="Remove output">−</button>
-          <button style={btn} onClick={() => setOutputs(outputs + 1)} disabled={outputs >= 8} title="Add output">+</button>
+          <button style={btn} onClick={() => setCircuits(circuits - 1)} disabled={circuits <= 1} title="Remove circuit">−</button>
+          <button style={btn} onClick={() => setCircuits(circuits + 1)} disabled={circuits >= 8} title="Add circuit">+</button>
         </span>
       </div>
-      {Array.from({ length: outputs }, (_, i) => (
+      {Array.from({ length: circuits }, (_, i) => (
         <Handle
           key={i}
           type="source"
           position={Position.Right}
-          id={`out_${i + 1}`}
-          style={{ top: `${((i + 1) * 100) / (outputs + 1)}%` }}
+          id={`circuit_${i + 1}`}
+          style={{ top: `${((i + 1) * 100) / (circuits + 1)}%` }}
         />
       ))}
     </>
@@ -226,7 +229,10 @@ const nodeTypes = {
   solarInverter: SolarInverterNode,
   pvString: PvStringNode,
   battery: BatteryNode,
-  henley: HenleyNode,
+  subConsumerUnit: SubConsumerUnitNode,
+  // Legacy: graphs saved before the sub-CU replaced the Henley block render with
+  // the same component so they still display.
+  henley: SubConsumerUnitNode,
 }
 
 type SavedNodeConfig = { id: string; x: number; y: number; settings: Record<string, unknown>; values?: ValueEntry[] }
@@ -288,7 +294,6 @@ function Topology() {
   const [nodes, setNodes, onNodesChange] = useNodesState(initialNodes)
   const [edges, setEdges, onEdgesChangeBase] = useEdgesState(initialEdges)
   const [gridModalOpen, setGridModalOpen] = useState(false)
-  const [edgeMenu, setEdgeMenu] = useState<{ edge: Edge; x: number; y: number } | null>(null)
   const [nodeMenu, setNodeMenu] = useState<{ node: Node; x: number; y: number } | null>(null)
   const [paneMenu, setPaneMenu] = useState<{ x: number; y: number } | null>(null)
   // Flow-space position where an "Add load" node should be created (captured from
@@ -481,121 +486,60 @@ function Topology() {
     }).catch(() => { })
   }, [setEdges]);
 
-  // Right-clicking an edge opens a small menu to insert an inline node, splitting
-  // the edge into two. Position is captured in screen coords for the menu and
-  // reused as the dropped node's flow position.
-  const onEdgeContextMenu = useCallback((event: React.MouseEvent, edge: Edge) => {
-    event.preventDefault()
-    setEdgeMenu({ edge, x: event.clientX, y: event.clientY })
-  }, [])
-
-  // Split A -> B into A -> Henley -> B: create the junction node, drop the
-  // original edge, and wire two new edges. Persists each step via the existing
-  // node/edge endpoints (graph is the source of truth).
-  const splitEdgeWithHenley = useCallback((edge: Edge, screenX: number, screenY: number) => {
-    const henleyId = `node_${++nodeIdCounter.current}`
-    const position = screenToFlowPosition({ x: screenX, y: screenY })
-    const label = 'Henley Block'
-
-    const newNode: Node = {
-      id: henleyId,
-      type: 'henley',
-      position,
-      draggable: true,
-      data: { label, outputs: 2 },
-    }
-    setNodes(prev => [...prev, newNode])
-    fetch(`/api/nodes/${henleyId}`, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ x: position.x, y: position.y, settings: { label, type: 'henley', outputs: 2 } }),
-    }).catch(() => { })
-
-    fetch(`/api/edges/${edge.id}`, { method: 'DELETE' }).catch(() => { })
-
-    const mkId = (s: string, sh: string | null | undefined, t: string, th: string | null | undefined) =>
-      [s, sh, t, th].filter(Boolean).join('-')
-
-    // A -> Henley keeps A's outgoing handle; Henley -> B keeps B's incoming handle.
-    const e1: Edge = { id: mkId(edge.source, edge.sourceHandle, henleyId, 'power-in'), source: edge.source, sourceHandle: edge.sourceHandle ?? null, target: henleyId, targetHandle: 'power-in', type: 'powerFlow', data: { kw: 0 } }
-    const e2: Edge = { id: mkId(henleyId, 'out_1', edge.target, edge.targetHandle), source: henleyId, sourceHandle: 'out_1', target: edge.target, targetHandle: edge.targetHandle ?? null, type: 'powerFlow', data: { kw: 0 } }
-
-    setEdges(eds => addEdge(e2, addEdge(e1, eds.filter(x => x.id !== edge.id))))
-
-    for (const e of [e1, e2]) {
-      fetch('/api/edges', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ id: e.id, source: e.source, target: e.target, sourceHandle: e.sourceHandle ?? null, targetHandle: e.targetHandle ?? null }),
-      }).catch(() => { })
-    }
-
-    setEdgeMenu(null)
-  }, [screenToFlowPosition, setNodes, setEdges])
-
-  // Right-clicking empty canvas offers "Add load": pick a metered device and
-  // drop it where the user clicked. The edge to a Henley output is then drawn by
+  // Right-clicking empty canvas offers "Add load" (a metered device) and "Add sub
+  // consumer unit" (a sub-board). Loads are then wired to the relevant handle by
   // hand (persisted by onConnect).
   const onPaneContextMenu = useCallback((event: MouseEvent | React.MouseEvent) => {
     event.preventDefault()
     setPaneMenu({ x: event.clientX, y: event.clientY })
   }, [])
 
-  // Right-clicking a Henley block offers a delete action. Other node types have
-  // no node-level menu (they're removed via select + Delete).
+  // Drop a free-standing sub consumer unit where the user right-clicked. The user
+  // wires its feed (from a CU circuit) and its loads (onto circuit_N) by hand.
+  const addSubConsumerUnit = useCallback((screenX: number, screenY: number) => {
+    const id = `node_${++nodeIdCounter.current}`
+    const position = screenToFlowPosition({ x: screenX, y: screenY })
+    const label = 'Sub Consumer Unit'
+    const circuits = 4
+
+    setNodes(prev => [...prev, { id, type: 'subConsumerUnit', position, draggable: true, data: { label, circuits } }])
+    fetch(`/api/nodes/${id}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ x: position.x, y: position.y, settings: { label, type: 'subConsumerUnit', circuits } }),
+    }).catch(() => { })
+
+    setPaneMenu(null)
+  }, [screenToFlowPosition, setNodes])
+
+  // Right-clicking a sub consumer unit offers a delete action. Other node types
+  // have no node-level menu (they're removed via select + Delete). 'henley' is
+  // accepted for legacy graphs that predate the sub-CU.
   const onNodeContextMenu = useCallback((event: React.MouseEvent, node: Node) => {
-    if (node.type !== 'henley') return
+    if (node.type !== 'subConsumerUnit' && node.type !== 'henley') return
     event.preventDefault()
     setNodeMenu({ node, x: event.clientX, y: event.clientY })
   }, [])
 
-  // Delete a Henley block: drop the junction and every load hanging off its
-  // outputs, but keep the consumer unit and re-establish the feed -> CU link that
-  // the Henley was inserted into (grid -> CU). The Henley has one upstream feed
-  // (power-in) and fans out across out_N to the CU plus zero or more loads.
-  const deleteHenleyBlock = useCallback((henleyId: string) => {
+  // Delete a sub consumer unit: drop the board and every load hanging off its
+  // circuit outputs, but never the main consumer unit. The upstream feed edge is
+  // simply removed (the sub-CU is wired off a CU circuit, not spliced inline, so
+  // there is no pass-through link to rebuild).
+  const deleteSubConsumerUnit = useCallback((subCuId: string) => {
     const CU = 'consumer_unit'
     setEdges(currentEdges => {
-      const feedEdge = currentEdges.find(e => e.target === henleyId)
-      const outEdges = currentEdges.filter(e => e.source === henleyId)
-      const cuEdge = outEdges.find(e => e.target === CU)
-
-      // Loads are the output targets that aren't the consumer unit; remove them
-      // along with the Henley itself. The CU is preserved.
-      const removedNodeIds = new Set<string>([henleyId])
-      for (const e of outEdges) if (e.target !== CU) removedNodeIds.add(e.target)
+      // Loads are the downstream targets of the sub-CU's circuit handles; remove
+      // them along with the board itself. The main consumer unit is preserved.
+      const removedNodeIds = new Set<string>([subCuId])
+      for (const e of currentEdges) if (e.source === subCuId && e.target !== CU) removedNodeIds.add(e.target)
 
       const removedEdges = currentEdges.filter(e => removedNodeIds.has(e.source) || removedNodeIds.has(e.target))
       removedEdges.forEach(e => fetch(`/api/edges/${e.id}`, { method: 'DELETE' }).catch(() => { }))
 
-      let remaining = currentEdges.filter(e => !removedNodeIds.has(e.source) && !removedNodeIds.has(e.target))
-
-      // Restore the feed -> consumer unit link the Henley was splitting, reusing
-      // the original upstream and CU handles so the grid meter stays wired in.
-      if (feedEdge && cuEdge) {
-        const restored: Edge = {
-          id: [feedEdge.source, feedEdge.sourceHandle, CU, cuEdge.targetHandle].filter(Boolean).join('-'),
-          source: feedEdge.source,
-          sourceHandle: feedEdge.sourceHandle ?? null,
-          target: CU,
-          targetHandle: cuEdge.targetHandle ?? null,
-          type: 'powerFlow',
-          data: { kw: 0 },
-        }
-        if (!remaining.some(e => e.id === restored.id)) {
-          remaining = [...remaining, restored]
-          fetch('/api/edges', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ id: restored.id, source: restored.source, target: restored.target, sourceHandle: restored.sourceHandle ?? null, targetHandle: restored.targetHandle ?? null }),
-          }).catch(() => { })
-        }
-      }
-
       setNodes(nds => nds.filter(n => !removedNodeIds.has(n.id)))
       removedNodeIds.forEach(id => fetch(`/api/nodes/${id}`, { method: 'DELETE' }).catch(() => { }))
 
-      return remaining
+      return currentEdges.filter(e => !removedNodeIds.has(e.source) && !removedNodeIds.has(e.target))
     })
     setNodeMenu(null)
   }, [setEdges, setNodes])
@@ -652,6 +596,7 @@ function Topology() {
               nodeId: n.settings?.nodeId as number | undefined,
               endpointId: n.settings?.endpointId as number | undefined,
               ...(typeof n.settings?.outputs === 'number' ? { outputs: n.settings.outputs } : {}),
+              ...(typeof n.settings?.circuits === 'number' ? { circuits: n.settings.circuits } : {}),
               ...(hasPower ? { power } : {}),
               ...(batteryPercent !== undefined ? { batteryPercent } : {}),
             },
@@ -702,7 +647,6 @@ function Topology() {
           edgeTypes={edgeTypes}
           onInit={onInit}
           onNodeDoubleClick={onNodeDoubleClick}
-          onEdgeContextMenu={onEdgeContextMenu}
           onNodeContextMenu={onNodeContextMenu}
           onPaneContextMenu={onPaneContextMenu}
           onNodeDragStop={onNodeDragStop}
@@ -725,31 +669,16 @@ function Topology() {
         />
       )}
 
-      {edgeMenu && (
-        <>
-          {/* Backdrop closes the menu on any outside click. */}
-          <div onClick={() => setEdgeMenu(null)} style={{ position: 'fixed', inset: 0, zIndex: 99 }} />
-          <div style={{ position: 'fixed', top: edgeMenu.y, left: edgeMenu.x, zIndex: 100, background: '#fff', border: '1px solid #e2e8f0', borderRadius: 8, boxShadow: '0 4px 16px rgba(0,0,0,.14)', padding: 4, minWidth: 180 }}>
-            <button
-              onClick={() => splitEdgeWithHenley(edgeMenu.edge, edgeMenu.x, edgeMenu.y)}
-              style={{ display: 'block', width: '100%', textAlign: 'left', padding: '8px 12px', border: 'none', background: 'none', cursor: 'pointer', fontSize: 13, color: '#1e293b', borderRadius: 6 }}
-            >
-              ⧉ Insert Henley block
-            </button>
-          </div>
-        </>
-      )}
-
       {nodeMenu && (
         <>
           {/* Backdrop closes the menu on any outside click. */}
           <div onClick={() => setNodeMenu(null)} style={{ position: 'fixed', inset: 0, zIndex: 99 }} />
           <div style={{ position: 'fixed', top: nodeMenu.y, left: nodeMenu.x, zIndex: 100, background: '#fff', border: '1px solid #e2e8f0', borderRadius: 8, boxShadow: '0 4px 16px rgba(0,0,0,.14)', padding: 4, minWidth: 180 }}>
             <button
-              onClick={() => deleteHenleyBlock(nodeMenu.node.id)}
+              onClick={() => deleteSubConsumerUnit(nodeMenu.node.id)}
               style={{ display: 'block', width: '100%', textAlign: 'left', padding: '8px 12px', border: 'none', background: 'none', cursor: 'pointer', fontSize: 13, color: '#b91c1c', borderRadius: 6 }}
             >
-              🗑 Delete Henley block
+              🗑 Delete sub consumer unit
             </button>
           </div>
         </>
@@ -765,6 +694,12 @@ function Topology() {
               style={{ display: 'block', width: '100%', textAlign: 'left', padding: '8px 12px', border: 'none', background: 'none', cursor: 'pointer', fontSize: 13, color: '#1e293b', borderRadius: 6 }}
             >
               + Add load
+            </button>
+            <button
+              onClick={() => addSubConsumerUnit(paneMenu.x, paneMenu.y)}
+              style={{ display: 'block', width: '100%', textAlign: 'left', padding: '8px 12px', border: 'none', background: 'none', cursor: 'pointer', fontSize: 13, color: '#1e293b', borderRadius: 6 }}
+            >
+              ▦ Add sub consumer unit
             </button>
           </div>
         </>

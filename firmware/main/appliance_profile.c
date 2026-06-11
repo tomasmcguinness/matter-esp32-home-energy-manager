@@ -289,6 +289,25 @@ static const char *node_display_name(cJSON *nodes, const char *id)
     return NULL;
 }
 
+// A "distribution node" is a board that loads hang off: the main consumer unit
+// or any sub consumer unit. Loads wired to either count as appliances; an edge
+// between two distribution nodes (the CU -> sub-CU feed) does not, so the sub-CU
+// board itself is never enumerated. Works for arbitrarily nested sub-boards.
+static bool is_distribution_node(cJSON *nodes, const char *id)
+{
+    if (!id) return false;
+    if (strcmp(id, CONSUMER_UNIT_ID) == 0) return true;
+    cJSON *n = NULL;
+    cJSON_ArrayForEach(n, nodes) {
+        const char *nid = json_str(n, "id");
+        if (!nid || strcmp(nid, id) != 0) continue;
+        cJSON *settings = cJSON_GetObjectItemCaseSensitive(n, "settings");
+        const char *t = settings ? json_str(settings, "type") : NULL;
+        return t && strcmp(t, "subConsumerUnit") == 0;
+    }
+    return false;
+}
+
 static void enumerate_appliances(appliance_visit_fn fn, void *ctx)
 {
     char *raw = node_manager_get_all_json();
@@ -309,10 +328,16 @@ static void enumerate_appliances(appliance_visit_fn fn, void *ctx)
         const char *tgt = json_str(e, "target");
         if (!src || !tgt) continue;
 
+        // The appliance is the non-distribution end of an edge that touches a
+        // distribution node. Edges between two distribution nodes (CU -> sub-CU)
+        // are the feed, not an appliance, so they are skipped.
+        bool src_dist = is_distribution_node(nodes, src);
+        bool tgt_dist = is_distribution_node(nodes, tgt);
+
         const char *other  = NULL;
         const char *handle = NULL;
-        if (strcmp(src, CONSUMER_UNIT_ID) == 0)      { other = tgt; handle = json_str(e, "sourceHandle"); }
-        else if (strcmp(tgt, CONSUMER_UNIT_ID) == 0) { other = src; handle = json_str(e, "targetHandle"); }
+        if (src_dist && !tgt_dist)      { other = tgt; handle = json_str(e, "sourceHandle"); }
+        else if (tgt_dist && !src_dist) { other = src; handle = json_str(e, "targetHandle"); }
         else continue;
 
         if (strcmp(other, GRID_NODE_ID) == 0) continue;
