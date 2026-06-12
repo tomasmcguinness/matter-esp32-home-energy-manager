@@ -1,6 +1,6 @@
 # Matter Home Energy Manager
 
-A Home Energy Manager (HEM) for the ESP32-P4 that acts as a Matter **Device Energy Management (DEM)** controller. It logs power at the grid connection, learns household consumption and per-appliance usage patterns, predicts the next day's solar surplus, and schedules appliances to run when that surplus is available.
+A Home Energy Manager (HEM) for the ESP32-P4 that acts as a Matter **Device Energy Management (DEM)** controller. It logs power at the grid connection, learns household consumption and per-appliance usage patterns, predicts the next day's solar surplus, and creates a suggested schedule for appliances to make the most of any solar surplus.
 
 ## Overview
 
