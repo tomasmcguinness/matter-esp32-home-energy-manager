@@ -68,6 +68,10 @@ static constexpr uint32_t kDescriptorPartsList = 0x0003;
 static constexpr uint32_t kBasicInfoCluster = 0x0028;
 static constexpr uint32_t kBasicInfoVendorName = 0x0002;
 static constexpr uint32_t kBasicInfoProductName = 0x0004;
+// Bridged Device Basic Information lives on each bridged endpoint and carries
+// the human-readable name the bridge advertises for that child device.
+static constexpr uint32_t kBridgedDeviceBasicInfoCluster = 0x0039;
+static constexpr uint32_t kBridgedDeviceNodeLabel = 0x0005;
 
 static void cache_attribute(uint64_t node_id,
                             const chip::app::ConcreteDataAttributePath &path,
@@ -136,10 +140,22 @@ static void node_list_remove(uint64_t node_id)
 // Blocking unpair
 // ---------------------------------------------------------------------------
 
+// Unpairing an *offline* device blocks until CHIP exhausts mDNS resolution and
+// CASE retries, which can take ~45s or more. The waiter timeout below must stay
+// comfortably above that, otherwise we abandon a request whose callback is still
+// pending. The semaphore is persistent (never deleted) and the callback ignores
+// abandoned requests, so a late callback is harmless either way -- but a timeout
+// shorter than CHIP's own gives a needless "device can't be deleted" failure.
+static constexpr uint32_t kRemoveNodeTimeoutMs = 90000;
+
+// node_id sentinel meaning "no removal in flight" (real ids start at 1).
+static constexpr uint64_t kNoRemoveInFlight = 0;
+
 struct remove_node_ctx
 {
-    SemaphoreHandle_t done;
-    CHIP_ERROR result;
+    SemaphoreHandle_t done;       // created once, never deleted
+    uint64_t          node_id;    // request the waiter is currently blocked on
+    CHIP_ERROR        result;
 };
 
 static remove_node_ctx s_remove_ctx;
@@ -152,16 +168,32 @@ static void remove_node_cb(chip::NodeId remoteNodeId, CHIP_ERROR status)
     {
         node_list_remove(remoteNodeId);
     }
-    s_remove_ctx.result = status;
-    xSemaphoreGive(s_remove_ctx.done);
+    // Only signal the waiter if it is still blocked on *this* request. A callback
+    // that fires after the waiter timed out (offline device, slow CASE failure)
+    // must not touch its state -- the persistent semaphore makes a stray give a
+    // no-op that the next request drains.
+    if ((uint64_t)remoteNodeId == s_remove_ctx.node_id)
+    {
+        s_remove_ctx.result = status;
+        xSemaphoreGive(s_remove_ctx.done);
+    }
 }
 
 esp_err_t matter_controller_remove_node(uint64_t node_id)
 {
-    s_remove_ctx.done = xSemaphoreCreateBinary();
+    if (s_remove_ctx.done == nullptr)
+    {
+        s_remove_ctx.done = xSemaphoreCreateBinary();
+        if (s_remove_ctx.done == nullptr)
+            return ESP_ERR_NO_MEM;
+    }
+    // Drain any stale give left by a previous timed-out request's late callback.
+    while (xSemaphoreTake(s_remove_ctx.done, 0) == pdTRUE)
+    {
+    }
+
+    s_remove_ctx.node_id = node_id;
     s_remove_ctx.result = CHIP_NO_ERROR;
-    if (!s_remove_ctx.done)
-        return ESP_ERR_NO_MEM;
 
     chip::DeviceLayer::PlatformMgr().LockChipStack();
     esp_err_t err = esp_matter::controller::matter_controller_client::get_instance()
@@ -171,20 +203,31 @@ esp_err_t matter_controller_remove_node(uint64_t node_id)
     if (err != ESP_OK)
     {
         ESP_LOGE(TAG, "unpair failed: 0x%x", err);
-        vSemaphoreDelete(s_remove_ctx.done);
+        s_remove_ctx.node_id = kNoRemoveInFlight; // no callback will come
         return err;
     }
 
-    if (xSemaphoreTake(s_remove_ctx.done, pdMS_TO_TICKS(30000)) != pdTRUE)
+    if (xSemaphoreTake(s_remove_ctx.done, pdMS_TO_TICKS(kRemoveNodeTimeoutMs)) != pdTRUE)
     {
         ESP_LOGE(TAG, "Remove node timed out");
-        vSemaphoreDelete(s_remove_ctx.done);
+        // Abandon: a later callback must not signal a freed/reused waiter. We
+        // never delete the semaphore, so the late give is harmless.
+        s_remove_ctx.node_id = kNoRemoveInFlight;
         return ESP_ERR_TIMEOUT;
     }
 
     esp_err_t result = (s_remove_ctx.result == CHIP_NO_ERROR) ? ESP_OK : ESP_FAIL;
-    vSemaphoreDelete(s_remove_ctx.done);
+    s_remove_ctx.node_id = kNoRemoveInFlight;
     return result;
+}
+
+void matter_controller_forget_node(uint64_t node_id)
+{
+    ESP_LOGW(TAG, "Forgetting node 0x%llx locally (no RemoveFabric sent to device)",
+             (unsigned long long)node_id);
+    chip::DeviceLayer::PlatformMgr().LockChipStack();
+    node_list_remove(node_id);
+    chip::DeviceLayer::PlatformMgr().UnlockChipStack();
 }
 
 // ---------------------------------------------------------------------------
@@ -252,6 +295,18 @@ static void on_interrogation_attr(uint64_t node_id,
         else if (path.mAttributeId == kBasicInfoProductName)
             device_manager_set_product_name(node_id, str.data(), str.size());
     }
+    else if (path.mClusterId == kBridgedDeviceBasicInfoCluster &&
+             path.mAttributeId == kBridgedDeviceNodeLabel)
+    {
+        // Per-endpoint: each bridged child carries its own NodeLabel.
+        chip::CharSpan str;
+        if (data->Get(str) == CHIP_NO_ERROR)
+        {
+            // Don't depend on the Descriptor read having created the endpoint first.
+            device_manager_add_endpoint(node_id, path.mEndpointId);
+            device_manager_set_endpoint_label(node_id, path.mEndpointId, str.data(), str.size());
+        }
+    }
 }
 
 static void on_interrogation_done(uint64_t node_id,
@@ -270,7 +325,7 @@ static void interrogate_node(uint64_t node_id)
 
     chip::Platform::ScopedMemoryBufferWithSize<chip::app::AttributePathParams> attr_paths;
     chip::Platform::ScopedMemoryBufferWithSize<chip::app::EventPathParams> event_paths;
-    attr_paths.Alloc(3);
+    attr_paths.Alloc(4);
     if (!attr_paths.Get())
     {
         ESP_LOGE(TAG, "Failed to allocate attribute paths for interrogation");
@@ -282,6 +337,9 @@ static void interrogate_node(uint64_t node_id)
     // BasicInformation VendorName and ProductName from endpoint 0
     attr_paths[1] = chip::app::AttributePathParams(0, kBasicInfoCluster, kBasicInfoVendorName);
     attr_paths[2] = chip::app::AttributePathParams(0, kBasicInfoCluster, kBasicInfoProductName);
+    // BridgedDeviceBasicInformation NodeLabel on all endpoints (wildcard);
+    // present only on bridged endpoints, which is exactly where we want it.
+    attr_paths[3] = chip::app::AttributePathParams(chip::kInvalidEndpointId, kBridgedDeviceBasicInfoCluster, kBridgedDeviceNodeLabel);
 
     chip::DeviceLayer::PlatformMgr().LockChipStack();
     auto *cmd = new esp_matter::controller::read_command(

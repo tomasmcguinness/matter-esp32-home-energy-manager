@@ -375,7 +375,8 @@ void device_manager_log_structure(uint64_t node_id)
             if (bridged) {
                 const char *tag = solar      ? " [SOLAR POWER 0x0017]"       :
                                   elecSensor ? " [ELECTRICAL SENSOR 0x0510]" : "";
-                ESP_LOGI(TAG, "  endpoint %u: Bridged Node%s", ep.endpoint_id, tag);
+                ESP_LOGI(TAG, "  endpoint %u: Bridged Node \"%s\"%s",
+                         ep.endpoint_id, ep.label.c_str(), tag);
             }
         }
     } else {

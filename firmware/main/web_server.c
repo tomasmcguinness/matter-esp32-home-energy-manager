@@ -582,8 +582,12 @@ static esp_err_t device_delete_handler(httpd_req_t *req)
     esp_err_t err = matter_controller_remove_node(node_id);
     if (err != ESP_OK && err != ESP_ERR_NOT_FOUND)
     {
-        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Unpair failed");
-        return ESP_FAIL;
+        // The device is offline/unreachable, so RemoveFabric could not be sent.
+        // Honour the delete anyway: forget the node locally so a dead device can
+        // still be removed instead of being stuck forever re-subscribing.
+        ESP_LOGW(TAG, "Unpair of node 0x%llx failed (0x%x); forgetting locally",
+                 (unsigned long long)node_id, err);
+        matter_controller_forget_node(node_id);
     }
 
     err = device_manager_remove_device(node_id);
