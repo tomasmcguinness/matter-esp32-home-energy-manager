@@ -233,31 +233,6 @@ function Forecast() {
             Predicted hourly surplus, learned from the solar forecast. Green = export, red = import.
           </p>
         </div>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-          <input
-            type="date"
-            value={surplusDate}
-            onChange={e => setSurplusDate(e.target.value)}
-            style={{ padding: '7px 10px', borderRadius: 6, border: '1px solid #cbd5e1', fontSize: 13, color: '#1e293b' }}
-          />
-          <button
-            onClick={loadSurplusForecast}
-            disabled={surplusLoading}
-            style={{
-              padding: '9px 18px',
-              borderRadius: 8,
-              border: 'none',
-              background: surplusLoading ? '#cbd5e1' : '#10b981',
-              color: '#fff',
-              fontSize: 13,
-              fontWeight: 600,
-              cursor: surplusLoading ? 'not-allowed' : 'pointer',
-              transition: 'background .15s',
-            }}
-          >
-            {surplusLoading ? 'Loading…' : 'Load'}
-          </button>
-        </div>
       </div>
 
       {surplusError && (
