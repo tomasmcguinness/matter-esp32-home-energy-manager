@@ -5,6 +5,7 @@
 #include <time.h>
 #include <stdio.h>
 #include <unistd.h>
+#include <errno.h>
 
 #include "esp_http_client.h"
 #include "esp_crt_bundle.h"
@@ -25,6 +26,7 @@ static const char *TAG = "solar_forecast";
 #define DAILY_JOB_HOUR 2   // local hour at which the daily forecast job runs
 
 static esp_timer_handle_t s_daily_timer;
+static esp_timer_handle_t s_catchup_timer;   // one-shot: runs the catch-up off a foreign task
 
 // Hardcoded installation parameters — update to match site
 #define FORECAST_LAT "52.423957"
@@ -73,7 +75,7 @@ static void save_hourly_solar(const char *date, cJSON *estimates)
     snprintf(path, sizeof(path), "%s/solar-forecast-%s", SD_BASE, date);
     FILE *f = fopen(path, "wb");
     if (!f) {
-        ESP_LOGW(TAG, "Cannot write solar-forecast-%s", date);
+        ESP_LOGW(TAG, "Cannot write solar-forecast-%s: %s", date, strerror(errno));
         return;
     }
     for (int h = 0; h < 24; h++) {
@@ -245,11 +247,24 @@ static void today_date(char *buf, size_t len)
     strftime(buf, len, "%Y-%m-%d", &tm_info);
 }
 
+// True once the wall clock has been set to a real time. Before SNTP syncs,
+// time(NULL) is near 0 (the epoch), which yields bogus 1970-01-01 filenames
+// and dated writes that fail. 1700000000 == 2023-11-14, comfortably in the past.
+static bool clock_is_set(void)
+{
+    return time(NULL) > 1700000000;
+}
+
 // The nightly operation: for the current date, fetch the solar forecast, compute the
 // consumption forecast from prior data, then derive and save the surplus forecast.
 // Each writer overwrites any existing file for that date.
 esp_err_t solar_forecast_run_daily_job(void)
 {
+    if (!clock_is_set()) {
+        ESP_LOGW(TAG, "Skipping daily job — wall clock not set (SNTP not synced yet)");
+        return ESP_ERR_INVALID_STATE;
+    }
+
     char target[11];
     today_date(target, sizeof(target));
 
@@ -307,6 +322,43 @@ static void on_daily_timer(void *arg)
     schedule_next_daily_job();
 }
 
+// Run the daily job once if the current day's forecast is missing. Requires a valid
+// clock — before SNTP syncs "today" is 1970-01-01 and the dated writes fail. Safe to
+// call repeatedly: the file-existence check makes a second run a no-op. Runs on the
+// esp_timer task (same context as the scheduled job), so the HTTP fetch has stack.
+static void run_catch_up(void)
+{
+    if (!clock_is_set()) {
+        ESP_LOGW(TAG, "Clock not set — skipping forecast catch-up");
+        return;
+    }
+    char target[11];
+    today_date(target, sizeof(target));
+    char path[64];
+    snprintf(path, sizeof(path), "%s/solar-forecast-%s", SD_BASE, target);
+    if (access(path, F_OK) != 0) {
+        ESP_LOGI(TAG, "No solar forecast for %s — running daily job now", target);
+        solar_forecast_run_daily_job();
+    }
+}
+
+static void on_catchup_timer(void *arg)
+{
+    run_catch_up();
+}
+
+void solar_forecast_on_time_synced(void)
+{
+    // Called from the SNTP sync callback (a foreign task with a small stack). Defer the
+    // heavy catch-up onto the esp_timer task by arming the one-shot timer. If the daily
+    // job hasn't been initialized yet (fast sync, before solar_forecast_start_daily_job),
+    // do nothing — the boot catch-up there will cover it once the clock is valid.
+    if (!s_catchup_timer)
+        return;
+    esp_timer_stop(s_catchup_timer);            // no-op if not currently running
+    esp_timer_start_once(s_catchup_timer, 0);   // fire ASAP on the timer task
+}
+
 esp_err_t solar_forecast_start_daily_job(void)
 {
     esp_timer_create_args_t daily_args = {
@@ -318,15 +370,18 @@ esp_err_t solar_forecast_start_daily_job(void)
     if (err != ESP_OK)
         return err;
 
-    // Boot catch-up: if the current day's forecast is missing, run the job once now.
-    char target[11];
-    today_date(target, sizeof(target));
-    char path[64];
-    snprintf(path, sizeof(path), "%s/solar-forecast-%s", SD_BASE, target);
-    if (access(path, F_OK) != 0) {
-        ESP_LOGI(TAG, "No solar forecast for %s — running daily job now", target);
-        solar_forecast_run_daily_job();
-    }
+    esp_timer_create_args_t catchup_args = {
+        .callback = on_catchup_timer,
+        .arg      = NULL,
+        .name     = "solar_forecast_catchup",
+    };
+    err = esp_timer_create(&catchup_args, &s_catchup_timer);
+    if (err != ESP_OK)
+        return err;
+
+    // Boot catch-up: if SNTP synced before now, generate today's forecast immediately.
+    // Otherwise this skips and solar_forecast_on_time_synced() runs it on a late sync.
+    run_catch_up();
 
     schedule_next_daily_job();
     return ESP_OK;

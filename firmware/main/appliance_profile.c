@@ -5,6 +5,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <errno.h>
 
 #include "esp_log.h"
 #include "cJSON.h"
@@ -242,7 +243,7 @@ int appliance_profile_train(const char *graph_id, int window_days)
     snprintf(ppath, sizeof(ppath), "%s/profile-%s", SD_BASE, id);
     FILE *out = fopen(ppath, "wb");
     if (!out) {
-        ESP_LOGE(TAG, "Cannot write %s", ppath);
+        ESP_LOGE(TAG, "Cannot write %s: %s", ppath, strerror(errno));
         return st.count;
     }
     fwrite(&prof, sizeof(prof), 1, out);

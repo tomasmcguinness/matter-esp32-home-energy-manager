@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <time.h>
+#include <errno.h>
 
 #include "esp_log.h"
 #include "cJSON.h"
@@ -147,7 +148,7 @@ int surplus_model_train(int window_days)
 
     FILE *out = fopen(MODEL_PATH, "wb");
     if (!out) {
-        ESP_LOGE(TAG, "Cannot write %s", MODEL_PATH);
+        ESP_LOGE(TAG, "Cannot write %s: %s", MODEL_PATH, strerror(errno));
         return usable_days;
     }
     fwrite(&m, sizeof(m), 1, out);

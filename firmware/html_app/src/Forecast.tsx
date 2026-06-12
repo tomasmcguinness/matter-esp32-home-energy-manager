@@ -120,7 +120,6 @@ function Forecast() {
   const [surplusLoading, setSurplusLoading] = useState(false)
   const [surplusError, setSurplusError] = useState<string | null>(null)
   const [surplusResult, setSurplusResult] = useState<SurplusForecast | null>(null)
-  const [surplusDate, setSurplusDate] = useState(today())
 
   function loadSolarForecast() {
     setLoading(true)
@@ -143,7 +142,7 @@ function Forecast() {
   function loadSurplusForecast() {
     setSurplusLoading(true)
     setSurplusError(null)
-    fetch(`/api/forecast/surplus?date=${surplusDate}`)
+    fetch(`/api/forecast/surplus?date=${today()}`)
       .then(r => {
         // A 404 means a required forecast (solar or consumption) isn't ready yet —
         // that's the "still learning" state, not an error.

@@ -95,7 +95,7 @@ export function AddLoadModal({ onAdd, onCancel }: Props) {
                     <option value="">— Select a device —</option>
                     {sensors.map(s => (
                       <option key={sensorKey(s.nodeId, s.endpointId)} value={sensorKey(s.nodeId, s.endpointId)}>
-                        {s.label}
+                        {s.nodeId}: {s.label} - {s.endpointId}
                       </option>
                     ))}
                   </select>

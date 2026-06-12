@@ -36,7 +36,12 @@ static EventGroupHandle_t s_net_event_group;
 static void time_sync_cb(struct timeval *tv)
 {
     ESP_LOGI(TAG, "SNTP sync complete: %lld", (long long)tv->tv_sec);
+    bool first = !(xEventGroupGetBits(s_net_event_group) & SNTP_SYNCED_BIT);
     xEventGroupSetBits(s_net_event_group, SNTP_SYNCED_BIT);
+    // On the first sync, kick the forecast catch-up. Handles the late-sync case where
+    // the boot wait timed out and solar_forecast_start_daily_job() already skipped.
+    if (first)
+        solar_forecast_on_time_synced();
 }
 
 static void eth_event_handler(void *arg, esp_event_base_t event_base,
@@ -244,7 +249,8 @@ extern "C" void app_main(void)
     if (!(xEventGroupGetBits(s_net_event_group) & SNTP_SYNCED_BIT))
         ESP_LOGW(TAG, "SNTP sync timed out — time may be incorrect");
 
-    // Schedule the daily 2 AM forecast job now that wall-clock time is set.
+    // Schedule the daily 2 AM forecast job. If SNTP hasn't synced yet, the job and its
+    // boot catch-up self-skip until the wall clock is valid (see solar_forecast.c).
     ESP_ERROR_CHECK(solar_forecast_start_daily_job());
 
     // TODO Wait for some updates from esp-matter to ensure the P4 works 

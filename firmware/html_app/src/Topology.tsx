@@ -177,7 +177,7 @@ function BatteryNode({ data }: { data: DeviceNodeData }) {
 // loads here identically to loads on the main board.
 function SubConsumerUnitNode({ id, data }: { id: string; data: { label: string; circuits?: number } }) {
   const { updateNodeData } = useReactFlow()
-  const circuits = data.circuits ?? 4
+  const circuits = data.circuits ?? 2
 
   const setCircuits = (n: number) => {
     const next = Math.max(1, Math.min(8, n))

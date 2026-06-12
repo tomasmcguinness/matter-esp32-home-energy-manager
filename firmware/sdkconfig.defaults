@@ -100,3 +100,10 @@ CONFIG_ESP_TLS_SKIP_SERVER_CERT_VERIFY=y
 
 # Support lots of headers
 CONFIG_HTTPD_MAX_REQ_HDR_LEN=2048
+
+# SD card filenames (consumption-YYYY-MM-DD, profile-appliance_N, surplus-model, etc.)
+# exceed FAT 8.3 short names. Without long filename support, every fopen() on the SD
+# card fails with EINVAL (FR_INVALID_NAME). LFN buffer on the heap to avoid per-call
+# stack growth on the esp_timer / logger tasks.
+CONFIG_FATFS_LFN_HEAP=y
+CONFIG_FATFS_MAX_LFN=255

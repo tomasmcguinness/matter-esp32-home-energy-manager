@@ -27,6 +27,11 @@ esp_err_t solar_forecast_run_daily_job(void);
 // (boot catch-up). Call after SNTP sync.
 esp_err_t solar_forecast_start_daily_job(void);
 
+// Notify the forecaster that the wall clock has just been set (SNTP synced). If the
+// daily job is running and today's forecast is still missing, triggers the catch-up.
+// Safe to call from a callback context and before solar_forecast_start_daily_job().
+void solar_forecast_on_time_synced(void);
+
 // Read back stored hourly solar forecast. Caller must free.
 // Shape: {"date":"YYYY-MM-DD","slots":[{"hour_ts":N,"power_w":F},...]}
 char *solar_forecast_hourly_json(const char *date_str);
