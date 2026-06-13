@@ -40,6 +40,13 @@ CONFIG_ESP_MAIN_TASK_STACK_SIZE=10240
 # Increase UDP endpoints for commissioner
 CONFIG_NUM_UDP_ENDPOINTS=16
 
+# On-device commissioning is driven from the httpd thread, which (with tcpip_thread)
+# floods the CHIP event loop with ScheduleLambda calls during PASE faster than the
+# priority-1 loop drains them. The default 40-deep platform event queue overflows at
+# PASE_Pake3; _PostEvent then fails and ScheduleLambdaBridge turns that into a fatal
+# CriticalFailure/abort(). Give the queue burst headroom for the commissioning handshake.
+CONFIG_MAX_EVENT_QUEUE_SIZE=100
+
 # We're not a device
 CONFIG_ESP_MATTER_ENABLE_MATTER_SERVER=n
 
