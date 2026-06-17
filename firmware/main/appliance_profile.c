@@ -360,6 +360,35 @@ static void enumerate_appliances(appliance_visit_fn fn, void *ctx)
     cJSON_Delete(root);
 }
 
+// True if the appliance node carries settings.excludeFromScheduling == true.
+// Used by the scheduler to drop appliances the user has marked as non-deferrable
+// (e.g. a hob or oven). Defaults to false on any missing node/field or parse error.
+bool appliance_is_excluded(const char *graph_id)
+{
+    if (!graph_id) return false;
+
+    char *raw = node_manager_get_all_json();
+    if (!raw) return false;
+    cJSON *root = cJSON_Parse(raw);
+    free(raw);
+    if (!root) return false;
+
+    bool excluded = false;
+    cJSON *nodes = cJSON_GetObjectItemCaseSensitive(root, "nodes");
+    cJSON *n = NULL;
+    cJSON_ArrayForEach(n, nodes) {
+        const char *nid = json_str(n, "id");
+        if (!nid || strcmp(nid, graph_id) != 0) continue;
+        cJSON *settings = cJSON_GetObjectItemCaseSensitive(n, "settings");
+        cJSON *ex = settings ? cJSON_GetObjectItemCaseSensitive(settings, "excludeFromScheduling") : NULL;
+        excluded = cJSON_IsTrue(ex);
+        break;
+    }
+
+    cJSON_Delete(root);
+    return excluded;
+}
+
 static void train_one(const char *graph_id, const char *name, void *ctx)
 {
     (void)name;

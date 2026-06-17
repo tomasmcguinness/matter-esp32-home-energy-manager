@@ -68,6 +68,10 @@ int scheduler_compute(const char *date_str, scheduled_run_t *out, int max)
 
     int count = 0;
     for (size_t a = 0; a < na && count < max; a++) {
+        // Drop appliances the user marked non-deferrable (e.g. hob, oven) so they
+        // never enter the schedule at all.
+        if (appliance_is_excluded(ids[a])) continue;
+
         scheduled_run_t *r = &out[count];
         memset(r, 0, sizeof(*r));
         snprintf(r->graph_id, sizeof(r->graph_id), "%s", ids[a]);
@@ -127,6 +131,18 @@ int scheduler_compute(const char *date_str, scheduled_run_t *out, int max)
             }
         }
     }
+
+    // Return runs in ascending start-hour order so the schedule reads
+    // chronologically; window-less runs (start_hour < 0) sort to the bottom,
+    // keeping their enumeration order.
+    for (int i = 0; i < count; i++)
+        for (int j = i + 1; j < count; j++) {
+            int ki = out[i].start_hour >= 0 ? out[i].start_hour : SCHED_HOURS;
+            int kj = out[j].start_hour >= 0 ? out[j].start_hour : SCHED_HOURS;
+            if (kj < ki) {
+                scheduled_run_t t = out[i]; out[i] = out[j]; out[j] = t;
+            }
+        }
 
     return count;
 }

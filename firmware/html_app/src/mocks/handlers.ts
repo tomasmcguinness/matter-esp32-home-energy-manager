@@ -15,7 +15,7 @@ type EdgeConfig = { id: string; source: string; target: string; sourceHandle?: s
 let nodeConfigs: NodeConfig[] = [
   { id: 'consumer_unit', x: 0, y: 0, settings: { label: 'Consumer Unit', type: 'consumerUnit', deletable: false } },
   { id: 'grid_meter', x: -220, y: 0, settings: { label: 'Grid Meter', type: 'device', nodeId: 30001, endpointId: 1 } },
-  { id: 'node_11', x: 260, y: -40, settings: { name: 'Oven', label: 'Oven', type: 'appliance', nodeId: 20001, endpointId: 1 } },
+  { id: 'node_11', x: 260, y: -40, settings: { name: 'Oven', label: 'Oven', type: 'appliance', nodeId: 20001, endpointId: 1, excludeFromScheduling: true } },
 ]
 let edgeConfigs: EdgeConfig[] = [
   { id: 'grid_meter-power-out-consumer_unit-grid', source: 'grid_meter', target: 'consumer_unit', sourceHandle: 'power-out', targetHandle: 'grid' },

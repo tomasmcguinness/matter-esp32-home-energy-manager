@@ -1,13 +1,14 @@
 ---
 id: TASK-26
 title: 'Based on the forecast surplus, a schedule of appliance use should be generated'
-status: In Progress
+status: Done
 assignee:
   - tomas@tomasmcguinness.com
 created_date: '2026-06-10 19:54'
-updated_date: '2026-06-10 20:01'
+updated_date: '2026-06-17 09:10'
 labels: []
 dependencies: []
+ordinal: 7000
 ---
 
 ## Description

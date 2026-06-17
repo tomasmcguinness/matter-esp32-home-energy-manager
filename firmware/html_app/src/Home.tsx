@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 
-type SimpleDevice = { nodeId: number; endpointId: number; label: string; name?: string; hasElectricalSensor: boolean; hasSolarPower: boolean }
+type SimpleDevice = { nodeId: number; endpointId: number; label: string; name?: string; hasElectricalSensor: boolean; hasSolarPower: boolean; excludeFromScheduling?: boolean }
 
 type SlotProps = {
   label: string
@@ -324,6 +324,8 @@ function EditApplianceModal({ slotLabel, topologyNodeId, position, sourceHandle,
   // Track whether the user has manually edited the name, so picking a different device
   // can re-seed the default name without clobbering a custom one.
   const [nameTouched, setNameTouched] = useState<boolean>(!!initialSelected?.name)
+  // Non-deferrable appliances (hob, oven) the scheduler should ignore.
+  const [excludeFromScheduling, setExcludeFromScheduling] = useState<boolean>(initialSelected?.excludeFromScheduling ?? false)
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -365,7 +367,7 @@ function EditApplianceModal({ slotLabel, topologyNodeId, position, sourceHandle,
         x: position.x,
         y: position.y,
         // The backend replaces the whole settings object (no merge), so send every field.
-        settings: { label: selected.label, name: resolvedName, type: 'appliance', nodeId: selected.nodeId, endpointId: selected.endpointId },
+        settings: { label: selected.label, name: resolvedName, type: 'appliance', nodeId: selected.nodeId, endpointId: selected.endpointId, excludeFromScheduling },
       }),
     })
       .then(r => r.ok ? r.json() : Promise.reject(`HTTP ${r.status}`))
@@ -376,7 +378,7 @@ function EditApplianceModal({ slotLabel, topologyNodeId, position, sourceHandle,
         body: JSON.stringify({ id: edgeId, source: 'consumer_unit', sourceHandle, target: topologyNodeId, targetHandle: 'power-in' }),
       }))
       .then(r => r.ok ? r.json() : Promise.reject(`HTTP ${r.status}`))
-      .then(() => onSave({ ...selected, name: resolvedName }))
+      .then(() => onSave({ ...selected, name: resolvedName, excludeFromScheduling }))
       .catch((e: unknown) => {
         setError(e instanceof Error ? e.message : String(e))
         setSaving(false)
@@ -399,6 +401,18 @@ function EditApplianceModal({ slotLabel, topologyNodeId, position, sourceHandle,
             onChange={e => { setName(e.target.value); setNameTouched(true) }}
             style={{ width: '100%', boxSizing: 'border-box', padding: '8px 12px', borderRadius: 6, border: '1px solid #e2e8f0', fontSize: 14, color: '#1e293b' }}
           />
+        </label>
+        <label style={{ display: 'flex', alignItems: 'flex-start', gap: 8, marginBottom: 16, cursor: 'pointer' }}>
+          <input
+            type="checkbox"
+            checked={excludeFromScheduling}
+            onChange={e => setExcludeFromScheduling(e.target.checked)}
+            style={{ marginTop: 2 }}
+          />
+          <span style={{ fontSize: 13, color: '#1e293b' }}>
+            Exclude from scheduling
+            <span style={{ display: 'block', fontSize: 12, color: '#64748b' }}>For appliances like a hob or oven that can't be deferred.</span>
+          </span>
         </label>
         {error && <div style={{ marginBottom: 12, padding: '8px 12px', background: '#fef2f2', border: '1px solid #fca5a5', borderRadius: 6, fontSize: 13, color: '#b91c1c' }}>{error}</div>}
         {loading && <p style={{ fontSize: 13, color: '#94a3b8' }}>Loading devices…</p>}
@@ -524,7 +538,7 @@ function Home() {
         setAppliances(APPLIANCE_SLOTS.map((_, slot) => {
           const a = data.nodes.find(n => n.id === applianceNodeId(slot))
           if (a?.settings?.nodeId !== undefined && a.settings.endpointId !== undefined && a.settings.label) {
-            return { nodeId: a.settings.nodeId as number, endpointId: a.settings.endpointId as number, label: a.settings.label as string, name: a.settings.name as string | undefined, hasElectricalSensor: true, hasSolarPower: false }
+            return { nodeId: a.settings.nodeId as number, endpointId: a.settings.endpointId as number, label: a.settings.label as string, name: a.settings.name as string | undefined, hasElectricalSensor: true, hasSolarPower: false, excludeFromScheduling: a.settings.excludeFromScheduling === true }
           }
           return null
         }))

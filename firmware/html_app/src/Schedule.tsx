@@ -15,12 +15,12 @@ type Run = {
 }
 type Schedule = { date: string; surplus_available: boolean; runs: Run[] }
 
-// The schedule and surplus endpoints both default to tomorrow (forecasts are
-// built for the day ahead), so seed the date picker the same way.
-function tomorrow() {
+// The date picker defaults to the current (local) date. Use the local calendar
+// date rather than toISOString()'s UTC date so it matches the day the device
+// stores its forecast/schedule files under near the midnight boundary.
+function today() {
   const d = new Date()
-  d.setDate(d.getDate() + 1)
-  return d.toISOString().slice(0, 10)
+  return new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 10)
 }
 
 const PAD = { top: 16, right: 16, bottom: 36, left: 56 }
@@ -105,7 +105,7 @@ function energyLabel(wh: number) {
 }
 
 function Schedule() {
-  const [date, setDate] = useState(tomorrow())
+  const [date, setDate] = useState(today())
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [schedule, setSchedule] = useState<Schedule | null>(null)
