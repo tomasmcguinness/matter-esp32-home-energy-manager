@@ -507,7 +507,7 @@ const applianceNodeId = (slot: number) => `appliance_${slot + 1}`
 const applianceCircuitHandle = (slot: number) => `circuit_${slot + 1}`
 const applianceEdgeId = (slot: number) => `consumer_unit-${applianceCircuitHandle(slot)}-${applianceNodeId(slot)}-power-in`
 
-type SavedNode = { id: string; x?: number; y?: number; settings?: { label?: string; name?: string; type?: string; nodeId?: number; endpointId?: number } }
+type SavedNode = { id: string; x?: number; y?: number; settings?: { label?: string; name?: string; type?: string; nodeId?: number; endpointId?: number; excludeFromScheduling?: boolean } }
 
 function Home() {
   const [gridModalOpen, setGridModalOpen] = useState(false)
