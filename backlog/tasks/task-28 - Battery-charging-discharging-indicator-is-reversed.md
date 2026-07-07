@@ -4,7 +4,9 @@ title: Battery charging/discharging indicator is reversed
 status: To Do
 assignee: []
 created_date: '2026-06-17 09:10'
-labels: []
+updated_date: '2026-07-07 06:12'
+labels:
+  - BUG
 dependencies: []
 ---
 

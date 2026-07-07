@@ -57,14 +57,23 @@ static bool load_hourly_file(const char *prefix, const char *date,
 
 int surplus_model_train(int window_days)
 {
-    // Per-hour OLS accumulators (over all training days).
-    double sx[HOURS]  = {0}, sy[HOURS]  = {0};
-    double sxx[HOURS] = {0}, sxy[HOURS] = {0};
-    uint32_t n[HOURS] = {0};
+    // Accumulators are kept static, not on the stack: together they are ~4 KB,
+    // which overflows the esp_timer task stack (CONFIG_ESP_TIMER_TASK_STACK_SIZE)
+    // the nightly job runs on. Training is single-threaded (nightly), so a single
+    // shared copy is safe; we zero them explicitly at each entry since static
+    // storage is only initialised once.
+    static double   sx[HOURS], sy[HOURS], sxx[HOURS], sxy[HOURS];
+    static uint32_t n[HOURS];
 
     // Per-(hour, day-of-week) accumulators for the intercept.
-    double   bsx[HOURS][DOWS] = {{0}}, bsy[HOURS][DOWS] = {{0}};
-    uint32_t bcnt[HOURS][DOWS] = {{0}};
+    static double   bsx[HOURS][DOWS], bsy[HOURS][DOWS];
+    static uint32_t bcnt[HOURS][DOWS];
+
+    memset(sx, 0, sizeof(sx));   memset(sy, 0, sizeof(sy));
+    memset(sxx, 0, sizeof(sxx)); memset(sxy, 0, sizeof(sxy));
+    memset(n, 0, sizeof(n));
+    memset(bsx, 0, sizeof(bsx)); memset(bsy, 0, sizeof(bsy));
+    memset(bcnt, 0, sizeof(bcnt));
 
     int usable_days = 0;
 

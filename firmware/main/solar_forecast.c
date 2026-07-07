@@ -322,10 +322,15 @@ static void on_daily_timer(void *arg)
     schedule_next_daily_job();
 }
 
-// Run the daily job once if the current day's forecast is missing. Requires a valid
-// clock — before SNTP syncs "today" is 1970-01-01 and the dated writes fail. Safe to
-// call repeatedly: the file-existence check makes a second run a no-op. Runs on the
+// Run the daily job once if the current day's surplus forecast is missing. Requires a
+// valid clock — before SNTP syncs "today" is 1970-01-01 and the dated writes fail. Safe
+// to call repeatedly: the file-existence check makes a second run a no-op. Runs on the
 // esp_timer task (same context as the scheduled job), so the HTTP fetch has stack.
+//
+// We gate on the surplus file (the job's final output), not the solar forecast. The
+// solar forecast is written early in the job; gating on it would mask a run that died
+// mid-way (e.g. crashed during training) — leaving the surplus uncomputed and never
+// retried. Gating on the surplus output makes catch-up re-run any partial night.
 static void run_catch_up(void)
 {
     if (!clock_is_set()) {
@@ -335,9 +340,9 @@ static void run_catch_up(void)
     char target[11];
     today_date(target, sizeof(target));
     char path[64];
-    snprintf(path, sizeof(path), "%s/solar-forecast-%s", SD_BASE, target);
+    snprintf(path, sizeof(path), "%s/surplus-%s", SD_BASE, target);
     if (access(path, F_OK) != 0) {
-        ESP_LOGI(TAG, "No solar forecast for %s — running daily job now", target);
+        ESP_LOGI(TAG, "No surplus forecast for %s — running daily job now", target);
         solar_forecast_run_daily_job();
     }
 }
