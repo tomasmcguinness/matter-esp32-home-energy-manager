@@ -205,12 +205,24 @@ static esp_err_t devices_simple_get_handler(httpd_req_t *req)
             }
         }
 
+        // DEM is reported at node level: true if any endpoint on the device
+        // carries the Device Energy Management cluster (detected at interrogation).
+        bool has_dem = false;
+        cJSON_ArrayForEach(ep, endpoints)
+        {
+            if (cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(ep, "hasDem"))) {
+                has_dem = true;
+                break;
+            }
+        }
+
         cJSON *simple = cJSON_CreateObject();
         cJSON_AddNumberToObject(simple, "nodeId", (double)node_id);
         cJSON_AddNumberToObject(simple, "endpointId", (double)(has_solar_power ? solar_endpoint_id : endpoint_id));
         cJSON_AddStringToObject(simple, "label", "device name");
         cJSON_AddBoolToObject(simple, "hasElectricalSensor", has_electrical_sensor);
         cJSON_AddBoolToObject(simple, "hasSolarPower", has_solar_power);
+        cJSON_AddBoolToObject(simple, "hasDem", has_dem);
         cJSON_AddItemToArray(out_arr, simple);
     }
     cJSON_Delete(full);

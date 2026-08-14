@@ -5,6 +5,7 @@ export type Endpoint = {
   endpointId: number
   label: string
   included: boolean
+  hasDem?: boolean
   deviceTypes: number[]
   parts: number[]
 }
@@ -49,9 +50,11 @@ function EndpointBox({ ep }: { ep: Endpoint }) {
       }}>
         EP{ep.endpointId}: {epLabel(ep)}
       </div>
-      {ep.deviceTypes.length > 0 && (
+      {(ep.deviceTypes.length > 0 || ep.hasDem) && (
         <div style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: 4, padding: '3px 10px' }}>
-          <span style={{ fontSize: '0.73rem', color: '#666', whiteSpace: 'nowrap' }}>DeviceTypeList</span>
+          {ep.deviceTypes.length > 0 && (
+            <span style={{ fontSize: '0.73rem', color: '#666', whiteSpace: 'nowrap' }}>DeviceTypeList</span>
+          )}
           {ep.deviceTypes.map(dt => (
             <span key={dt} style={{
               background: '#2e7d32', color: '#fff',
@@ -61,6 +64,15 @@ function EndpointBox({ ep }: { ep: Endpoint }) {
               {deviceTypeName(dt)}
             </span>
           ))}
+          {ep.hasDem && (
+            <span style={{
+              background: '#1e40af', color: '#fff',
+              borderRadius: 10, padding: '1px 7px',
+              fontSize: '0.71rem', whiteSpace: 'nowrap',
+            }} title="Supports the Matter Device Energy Management cluster">
+              DEM
+            </span>
+          )}
         </div>
       )}
     </div>

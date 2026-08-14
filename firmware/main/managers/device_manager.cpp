@@ -29,6 +29,7 @@ struct endpoint_entry_t {
     uint16_t parent_endpoint_id = kNoParent;
     std::string label;
     bool included;
+    bool has_dem = false;   // Device Energy Management cluster present in ServerList
     std::vector<uint32_t> device_types;
     std::vector<uint16_t> parts;
 };
@@ -115,6 +116,8 @@ static void load_from_disk(void)
             if (cJSON_IsString(lbl)) ep.label = lbl->valuestring;
             cJSON *inc = cJSON_GetObjectItemCaseSensitive(ep_json, "included");
             ep.included = cJSON_IsTrue(inc);
+            cJSON *dem = cJSON_GetObjectItemCaseSensitive(ep_json, "hasDem");
+            ep.has_dem = cJSON_IsTrue(dem);
             cJSON *dts = cJSON_GetObjectItemCaseSensitive(ep_json, "deviceTypes");
             cJSON *dt_json = nullptr;
             cJSON_ArrayForEach(dt_json, dts) {
@@ -234,6 +237,16 @@ esp_err_t device_manager_add_device_type(uint64_t node_id, uint16_t endpoint_id,
     return ep ? ESP_OK : ESP_ERR_NOT_FOUND;
 }
 
+esp_err_t device_manager_set_endpoint_dem(uint64_t node_id, uint16_t endpoint_id, bool has_dem)
+{
+    xSemaphoreTake(s_mutex, portMAX_DELAY);
+    auto *dev = find_device(node_id);
+    auto *ep  = find_endpoint(dev, endpoint_id);
+    if (ep) ep->has_dem = has_dem;
+    xSemaphoreGive(s_mutex);
+    return ep ? ESP_OK : ESP_ERR_NOT_FOUND;
+}
+
 esp_err_t device_manager_set_endpoint_label(uint64_t node_id, uint16_t endpoint_id,
                                              const char *label, size_t len)
 {
@@ -296,6 +309,7 @@ char *device_manager_get_all_json(void)
                 cJSON_AddNumberToObject(eobj, "parentEndpointId", ep.parent_endpoint_id);
             cJSON_AddStringToObject(eobj, "label", ep.label.c_str());
             cJSON_AddBoolToObject(eobj, "included", ep.included);
+            cJSON_AddBoolToObject(eobj, "hasDem", ep.has_dem);
             cJSON *dts = cJSON_AddArrayToObject(eobj, "deviceTypes");
             for (auto dt : ep.device_types) {
                 cJSON_AddItemToArray(dts, cJSON_CreateNumber((double)dt));
@@ -520,6 +534,7 @@ esp_err_t device_manager_persist(void)
                 cJSON_AddNumberToObject(eobj, "parentEndpointId", ep.parent_endpoint_id);
             cJSON_AddStringToObject(eobj, "label", ep.label.c_str());
             cJSON_AddBoolToObject(eobj, "included", ep.included);
+            cJSON_AddBoolToObject(eobj, "hasDem", ep.has_dem);
             cJSON *dts = cJSON_AddArrayToObject(eobj, "deviceTypes");
             for (auto dt : ep.device_types) {
                 cJSON_AddItemToArray(dts, cJSON_CreateNumber((double)dt));

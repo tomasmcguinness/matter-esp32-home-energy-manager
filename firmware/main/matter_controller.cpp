@@ -64,7 +64,11 @@ static esp_timer_handle_t s_ws_broadcast_timer = nullptr;
 
 static constexpr uint32_t kDescriptorCluster = 0x001D;
 static constexpr uint32_t kDescriptorDeviceTypeList = 0x0000;
+static constexpr uint32_t kDescriptorServerList = 0x0001;
 static constexpr uint32_t kDescriptorPartsList = 0x0003;
+// Device Energy Management cluster. Its presence in an endpoint's ServerList is
+// how we detect that a commissioned appliance supports DEM (deferrable load).
+static constexpr uint32_t kClusterDeviceEnergyManagement = 0x0098;
 static constexpr uint32_t kBasicInfoCluster = 0x0028;
 static constexpr uint32_t kBasicInfoVendorName = 0x0002;
 static constexpr uint32_t kBasicInfoProductName = 0x0004;
@@ -257,6 +261,25 @@ static void on_interrogation_attr(uint64_t node_id,
                 {
                     device_manager_add_endpoint(node_id, ep_id);
                     device_manager_add_endpoint_part(node_id, path.mEndpointId, ep_id);
+                }
+            }
+            data->ExitContainer(outer);
+        }
+        else if (path.mAttributeId == kDescriptorServerList)
+        {
+            // ServerList enumerates the clusters this endpoint implements. We
+            // only care whether Device Energy Management (0x0098) is present.
+            device_manager_add_endpoint(node_id, path.mEndpointId);
+            chip::TLV::TLVType outer;
+            if (data->EnterContainer(outer) != CHIP_NO_ERROR)
+                return;
+            while (data->Next() == CHIP_NO_ERROR)
+            {
+                uint32_t cluster_id = 0;
+                if (data->Get(cluster_id) == CHIP_NO_ERROR &&
+                    cluster_id == kClusterDeviceEnergyManagement)
+                {
+                    device_manager_set_endpoint_dem(node_id, path.mEndpointId, true);
                 }
             }
             data->ExitContainer(outer);

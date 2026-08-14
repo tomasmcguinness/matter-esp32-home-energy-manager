@@ -17,10 +17,15 @@ type ApplianceProfile = {
 }
 type ProfilesResponse = { appliances: ApplianceProfile[] }
 
-type NodeConfig = { id: string; settings?: { name?: string; label?: string } }
+type NodeConfig = { id: string; settings?: { name?: string; label?: string; nodeId?: number } }
 type NodesResponse = { nodes: NodeConfig[] }
 
-type Appliance = ApplianceProfile & { name: string }
+// One entry per commissioned Matter device; hasDem is true when any of its
+// endpoints implements the Device Energy Management cluster.
+type SimpleDevice = { nodeId: number; hasDem?: boolean }
+type SimpleDevicesResponse = { devices: SimpleDevice[] }
+
+type Appliance = ApplianceProfile & { name: string; dem: boolean }
 
 function formatPower(w: number) {
   return w >= 1000 ? `${(w / 1000).toFixed(2)} kW` : `${Math.round(w)} W`
@@ -121,15 +126,26 @@ function ApplianceCard({ a }: { a: Appliance }) {
     <div style={{ border: '1px solid #e2e8f0', borderRadius: 10, padding: '18px 20px' }}>
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: learned ? 16 : 8 }}>
         <h2 style={{ margin: 0, fontSize: 17, fontWeight: 700, color: '#1e293b' }}>{a.name}</h2>
-        <span style={{
-          fontSize: 11, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '.06em',
-          padding: '3px 10px', borderRadius: 999,
-          background: learned ? '#f0fdf4' : '#fffbeb',
-          color: learned ? '#166534' : '#92400e',
-          border: `1px solid ${learned ? '#86efac' : '#fde68a'}`,
-        }}>
-          {learned ? 'Trained' : 'Learning'}
-        </span>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+          {a.dem && (
+            <span style={{
+              fontSize: 11, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '.06em',
+              padding: '3px 10px', borderRadius: 999,
+              background: '#eff6ff', color: '#1e40af', border: '1px solid #bfdbfe',
+            }} title="Supports the Matter Device Energy Management cluster">
+              DEM
+            </span>
+          )}
+          <span style={{
+            fontSize: 11, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '.06em',
+            padding: '3px 10px', borderRadius: 999,
+            background: learned ? '#f0fdf4' : '#fffbeb',
+            color: learned ? '#166534' : '#92400e',
+            border: `1px solid ${learned ? '#86efac' : '#fde68a'}`,
+          }}>
+            {learned ? 'Trained' : 'Learning'}
+          </span>
+        </div>
       </div>
 
       {!learned ? (
@@ -177,13 +193,25 @@ function Appliances() {
         r.ok ? (r.json() as Promise<ProfilesResponse>) : r.text().then(t => Promise.reject(t))),
       fetch('/api/nodes').then(r =>
         r.ok ? (r.json() as Promise<NodesResponse>) : r.text().then(t => Promise.reject(t))),
+      fetch('/api/devices/simple').then(r =>
+        r.ok ? (r.json() as Promise<SimpleDevicesResponse>) : r.text().then(t => Promise.reject(t))),
     ])
-      .then(([profiles, topology]) => {
+      .then(([profiles, topology, devices]) => {
         const names = new Map<string, string>()
+        const nodeMatterId = new Map<string, number>()
         for (const n of topology.nodes) {
           names.set(n.id, n.settings?.name || n.settings?.label || n.id)
+          if (n.settings?.nodeId !== undefined) nodeMatterId.set(n.id, n.settings.nodeId)
         }
-        setAppliances(profiles.appliances.map(p => ({ ...p, name: names.get(p.graph_id) || p.graph_id })))
+        const demByMatterId = new Map<number, boolean>()
+        for (const d of devices.devices) {
+          if (d.hasDem) demByMatterId.set(d.nodeId, true)
+        }
+        setAppliances(profiles.appliances.map(p => ({
+          ...p,
+          name: names.get(p.graph_id) || p.graph_id,
+          dem: demByMatterId.get(nodeMatterId.get(p.graph_id) ?? -1) ?? false,
+        })))
         setLoading(false)
       })
       .catch((e: unknown) => { setError(String(e)); setLoading(false) })

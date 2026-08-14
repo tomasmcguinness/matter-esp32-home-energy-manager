@@ -47,7 +47,7 @@ let devices: Device[] = [
     hasSubscription: true,
     endpoints: [
       { endpointId: 0, label: 'Root Node',   included: false, deviceTypes: [0x0016], parts: [1] },
-      { endpointId: 1, label: 'Grid Meter',  included: true,  deviceTypes: [0x0512], parts: [2] },
+      { endpointId: 1, label: 'Grid Meter',  included: true,  deviceTypes: [0x0512], parts: [2], hasDem: true },
       { endpointId: 2, label: 'Grid Sensor', included: false, deviceTypes: [0x0510], parts: [] },
     ],
   },
@@ -90,11 +90,13 @@ export const handlers = [
       const candidates = ep0Parts.length > 0
         ? d.endpoints.filter(e => ep0Parts.includes(e.endpointId))
         : d.endpoints.filter(e => e.endpointId !== 0)
+      // DEM is node-level: true if any endpoint on the device carries the flag.
+      const hasDem = d.endpoints.some(e => e.hasDem)
       return candidates.map(ep => {
         const partEps = (ep.parts ?? []).map(id => d.endpoints.find(e => e.endpointId === id)).filter(Boolean)
         const hasElectricalSensor = [ep, ...partEps].some(e => e?.deviceTypes?.includes(ELECTRICAL_SENSOR_DT))
         const hasSolarPower = [ep, ...partEps].some(e => e?.deviceTypes?.includes(SOLAR_POWER_DT))
-        return { nodeId: d.nodeId, endpointId: ep.endpointId, label: ep.label || `EP${ep.endpointId}`, hasElectricalSensor, hasSolarPower }
+        return { nodeId: d.nodeId, endpointId: ep.endpointId, label: ep.label || `EP${ep.endpointId}`, hasElectricalSensor, hasSolarPower, hasDem }
       })
     })
     return HttpResponse.json({ devices: simpleDevices })
