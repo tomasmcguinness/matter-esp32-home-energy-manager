@@ -1,0 +1,224 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Power Flow Visualizer v1</title>
+<style>
+  body { font-family: system-ui, -apple-system, sans-serif; background: #fff; color: #333; margin: 2rem; }
+  label { font-size: 13px; color: #666; }
+  button { font-size: 12px; padding: 3px 10px; background: transparent; border: 1px solid #ccc; border-radius: 6px; cursor: pointer; }
+  button:hover { background: #f0f0f0; }
+  input[type=range] { width: 90px; }
+</style>
+</head>
+<body>
+<div style="display: flex; align-items: center; gap: 16px; margin-bottom: 12px; flex-wrap: wrap;">
+  <div style="display: flex; align-items: center; gap: 8px;">
+    <label>Speed</label>
+    <input type="range" min="20" max="200" value="80" id="speed" />
+  </div>
+  <div style="display: flex; align-items: center; gap: 8px;">
+    <label>Spacing</label>
+    <input type="range" min="15" max="60" value="30" id="spacing" />
+  </div>
+  <div style="display: flex; align-items: center; gap: 8px;">
+    <label>Size</label>
+    <input type="range" min="4" max="16" value="8" id="chevSize" />
+  </div>
+</div>
+<div style="display: flex; align-items: center; gap: 12px; margin-bottom: 12px; flex-wrap: wrap;">
+  <div style="display: flex; align-items: center; gap: 6px;">
+    <span style="font-size: 13px; color: #666;">Draw as:</span>
+    <button id="modeIn" style="background: #FCEBEB; color: #A32D2D; border-color: #F09595;">In</button>
+    <button id="modeOut">Out</button>
+  </div>
+  <button id="clearBtn">Clear all</button>
+  <div style="display: flex; align-items: center; gap: 10px; margin-left: auto; font-size: 12px; color: #999;">
+    <span style="display:flex;align-items:center;gap:4px;"><span style="display:inline-block;width:10px;height:10px;border-radius:2px;background:#E24B4A;"></span> Power in (grid)</span>
+    <span style="display:flex;align-items:center;gap:4px;"><span style="display:inline-block;width:10px;height:10px;border-radius:2px;background:#639922;"></span> Power out (free)</span>
+  </div>
+</div>
+<div style="position: relative; border: 1px solid #ddd; border-radius: 8px; overflow: hidden; cursor: crosshair; background: #f8f8f6; display: inline-block;">
+  <canvas id="c" width="680" height="420"></canvas>
+</div>
+<div id="lineList" style="margin-top: 10px; display: flex; flex-wrap: wrap; gap: 6px;"></div>
+<p style="font-size: 12px; color: #999; margin-top: 8px;">Draw wires on the canvas. Click a wire label below to toggle its direction.</p>
+
+<script>
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+const speedEl = document.getElementById('speed');
+const spacingEl = document.getElementById('spacing');
+const chevSizeEl = document.getElementById('chevSize');
+const modeInBtn = document.getElementById('modeIn');
+const modeOutBtn = document.getElementById('modeOut');
+const clearBtn = document.getElementById('clearBtn');
+const lineListEl = document.getElementById('lineList');
+
+const IN_COLOR = { r: 226, g: 75, b: 74, line: 'rgba(226,75,74,0.3)' };
+const OUT_COLOR = { r: 99, g: 153, b: 34, line: 'rgba(99,153,34,0.3)' };
+const IN_LABEL = { bg: '#FCEBEB', color: '#A32D2D', border: '#F09595' };
+const OUT_LABEL = { bg: '#EAF3DE', color: '#3B6D11', border: '#97C459' };
+
+let lines = [];
+let currentLine = null;
+let isDrawing = false;
+let drawMode = 'in';
+let offset = 0;
+let wireCounter = 0;
+
+modeInBtn.addEventListener('click', () => setDrawMode('in'));
+modeOutBtn.addEventListener('click', () => setDrawMode('out'));
+clearBtn.addEventListener('click', () => { lines = []; currentLine = null; wireCounter = 0; rebuildLineList(); });
+
+function setDrawMode(m) {
+  drawMode = m;
+  if (m === 'in') {
+    modeInBtn.style.background = IN_LABEL.bg; modeInBtn.style.color = IN_LABEL.color; modeInBtn.style.borderColor = IN_LABEL.border;
+    modeOutBtn.style.background = ''; modeOutBtn.style.color = ''; modeOutBtn.style.borderColor = '';
+  } else {
+    modeOutBtn.style.background = OUT_LABEL.bg; modeOutBtn.style.color = OUT_LABEL.color; modeOutBtn.style.borderColor = OUT_LABEL.border;
+    modeInBtn.style.background = ''; modeInBtn.style.color = ''; modeInBtn.style.borderColor = '';
+  }
+}
+setDrawMode('in');
+
+function getPos(e) {
+  const r = canvas.getBoundingClientRect();
+  const sx = canvas.width / r.width, sy = canvas.height / r.height;
+  const cx = e.touches ? e.touches[0].clientX : e.clientX;
+  const cy = e.touches ? e.touches[0].clientY : e.clientY;
+  return { x: (cx - r.left) * sx, y: (cy - r.top) * sy };
+}
+
+canvas.addEventListener('mousedown', e => {
+  isDrawing = true;
+  const p = getPos(e);
+  currentLine = { points: [p], lengths: [0], totalLength: 0, direction: drawMode, name: 'Wire ' + (++wireCounter) };
+});
+canvas.addEventListener('mousemove', e => {
+  if (!isDrawing || !currentLine) return;
+  const p = getPos(e);
+  const prev = currentLine.points[currentLine.points.length - 1];
+  const dx = p.x - prev.x, dy = p.y - prev.y;
+  const d = Math.sqrt(dx * dx + dy * dy);
+  if (d > 3) {
+    currentLine.points.push(p);
+    currentLine.totalLength += d;
+    currentLine.lengths.push(currentLine.totalLength);
+  }
+});
+canvas.addEventListener('mouseup', () => {
+  if (currentLine && currentLine.points.length > 2) {
+    lines.push(currentLine);
+    rebuildLineList();
+  } else { wireCounter--; }
+  currentLine = null;
+  isDrawing = false;
+});
+canvas.addEventListener('touchstart', e => { e.preventDefault(); canvas.dispatchEvent(new MouseEvent('mousedown', e.touches[0])); }, { passive: false });
+canvas.addEventListener('touchmove', e => { e.preventDefault(); canvas.dispatchEvent(new MouseEvent('mousemove', e.touches[0])); }, { passive: false });
+canvas.addEventListener('touchend', () => { canvas.dispatchEvent(new MouseEvent('mouseup')); });
+
+function rebuildLineList() {
+  lineListEl.innerHTML = '';
+  lines.forEach((line, i) => {
+    const btn = document.createElement('button');
+    const lb = line.direction === 'in' ? IN_LABEL : OUT_LABEL;
+    btn.textContent = line.name + ' (' + line.direction + ')';
+    btn.style.cssText = 'font-size:11px;padding:2px 8px;background:' + lb.bg + ';color:' + lb.color + ';border:1px solid ' + lb.border + ';border-radius:4px;cursor:pointer;';
+    btn.addEventListener('click', () => {
+      line.direction = line.direction === 'in' ? 'out' : 'in';
+      rebuildLineList();
+    });
+    lineListEl.appendChild(btn);
+  });
+}
+
+function getPointAtLength(line, len) {
+  if (len <= 0) return { x: line.points[0].x, y: line.points[0].y, angle: 0 };
+  if (len >= line.totalLength) {
+    const n = line.points.length;
+    const p = line.points[n - 1], pp = line.points[n - 2];
+    return { x: p.x, y: p.y, angle: Math.atan2(p.y - pp.y, p.x - pp.x) };
+  }
+  for (let i = 1; i < line.lengths.length; i++) {
+    if (line.lengths[i] >= len) {
+      const segLen = line.lengths[i] - line.lengths[i - 1];
+      const t = (len - line.lengths[i - 1]) / segLen;
+      const a = line.points[i - 1], b = line.points[i];
+      return {
+        x: a.x + (b.x - a.x) * t,
+        y: a.y + (b.y - a.y) * t,
+        angle: Math.atan2(b.y - a.y, b.x - a.x)
+      };
+    }
+  }
+  return { x: line.points[0].x, y: line.points[0].y, angle: 0 };
+}
+
+function drawChevron(x, y, angle, size, col) {
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.rotate(angle);
+  ctx.beginPath();
+  ctx.moveTo(-size, -size * 0.7);
+  ctx.lineTo(0, 0);
+  ctx.lineTo(-size, size * 0.7);
+  ctx.strokeStyle = 'rgba(' + col.r + ',' + col.g + ',' + col.b + ',0.8)';
+  ctx.lineWidth = 2;
+  ctx.lineCap = 'round';
+  ctx.lineJoin = 'round';
+  ctx.stroke();
+  ctx.restore();
+}
+
+function drawLine(line) {
+  const col = line.direction === 'in' ? IN_COLOR : OUT_COLOR;
+  ctx.beginPath();
+  ctx.moveTo(line.points[0].x, line.points[0].y);
+  for (let i = 1; i < line.points.length; i++) ctx.lineTo(line.points[i].x, line.points[i].y);
+  ctx.strokeStyle = col.line;
+  ctx.lineWidth = 2.5;
+  ctx.lineCap = 'round';
+  ctx.lineJoin = 'round';
+  ctx.stroke();
+}
+
+function render() {
+  const speed = Number(speedEl.value);
+  const spacing = Number(spacingEl.value);
+  const size = Number(chevSizeEl.value);
+
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+  const allLines = currentLine && currentLine.points.length > 1 ? [...lines, currentLine] : lines;
+
+  for (const line of allLines) drawLine(line);
+
+  for (let li = 0; li < allLines.length; li++) {
+    const line = allLines[li];
+    if (line.totalLength < spacing) continue;
+    const col = line.direction === 'in' ? IN_COLOR : OUT_COLOR;
+    const fwd = line.direction === 'in';
+    const dir = fwd ? 1 : -1;
+    const off = (offset * dir) % spacing;
+
+    for (let d = off; d < line.totalLength + spacing; d += spacing) {
+      let len = d % line.totalLength;
+      if (len < 0) len += line.totalLength;
+      const pt = getPointAtLength(line, len);
+      const a = fwd ? pt.angle : pt.angle + Math.PI;
+      drawChevron(pt.x, pt.y, a, size, col);
+    }
+  }
+
+  offset += speed * 0.016;
+  requestAnimationFrame(render);
+}
+
+requestAnimationFrame(render);
+</script>
+</body>
+</html>

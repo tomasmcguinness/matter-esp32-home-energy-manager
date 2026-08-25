@@ -4,12 +4,12 @@ title: 'Web UI: Commissioning flow and bridged device selection'
 status: To Do
 assignee: []
 created_date: '2026-04-29 12:28'
+updated_date: '2026-05-05 05:46'
 labels:
   - web-ui
   - matter
   - commissioning
-dependencies:
-  - TASK-4.1
+dependencies: []
 references:
   - ~/development/matter-esp32-heating-monitor/html_app/src/Devices.tsx
   - ~/development/matter-esp32-heating-monitor/html_app/src/AddDevice.tsx

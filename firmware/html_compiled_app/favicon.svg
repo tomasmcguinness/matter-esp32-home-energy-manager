@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
+  <!-- House -->
+  <polygon points="16,3 30,15 26,15 26,29 6,29 6,15 2,15" fill="#1e40af" stroke="none"/>
+  <!-- Lightning bolt -->
+  <polygon points="18,10 13,19 16,19 14,27 20,17 17,17" fill="#fbbf24" stroke="none"/>
+</svg>

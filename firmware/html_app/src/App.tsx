@@ -1,9 +1,16 @@
 import { NavLink, Routes, Route } from 'react-router'
 import './App.css'
 import Home from './Home.tsx'
-import Settings from './Settings.tsx'
+import Topology from './Topology.tsx'
 import Devices from './Devices.tsx'
-import DeviceEndpoints from './DeviceEndpoints.tsx'
+import Power from './Power.tsx'
+import Forecast from './Forecast.tsx'
+import Schedule from './Schedule.tsx'
+import Settings from './Settings.tsx'
+import Test from './Test.tsx'
+import Appliances from './Appliances.tsx'
+
+import '@xyflow/react/dist/style.css';
 
 function App() {
   return (
@@ -20,23 +27,44 @@ function App() {
                 <NavLink className="nav-link" to="/">Home</NavLink>
               </li>
               <li className="nav-item">
+                <NavLink className="nav-link" to="/topology">Topology</NavLink>
+              </li>
+              <li className="nav-item">
+                <NavLink className="nav-link" to="/appliances">Appliances</NavLink>
+              </li>
+              <li className="nav-item">
+                <NavLink className="nav-link" to="/power">Power</NavLink>
+              </li>
+              <li className="nav-item">
+                <NavLink className="nav-link" to="/forecast">Forecast</NavLink>
+              </li>
+              <li className="nav-item">
+                <NavLink className="nav-link" to="/schedule">Schedule</NavLink>
+              </li>
+              <li className="nav-item">
                 <NavLink className="nav-link" to="/devices">Devices</NavLink>
               </li>
               <li className="nav-item">
                 <NavLink className="nav-link" to="/settings">Settings</NavLink>
               </li>
+              <li className="nav-item">
+                <NavLink className="nav-link" to="/test">Test</NavLink>
+              </li>
             </ul>
           </div>
         </div>
       </nav>
-      <div className="container">
-        <Routes>
-          <Route path="/" element={<Home />} />
-          <Route path="/devices" element={<Devices />} />
-          <Route path="/devices/:nodeId" element={<DeviceEndpoints />} />
-          <Route path="/settings" element={<Settings />} />
-        </Routes>
-      </div>
+      <Routes>
+        <Route path="/" element={<div className="container"><Home /></div>} />
+        <Route path="/topology" element={<Topology />} />
+        <Route path="/appliances" element={<div className="container"><Appliances /></div>} />
+        <Route path="/power" element={<div className="container"><Power /></div>} />
+        <Route path="/forecast" element={<div className="container"><Forecast /></div>} />
+        <Route path="/schedule" element={<div className="container"><Schedule /></div>} />
+        <Route path="/devices" element={<div className="container"><Devices /></div>} />
+        <Route path="/settings" element={<div className="container"><Settings /></div>} />
+        <Route path="/test" element={<div className="container"><Test /></div>} />
+      </Routes>
     </>
   )
 }

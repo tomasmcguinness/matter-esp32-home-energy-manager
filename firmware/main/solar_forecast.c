@@ -1,0 +1,393 @@
+#include "solar_forecast.h"
+
+#include <stdlib.h>
+#include <string.h>
+#include <time.h>
+#include <stdio.h>
+#include <unistd.h>
+#include <errno.h>
+
+#include "esp_http_client.h"
+#include "esp_crt_bundle.h"
+#include "esp_log.h"
+#include "esp_timer.h"
+#include "cJSON.h"
+
+#include "power_logger.h"
+#include "consumption_forecast.h"
+#include "surplus_forecast.h"
+#include "surplus_model.h"
+#include "appliance_profile.h"
+
+static const char *TAG = "solar_forecast";
+
+#define SD_BASE "/sdcard"
+
+#define DAILY_JOB_HOUR 2   // local hour at which the daily forecast job runs
+
+static esp_timer_handle_t s_daily_timer;
+static esp_timer_handle_t s_catchup_timer;   // one-shot: runs the catch-up off a foreign task
+
+// Hardcoded installation parameters — update to match site
+#define FORECAST_LAT "52.423957"
+#define FORECAST_LON "-1.7856016"
+#define FORECAST_DEC "45"    // panel tilt in degrees (0=flat, 90=vertical)
+#define FORECAST_AZ  "0"     // azimuth: 0=south, -90=east, 90=west
+#define FORECAST_KWP "4.8"   // installed peak power in kWp
+
+#define FORECAST_URL \
+    "https://api.forecast.solar/estimate/" \
+    FORECAST_LAT "/" FORECAST_LON "/" FORECAST_DEC "/" FORECAST_AZ "/" FORECAST_KWP
+
+#define INITIAL_BUF_CAP 4096
+
+typedef struct {
+    char *data;
+    int   len;
+    int   cap;
+} resp_buf_t;
+
+static void save_hourly_solar(const char *date, cJSON *estimates)
+{
+    int64_t  sum_mw[24] = {0};
+    uint32_t count[24]  = {0};
+
+    struct tm midnight_tm = {0};
+    strptime(date, "%Y-%m-%d", &midnight_tm);
+    midnight_tm.tm_hour = 0;
+    midnight_tm.tm_min  = 0;
+    midnight_tm.tm_sec  = 0;
+    time_t midnight = mktime(&midnight_tm);
+
+    cJSON *est;
+    cJSON_ArrayForEach(est, estimates) {
+        cJSON *t = cJSON_GetObjectItemCaseSensitive(est, "time");
+        cJSON *w = cJSON_GetObjectItemCaseSensitive(est, "watts");
+        if (!cJSON_IsString(t) || !cJSON_IsNumber(w)) continue;
+        int h = 0, m = 0;
+        sscanf(t->valuestring, "%d:%d", &h, &m);
+        if (h < 0 || h > 23) continue;
+        sum_mw[h] += (int64_t)(w->valuedouble * 1000.0);
+        count[h]++;
+    }
+
+    char path[64];
+    snprintf(path, sizeof(path), "%s/solar-forecast-%s", SD_BASE, date);
+    FILE *f = fopen(path, "wb");
+    if (!f) {
+        ESP_LOGW(TAG, "Cannot write solar-forecast-%s: %s", date, strerror(errno));
+        return;
+    }
+    for (int h = 0; h < 24; h++) {
+        power_record_t rec = {
+            .unix_minute = (uint32_t)(midnight + h * 3600),
+            .power_mw    = count[h] ? (int32_t)(sum_mw[h] / count[h]) : 0,
+        };
+        fwrite(&rec, sizeof(rec), 1, f);
+    }
+    fclose(f);
+    ESP_LOGI(TAG, "Saved hourly solar forecast for %s", date);
+}
+
+static esp_err_t http_event_handler(esp_http_client_event_t *evt)
+{
+    if (evt->event_id != HTTP_EVENT_ON_DATA) return ESP_OK;
+
+    resp_buf_t *b = evt->user_data;
+    if (b->len + evt->data_len >= b->cap) {
+        int new_cap = b->cap * 2 + evt->data_len;
+        char *tmp = realloc(b->data, new_cap + 1);
+        if (!tmp) return ESP_ERR_NO_MEM;
+        b->data = tmp;
+        b->cap  = new_cap;
+    }
+    memcpy(b->data + b->len, evt->data, evt->data_len);
+    b->len += evt->data_len;
+    return ESP_OK;
+}
+
+esp_err_t solar_forecast_fetch(const char *target_date, cJSON **out_json)
+{
+    resp_buf_t buf = {
+        .data = malloc(INITIAL_BUF_CAP + 1),
+        .len  = 0,
+        .cap  = INITIAL_BUF_CAP,
+    };
+    if (!buf.data) return ESP_ERR_NO_MEM;
+
+    esp_http_client_config_t cfg = {
+        .url               = FORECAST_URL,
+        .event_handler     = http_event_handler,
+        .user_data         = &buf,
+        .timeout_ms        = 15000,
+        .crt_bundle_attach = esp_crt_bundle_attach,
+    };
+
+    esp_http_client_handle_t client = esp_http_client_init(&cfg);
+    if (!client) {
+        free(buf.data);
+        return ESP_FAIL;
+    }
+
+    esp_err_t err = esp_http_client_perform(client);
+    int status    = esp_http_client_get_status_code(client);
+    esp_http_client_cleanup(client);
+
+    if (err != ESP_OK || status != 200) {
+        ESP_LOGE(TAG, "request failed err=0x%x status=%d", err, status);
+        free(buf.data);
+        return ESP_FAIL;
+    }
+
+    buf.data[buf.len] = '\0';
+
+    // Parse the full forecast.solar response
+    cJSON *raw = cJSON_Parse(buf.data);
+    free(buf.data);
+    if (!raw) {
+        ESP_LOGE(TAG, "JSON parse failed");
+        return ESP_FAIL;
+    }
+
+    // Extract result.watts  — keys are "YYYY-MM-DD HH:MM:SS"
+    cJSON *result  = cJSON_GetObjectItemCaseSensitive(raw, "result");
+    cJSON *watts   = cJSON_GetObjectItemCaseSensitive(result, "watts");
+    cJSON *wh_day  = cJSON_GetObjectItemCaseSensitive(result, "watt_hours_day");
+
+    cJSON *out = cJSON_CreateObject();
+    cJSON_AddStringToObject(out, "date", target_date);
+
+    cJSON *estimates = cJSON_AddArrayToObject(out, "estimates");
+
+    if (cJSON_IsObject(watts)) {
+        cJSON *entry;
+        cJSON_ArrayForEach(entry, watts) {
+            // Key format: "2024-01-15 09:00:00" — only include target_date's entries
+            const char *key = entry->string;
+            if (!key || strlen(key) < 16) continue;
+            if (strncmp(key, target_date, 10) != 0) continue;
+
+            // Extract "HH:MM" from the key
+            char time_str[6];
+            strncpy(time_str, key + 11, 5);
+            time_str[5] = '\0';
+
+            cJSON *point = cJSON_CreateObject();
+            cJSON_AddStringToObject(point, "time", time_str);
+            cJSON_AddNumberToObject(point, "watts", entry->valuedouble);
+            cJSON_AddItemToArray(estimates, point);
+        }
+    }
+
+    int total_wh = 0;
+    if (cJSON_IsObject(wh_day)) {
+        cJSON *day_entry = cJSON_GetObjectItemCaseSensitive(wh_day, target_date);
+        if (day_entry) {
+            total_wh = (int)day_entry->valuedouble;
+        }
+    }
+    cJSON_AddNumberToObject(out, "total_wh", total_wh);
+
+    cJSON_Delete(raw);
+
+    save_hourly_solar(target_date, estimates);
+
+    *out_json = out;
+    return ESP_OK;
+}
+
+esp_err_t solar_forecast_fetch_tomorrow(cJSON **out_json)
+{
+    // Normalise to today's midnight then advance one day. mktime handles DST.
+    time_t now = time(NULL);
+    struct tm tm_info;
+    localtime_r(&now, &tm_info);
+    tm_info.tm_hour = 0;
+    tm_info.tm_min  = 0;
+    tm_info.tm_sec  = 0;
+    tm_info.tm_mday += 1;
+    mktime(&tm_info);
+    char tomorrow[11];
+    strftime(tomorrow, sizeof(tomorrow), "%Y-%m-%d", &tm_info);
+
+    return solar_forecast_fetch(tomorrow, out_json);
+}
+
+char *solar_forecast_hourly_json(const char *date_str)
+{
+    char path[64];
+    snprintf(path, sizeof(path), "%s/solar-forecast-%s", SD_BASE, date_str);
+
+    cJSON *root = cJSON_CreateObject();
+    cJSON_AddStringToObject(root, "date", date_str);
+    cJSON *slots = cJSON_AddArrayToObject(root, "slots");
+
+    FILE *f = fopen(path, "rb");
+    if (f) {
+        power_record_t rec;
+        while (fread(&rec, sizeof(rec), 1, f) == 1) {
+            cJSON *obj = cJSON_CreateObject();
+            cJSON_AddNumberToObject(obj, "hour_ts", (double)rec.unix_minute);
+            cJSON_AddNumberToObject(obj, "power_w",  rec.power_mw / 1000.0);
+            cJSON_AddItemToArray(slots, obj);
+        }
+        fclose(f);
+    }
+
+    char *json = cJSON_PrintUnformatted(root);
+    cJSON_Delete(root);
+    return json; // caller must free
+}
+
+static void today_date(char *buf, size_t len)
+{
+    time_t now = time(NULL);
+    struct tm tm_info;
+    localtime_r(&now, &tm_info);
+    strftime(buf, len, "%Y-%m-%d", &tm_info);
+}
+
+// True once the wall clock has been set to a real time. Before SNTP syncs,
+// time(NULL) is near 0 (the epoch), which yields bogus 1970-01-01 filenames
+// and dated writes that fail. 1700000000 == 2023-11-14, comfortably in the past.
+static bool clock_is_set(void)
+{
+    return time(NULL) > 1700000000;
+}
+
+// The nightly operation: for the current date, fetch the solar forecast, compute the
+// consumption forecast from prior data, then derive and save the surplus forecast.
+// Each writer overwrites any existing file for that date.
+esp_err_t solar_forecast_run_daily_job(void)
+{
+    if (!clock_is_set()) {
+        ESP_LOGW(TAG, "Skipping daily job — wall clock not set (SNTP not synced yet)");
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    char target[11];
+    today_date(target, sizeof(target));
+
+    cJSON *forecast = NULL;
+    esp_err_t err = solar_forecast_fetch(target, &forecast);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "Daily solar fetch for %s failed: 0x%x", target, err);
+        return err;
+    }
+    cJSON_Delete(forecast);
+
+    // Refit the surplus regression from the latest history (yesterday's
+    // grid-hourly was rolled up at midnight, so the fit is fresh each night).
+    surplus_model_train(56);
+
+    // Refresh each appliance's usage profile (standby / program power / length)
+    // from the last 30 days of per-node minute history. Non-fatal best-effort.
+    appliance_profile_train_all(30);
+
+    // Consumption forecast is now only the cold-start fallback for surplus, so a
+    // failure here is non-fatal — surplus_forecast_compute uses the model when
+    // it's confident and only needs consumption otherwise.
+    esp_err_t cf_err = consumption_forecast_compute(target);
+    if (cf_err != ESP_OK)
+        ESP_LOGW(TAG, "consumption_forecast_compute(%s): 0x%x (fallback only)", target, cf_err);
+
+    esp_err_t sf_err = surplus_forecast_compute(target);
+    if (sf_err != ESP_OK)
+        ESP_LOGW(TAG, "surplus_forecast_compute(%s): 0x%x", target, sf_err);
+
+    return ESP_OK;
+}
+
+static void schedule_next_daily_job(void)
+{
+    time_t now = time(NULL);
+    struct tm tm_info;
+    localtime_r(&now, &tm_info);
+    tm_info.tm_hour = DAILY_JOB_HOUR;
+    tm_info.tm_min  = 0;
+    tm_info.tm_sec  = 0;
+    time_t next = mktime(&tm_info);   // today at DAILY_JOB_HOUR (mktime normalises DST)
+    if (next <= now) {
+        tm_info.tm_mday += 1;
+        next = mktime(&tm_info);      // already past today's slot — use tomorrow's
+    }
+    uint64_t delay_us = (uint64_t)(next - now) * 1000000ULL;
+    esp_timer_start_once(s_daily_timer, delay_us);
+    ESP_LOGI(TAG, "Daily forecast job scheduled in %llu s", (unsigned long long)(next - now));
+}
+
+static void on_daily_timer(void *arg)
+{
+    solar_forecast_run_daily_job();
+    schedule_next_daily_job();
+}
+
+// Run the daily job once if the current day's surplus forecast is missing. Requires a
+// valid clock — before SNTP syncs "today" is 1970-01-01 and the dated writes fail. Safe
+// to call repeatedly: the file-existence check makes a second run a no-op. Runs on the
+// esp_timer task (same context as the scheduled job), so the HTTP fetch has stack.
+//
+// We gate on the surplus file (the job's final output), not the solar forecast. The
+// solar forecast is written early in the job; gating on it would mask a run that died
+// mid-way (e.g. crashed during training) — leaving the surplus uncomputed and never
+// retried. Gating on the surplus output makes catch-up re-run any partial night.
+static void run_catch_up(void)
+{
+    if (!clock_is_set()) {
+        ESP_LOGW(TAG, "Clock not set — skipping forecast catch-up");
+        return;
+    }
+    char target[11];
+    today_date(target, sizeof(target));
+    char path[64];
+    snprintf(path, sizeof(path), "%s/surplus-%s", SD_BASE, target);
+    if (access(path, F_OK) != 0) {
+        ESP_LOGI(TAG, "No surplus forecast for %s — running daily job now", target);
+        solar_forecast_run_daily_job();
+    }
+}
+
+static void on_catchup_timer(void *arg)
+{
+    run_catch_up();
+}
+
+void solar_forecast_on_time_synced(void)
+{
+    // Called from the SNTP sync callback (a foreign task with a small stack). Defer the
+    // heavy catch-up onto the esp_timer task by arming the one-shot timer. If the daily
+    // job hasn't been initialized yet (fast sync, before solar_forecast_start_daily_job),
+    // do nothing — the boot catch-up there will cover it once the clock is valid.
+    if (!s_catchup_timer)
+        return;
+    esp_timer_stop(s_catchup_timer);            // no-op if not currently running
+    esp_timer_start_once(s_catchup_timer, 0);   // fire ASAP on the timer task
+}
+
+esp_err_t solar_forecast_start_daily_job(void)
+{
+    esp_timer_create_args_t daily_args = {
+        .callback = on_daily_timer,
+        .arg      = NULL,
+        .name     = "solar_forecast_daily",
+    };
+    esp_err_t err = esp_timer_create(&daily_args, &s_daily_timer);
+    if (err != ESP_OK)
+        return err;
+
+    esp_timer_create_args_t catchup_args = {
+        .callback = on_catchup_timer,
+        .arg      = NULL,
+        .name     = "solar_forecast_catchup",
+    };
+    err = esp_timer_create(&catchup_args, &s_catchup_timer);
+    if (err != ESP_OK)
+        return err;
+
+    // Boot catch-up: if SNTP synced before now, generate today's forecast immediately.
+    // Otherwise this skips and solar_forecast_on_time_synced() runs it on a late sync.
+    run_catch_up();
+
+    schedule_next_daily_job();
+    return ESP_OK;
+}

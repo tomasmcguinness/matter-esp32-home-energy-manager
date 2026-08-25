@@ -1,18 +1,31 @@
 CONFIG_IDF_TARGET="esp32p4"
 
 CONFIG_IDF_TARGET_ESP32P4=y
+CONFIG_ESP32P4_SELECTS_REV_LESS_V3=y
 
-CONFIG_ESPTOOLPY_FLASHSIZE_8MB=y
-CONFIG_ESPTOOLPY_FLASHSIZE="8MB"
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+CONFIG_ESPTOOLPY_FLASHSIZE="16MB"
 
 CONFIG_PARTITION_TABLE_CUSTOM=y
 CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
 CONFIG_PARTITION_TABLE_OFFSET=0x8000
 
+# Transport
+CONFIG_ENABLE_ETHERNET_TELEMETRY=y
+
 CONFIG_LWIP_IPV6_AUTOCONFIG=y
-CONFIG_LWIP_HOOK_IP6_ROUTE_DEFAULT=y
-CONFIG_LWIP_HOOK_ND6_GET_GW_DEFAULT=y
 CONFIG_LWIP_IPV6_NUM_ADDRESSES=12
+CONFIG_LWIP_MULTICAST_PING=y
+CONFIG_LWIP_IPV6_RDNSS_MAX_DNS_SERVERS=2
+CONFIG_LWIP_NETIF_LOOPBACK=y
+CONFIG_LWIP_IPV6_ND6_ROUTE_INFO_OPTION_SUPPORT=y
+CONFIG_LWIP_IPV6_ND6_NUM_NEIGHBORS=10
+CONFIG_LWIP_IPV6_ND6_NUM_ROUTERS=10
+CONFIG_LWIP_IPV6_ND6_NUM_PREFIXES=10
+
+CONFIG_LWIP_HOOK_IP6_ROUTE_DEFAULT=n
+CONFIG_LWIP_HOOK_ND6_GET_GW_DEFAULT=n
+CONFIG_ENABLE_ROUTE_HOOK=n
 
 # SPIRAM (HP SRAM via cache) — required for Matter's large static footprint on ESP32-P4.
 # Without this, the CHIP task's static stack buffer lands outside the LP SRAM range
@@ -26,6 +39,13 @@ CONFIG_ESP_MAIN_TASK_STACK_SIZE=10240
 
 # Increase UDP endpoints for commissioner
 CONFIG_NUM_UDP_ENDPOINTS=16
+
+# On-device commissioning is driven from the httpd thread, which (with tcpip_thread)
+# floods the CHIP event loop with ScheduleLambda calls during PASE faster than the
+# priority-1 loop drains them. The default 40-deep platform event queue overflows at
+# PASE_Pake3; _PostEvent then fails and ScheduleLambdaBridge turns that into a fatal
+# CriticalFailure/abort(). Give the queue burst headroom for the commissioning handshake.
+CONFIG_MAX_EVENT_QUEUE_SIZE=100
 
 # We're not a device
 CONFIG_ESP_MATTER_ENABLE_MATTER_SERVER=n
@@ -54,9 +74,10 @@ CONFIG_ENABLE_CHIPOBLE=n
 CONFIG_ENABLE_WIFI_STATION=n
 CONFIG_ENABLE_MATTER_OVER_THREAD=n
 
-# Use the ESP-IDF mdns component (not CHIP minimal-mDNS) so the app can
+# We want to use the ESP-IDF mdns component (not CHIP minimal-mDNS) so the app can
 # register additional delegated hostnames/services via mdns_delegate_hostname_add
-CONFIG_USE_MINIMAL_MDNS=n
+# but the ESP32-P4 can't support this at this time.
+CONFIG_USE_MINIMAL_MDNS=y
 
 # Disable BLE commissioning — not needed for on-network
 CONFIG_BT_ENABLED=n
@@ -69,7 +90,7 @@ CONFIG_HTTPD_WS_SUPPORT=y
 CONFIG_SLAVE_IDF_TARGET_ESP32C6=y
 
 # DevKit revision is 1.0
-CONFIG_ESP32P4_SELECTS_REV_LESS_V3=y
+# CONFIG_ESP32P4_SELECTS_REV_LESS_V3=y
 
 # Enable CHIP ethernet support
 CONFIG_ENABLE_WIFI_TELEMETRY=n
@@ -79,3 +100,17 @@ CONFIG_ENABLE_ETHERNET_TELEMETRY=n # NOT SUPPORTED AT THIS TIME
 CONFIG_ESP_WIFI_SOFTAP_SUPPORT=n
 
 CONFIG_ETH_USE_SPI_ETHERNET=y
+
+# Turn off SSL cert verification ** THIS IS DANGEROUS SINCE WE ACCESS APIS **
+CONFIG_ESP_TLS_INSECUE=y
+CONFIG_ESP_TLS_SKIP_SERVER_CERT_VERIFY=y
+
+# Support lots of headers
+CONFIG_HTTPD_MAX_REQ_HDR_LEN=2048
+
+# SD card filenames (consumption-YYYY-MM-DD, profile-appliance_N, surplus-model, etc.)
+# exceed FAT 8.3 short names. Without long filename support, every fopen() on the SD
+# card fails with EINVAL (FR_INVALID_NAME). LFN buffer on the heap to avoid per-call
+# stack growth on the esp_timer / logger tasks.
+CONFIG_FATFS_LFN_HEAP=y
+CONFIG_FATFS_MAX_LFN=255

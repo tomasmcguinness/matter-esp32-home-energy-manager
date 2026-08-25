@@ -1,3 +1,9 @@
 #root {
   margin: 0;
 }
+
+.devicePanel {
+  background-color: #FFFFFF;
+  padding:10px;
+  border: 1px solid grey;
+}

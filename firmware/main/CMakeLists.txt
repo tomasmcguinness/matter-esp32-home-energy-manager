@@ -1,14 +1,25 @@
 idf_component_register(SRCS
         "main.cpp"
         "web_server.c"
-        "settings_store.c"
+        "ws_server.c"
         "matter_controller.cpp"
         "managers/device_manager.cpp"
+        "managers/node_manager.cpp"
+        "sd_card.c"
+        "power_logger.c"
+        "node_power_logger.cpp"
+        "value_cache.cpp"
+        "solar_forecast.c"
+        "consumption_forecast.c"
+        "surplus_forecast.c"
+        "surplus_model.c"
+        "appliance_profile.c"
+        "scheduler.c"
+        "commands/pairing_command.cpp"
     INCLUDE_DIRS "."
     PRIV_INCLUDE_DIRS  "." "${ESP_MATTER_PATH}/examples/common/utils"
-    REQUIRES
-        esp_netif esp_eth esp_event nvs_flash esp_http_server spiffs json
-        joltwallet__littlefs ethernet_init espressif__mdns
+    PRIV_REQUIRES fatfs sdmmc driver json esp_eth ethernet_init nvs_flash button esp_matter esp_matter_controller esp_http_server esp_http_client lwip
+    LDFRAGMENTS "linker.lf"
 )
 
 if(CONFIG_SPIFFS_ATTESTATION_TRUST_STORE)
@@ -36,3 +47,5 @@ spiffs_create_partition_image(storage "${CMAKE_SOURCE_DIR}/html_compiled_app" FL
 # target_sources(${matter_lib} PRIVATE
 #     "${CMAKE_SOURCE_DIR}/managed_components/espressif__esp_matter/connectedhomeip/connectedhomeip/src/platform/ESP32/ESP32DnssdImpl.cpp"
 # )
+
+target_compile_options(${COMPONENT_LIB} PRIVATE "-DCHIP_HAVE_CONFIG_H")

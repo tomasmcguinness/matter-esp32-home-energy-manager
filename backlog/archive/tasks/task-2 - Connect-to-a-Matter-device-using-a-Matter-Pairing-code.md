@@ -4,7 +4,7 @@ title: Connect to a Matter device using a Matter Pairing code
 status: To Do
 assignee: []
 created_date: '2026-04-25 06:29'
-updated_date: '2026-04-25 06:30'
+updated_date: '2026-05-05 05:45'
 labels: []
 milestone: m-0
 dependencies: []
