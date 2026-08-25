@@ -18,7 +18,7 @@ class RequestHandler: MatterAddDeviceExtensionRequestHandler {
     override func commissionDevice(in home: MatterAddDeviceRequest.Home?, onboardingPayload: String, commissioningID: UUID) async throws {
         logger.debug("commissionDevice payload=\(onboardingPayload)")
 
-        let url    = URL(string: "http://home-energy-manager.local")
+        let url = URL(string: "http://home-energy-manager.local")
         
         let client = ESP32Client(baseURL: url!)
         do {

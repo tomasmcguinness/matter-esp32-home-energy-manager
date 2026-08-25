@@ -40,6 +40,7 @@ class RequestHandler: MatterAddDeviceExtensionRequestHandler {
         
         logger.debug("commissionDevice payload=\(onboardingPayload)")
 
+        // TODO Needs to come from configuration or mDNS
         let url = URL(string: "http://192.168.1.181")
         
         var request = URLRequest(url: url!.appendingPathComponent("controller/commission"))
