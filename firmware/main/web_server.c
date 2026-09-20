@@ -26,6 +26,7 @@
 #include "sd_card.h"
 #include "matter_controller.h"
 #include "ws_server.h"
+#include "companion_api.h"
 
 #include "mbedtls/base64.h"
 #include "mdns.h"
@@ -2213,7 +2214,7 @@ esp_err_t web_server_start(void)
     config.lru_purge_enable = true;
     config.uri_match_fn = uri_match_segments;
     config.stack_size = 12288;
-    config.max_uri_handlers = 46;
+    config.max_uri_handlers = 52;
     config.max_resp_headers = 20;
 
     httpd_handle_t server = NULL;
@@ -2306,6 +2307,10 @@ esp_err_t web_server_start(void)
     httpd_register_uri_handler(server, &debug_ping6);
     httpd_register_uri_handler(server, &debug_routes6);
     httpd_register_uri_handler(server, &debug_routes6_cache_delete);
+
+    // Both of these must come before the catch-all below, which would otherwise serve
+    // index.html for every companion GET and every websocket upgrade.
+    companion_api_register(server);
 
     ws_server_init(server);
 

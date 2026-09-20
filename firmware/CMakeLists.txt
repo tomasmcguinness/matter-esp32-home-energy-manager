@@ -16,6 +16,9 @@ set(EXTRA_COMPONENT_DIRS
     "${ESP_MATTER_PATH}/components"
     ${extra_components_dirs_append})
 
+# app_reset (from examples/common) requires the 'button' component, which we don't use.
+set(EXCLUDE_COMPONENTS app_reset)
+
 project(home-energy-manager)
 
 idf_build_set_property(CXX_COMPILE_OPTIONS "-std=gnu++17;-Os;-DCHIP_HAVE_CONFIG_H;-Wno-overloaded-virtual;-Wno-error=unused-result" APPEND)

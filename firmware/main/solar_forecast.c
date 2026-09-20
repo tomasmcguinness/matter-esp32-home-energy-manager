@@ -11,6 +11,8 @@
 #include "esp_crt_bundle.h"
 #include "esp_log.h"
 #include "esp_timer.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #include "cJSON.h"
 
 #include "power_logger.h"
@@ -25,8 +27,16 @@ static const char *TAG = "solar_forecast";
 
 #define DAILY_JOB_HOUR 2   // local hour at which the daily forecast job runs
 
+// The daily job (HTTPS fetch, model training, SD I/O) needs far more stack than the
+// esp_timer task has, so it runs on a dedicated worker task. The timer and the SNTP
+// callback only notify the worker.
+#define JOB_TASK_STACK  8192
+#define JOB_TASK_PRIO   5
+#define JOB_BIT_DAILY   (1u << 0)
+#define JOB_BIT_CATCHUP (1u << 1)
+
 static esp_timer_handle_t s_daily_timer;
-static esp_timer_handle_t s_catchup_timer;   // one-shot: runs the catch-up off a foreign task
+static TaskHandle_t       s_job_task;
 
 // Hardcoded installation parameters — update to match site
 #define FORECAST_LAT "52.423957"
@@ -318,14 +328,13 @@ static void schedule_next_daily_job(void)
 
 static void on_daily_timer(void *arg)
 {
-    solar_forecast_run_daily_job();
-    schedule_next_daily_job();
+    xTaskNotify(s_job_task, JOB_BIT_DAILY, eSetBits);
 }
 
 // Run the daily job once if the current day's surplus forecast is missing. Requires a
 // valid clock — before SNTP syncs "today" is 1970-01-01 and the dated writes fail. Safe
 // to call repeatedly: the file-existence check makes a second run a no-op. Runs on the
-// esp_timer task (same context as the scheduled job), so the HTTP fetch has stack.
+// forecast worker task (same context as the scheduled job).
 //
 // We gate on the surplus file (the job's final output), not the solar forecast. The
 // solar forecast is written early in the job; gating on it would mask a run that died
@@ -347,21 +356,28 @@ static void run_catch_up(void)
     }
 }
 
-static void on_catchup_timer(void *arg)
+static void job_task(void *arg)
 {
-    run_catch_up();
+    for (;;) {
+        uint32_t bits = 0;
+        xTaskNotifyWait(0, UINT32_MAX, &bits, portMAX_DELAY);
+        if (bits & JOB_BIT_DAILY) {
+            solar_forecast_run_daily_job();
+            schedule_next_daily_job();
+        } else if (bits & JOB_BIT_CATCHUP) {
+            run_catch_up();
+        }
+    }
 }
 
 void solar_forecast_on_time_synced(void)
 {
-    // Called from the SNTP sync callback (a foreign task with a small stack). Defer the
-    // heavy catch-up onto the esp_timer task by arming the one-shot timer. If the daily
-    // job hasn't been initialized yet (fast sync, before solar_forecast_start_daily_job),
-    // do nothing — the boot catch-up there will cover it once the clock is valid.
-    if (!s_catchup_timer)
+    // Called from the SNTP sync callback (a foreign task with a small stack). Hand the
+    // catch-up to the worker task. If the worker doesn't exist yet (fast sync, before
+    // solar_forecast_start_daily_job), do nothing — the boot catch-up there covers it.
+    if (!s_job_task)
         return;
-    esp_timer_stop(s_catchup_timer);            // no-op if not currently running
-    esp_timer_start_once(s_catchup_timer, 0);   // fire ASAP on the timer task
+    xTaskNotify(s_job_task, JOB_BIT_CATCHUP, eSetBits);
 }
 
 esp_err_t solar_forecast_start_daily_job(void)
@@ -375,18 +391,12 @@ esp_err_t solar_forecast_start_daily_job(void)
     if (err != ESP_OK)
         return err;
 
-    esp_timer_create_args_t catchup_args = {
-        .callback = on_catchup_timer,
-        .arg      = NULL,
-        .name     = "solar_forecast_catchup",
-    };
-    err = esp_timer_create(&catchup_args, &s_catchup_timer);
-    if (err != ESP_OK)
-        return err;
+    if (xTaskCreate(job_task, "forecast_job", JOB_TASK_STACK, NULL, JOB_TASK_PRIO, &s_job_task) != pdPASS)
+        return ESP_ERR_NO_MEM;
 
     // Boot catch-up: if SNTP synced before now, generate today's forecast immediately.
     // Otherwise this skips and solar_forecast_on_time_synced() runs it on a late sync.
-    run_catch_up();
+    xTaskNotify(s_job_task, JOB_BIT_CATCHUP, eSetBits);
 
     schedule_next_daily_job();
     return ESP_OK;

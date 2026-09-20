@@ -64,4 +64,4 @@ firmware/html_app/dist/
 firmware/html_compiled_app/
 
 */xcuserdata/*
-
+.vscode/

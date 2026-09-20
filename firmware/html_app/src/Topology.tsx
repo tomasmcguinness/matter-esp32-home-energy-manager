@@ -1,4 +1,4 @@
-import { ReactFlow, ReactFlowProvider, Background, BackgroundVariant, useNodesState, useEdgesState, type Node, type Edge, type EdgeChange, type ReactFlowInstance, addEdge, useReactFlow, Handle, Position } from '@xyflow/react'
+import { ReactFlow, ReactFlowProvider, Background, BackgroundVariant, useNodesState, useEdgesState, type Node, type Edge, type EdgeChange, type ReactFlowInstance, type Viewport, addEdge, useReactFlow, Handle, Position } from '@xyflow/react'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { PowerFlowEdge } from './PowerFlowEdge'
 import { GridModal } from './GridModal'
@@ -257,6 +257,33 @@ type DeviceSpec = {
 const initialNodes: Node[] = []
 
 const initialEdges: Edge[] = []
+
+// The canvas is a route, so it unmounts on every navigation away and comes back with a
+// fresh viewport. Persisting the zoom keeps the user's chosen scale across visits and
+// reloads; the pan still recentres on the consumer unit (see onInit).
+const ZOOM_STORAGE_KEY = 'hem.topology.zoom'
+const MIN_ZOOM = 0.2
+const MAX_ZOOM = 2
+
+// Local storage can throw (private mode, blocked site data) and can hold junk from an
+// older build, so every read is guarded and range-checked before it reaches setCenter.
+function readStoredZoom(): number | null {
+  try {
+    const raw = localStorage.getItem(ZOOM_STORAGE_KEY)
+    if (raw === null) return null
+    const zoom = parseFloat(raw)
+    if (!Number.isFinite(zoom) || zoom < MIN_ZOOM || zoom > MAX_ZOOM) return null
+    return zoom
+  } catch {
+    return null
+  }
+}
+
+function writeStoredZoom(zoom: number) {
+  try {
+    localStorage.setItem(ZOOM_STORAGE_KEY, String(zoom))
+  } catch { /* storage unavailable — zoom just won't persist */ }
+}
 
 const WS_DOT: Record<string, { color: string; title: string }> = {
   open: { color: '#22c55e', title: 'Live' },
@@ -587,6 +614,12 @@ function Topology() {
     }).catch(() => { })
   }, [pendingLoadPos, screenToFlowPosition, setNodes])
 
+  // Fires once at the end of a pan/zoom gesture, so no debounce is needed. Saving here
+  // rather than on unmount also avoids StrictMode's double-mount firing it spuriously.
+  const onMoveEnd = useCallback((_: MouseEvent | TouchEvent | null, viewport: Viewport) => {
+    writeStoredZoom(viewport.zoom)
+  }, [])
+
   const onInit = useCallback((instance: ReactFlowInstance) => {
     reactFlowInstance.current = instance
     fetch('/api/nodes')
@@ -645,7 +678,7 @@ function Topology() {
         }
 
         const cu = data.nodes.find(n => n.id === 'consumer_unit')
-        instance.setCenter((cu?.x ?? 0) + 75, (cu?.y ?? 0) + 18, { zoom: 1 })
+        instance.setCenter((cu?.x ?? 0) + 75, (cu?.y ?? 0) + 18, { zoom: readStoredZoom() ?? 1 })
       })
       .catch(() => console.log('Failed to load nodes from API'))
   }, [setNodes, setEdges])
@@ -668,10 +701,13 @@ function Topology() {
           onPaneContextMenu={onPaneContextMenu}
           onNodeDragStop={onNodeDragStop}
           onDrop={onDrop}
+          onMoveEnd={onMoveEnd}
           nodesDraggable={true}
           nodesConnectable={true}
           fitViewOptions={{ padding: 2 }}
-          defaultViewport={{ x: 0, y: 0, zoom: 0.5 }}
+          minZoom={MIN_ZOOM}
+          maxZoom={MAX_ZOOM}
+          defaultViewport={{ x: 0, y: 0, zoom: readStoredZoom() ?? 0.5 }}
           nodeOrigin={[0, 0]}
         >
           <Background variant={BackgroundVariant.Lines} color="#cbd5e1" gap={24} size={1.5} />

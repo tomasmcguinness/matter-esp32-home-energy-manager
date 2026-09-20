@@ -330,6 +330,60 @@ char *device_manager_get_all_json(void)
     return text;
 }
 
+// The companion app (MCC) wants a flat array of Matter nodes, not the nested
+// {"devices":[...]} the web UI consumes. Its schema carries a handful of fields this
+// firmware has no source for -- isIcd, powerSource, the battery readings, extAddress and
+// the endpoints' measuredValue. They are all optional on that side, and the client
+// defaults each one, so leave them out rather than invent them. measuredValue in
+// particular is a sensor reading in hundredths over there; feeding it watts would render
+// as nonsense.
+//
+// A name the user has not set yet is null rather than "", which is what the client
+// expects when it falls back to the product name.
+static void add_optional_string(cJSON *obj, const char *key, const std::string &value)
+{
+    if (value.empty()) {
+        cJSON_AddNullToObject(obj, key);
+    } else {
+        cJSON_AddStringToObject(obj, key, value.c_str());
+    }
+}
+
+char *device_manager_get_companion_nodes_json(void)
+{
+    xSemaphoreTake(s_mutex, portMAX_DELAY);
+
+    cJSON *arr = cJSON_CreateArray();
+
+    for (const auto &dev : s_devices) {
+        cJSON *nobj = cJSON_CreateObject();
+        cJSON_AddNumberToObject(nobj, "nodeId", (double)dev.node_id);
+        add_optional_string(nobj, "vendorName",  dev.vendor_name);
+        add_optional_string(nobj, "productName", dev.product_name);
+        add_optional_string(nobj, "nodeName",    dev.name);
+        cJSON_AddBoolToObject(nobj, "hasSubscription", dev.has_subscription);
+
+        cJSON *eps = cJSON_AddArrayToObject(nobj, "endpoints");
+        for (const auto &ep : dev.endpoints) {
+            cJSON *eobj = cJSON_CreateObject();
+            cJSON_AddNumberToObject(eobj, "endpointId", ep.endpoint_id);
+            add_optional_string(eobj, "endpointName", ep.label);
+            cJSON *dts = cJSON_AddArrayToObject(eobj, "deviceTypes");
+            for (auto dt : ep.device_types) {
+                cJSON_AddItemToArray(dts, cJSON_CreateNumber((double)dt));
+            }
+            cJSON_AddItemToArray(eps, eobj);
+        }
+        cJSON_AddItemToArray(arr, nobj);
+    }
+
+    xSemaphoreGive(s_mutex);
+
+    char *text = cJSON_PrintUnformatted(arr);
+    cJSON_Delete(arr);
+    return text;
+}
+
 static constexpr uint32_t kDevTypeAggregator      = 0x000E;
 static constexpr uint32_t kDevTypeBridgedNode     = 0x0013;
 static constexpr uint32_t kDevTypeSolarPower      = 0x0017;
