@@ -1,5 +1,6 @@
 #include "web_server.h"
 
+#include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <stdio.h>
@@ -934,6 +935,33 @@ static esp_err_t data_grid_get_handler(httpd_req_t *req)
     }
 
     char *json = power_logger_day_json(date);
+    if (!json)
+    {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "OOM");
+        return ESP_FAIL;
+    }
+    httpd_resp_set_type(req, "application/json");
+    esp_err_t err = httpd_resp_sendstr(req, json);
+    free(json);
+    return err;
+}
+
+static esp_err_t data_daily_energy_get_handler(httpd_req_t *req)
+{
+    int days = 30;
+    size_t qlen = httpd_req_get_url_query_len(req);
+    if (qlen > 0 && qlen < 32)
+    {
+        char query[32];
+        char val[8] = {0};
+        if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK &&
+            httpd_query_key_value(query, "days", val, sizeof(val)) == ESP_OK)
+            days = atoi(val);
+    }
+    if (days < 1) days = 1;
+    if (days > 60) days = 60;
+
+    char *json = node_power_logger_daily_energy_json(days);
     if (!json)
     {
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "OOM");
@@ -2242,6 +2270,7 @@ esp_err_t web_server_start(void)
     const httpd_uri_t node_delete = {.uri = "/api/nodes/*", .method = HTTP_DELETE, .handler = node_delete_handler};
     const httpd_uri_t data_grid_get = {.uri = "/api/data/grid", .method = HTTP_GET, .handler = data_grid_get_handler};
     const httpd_uri_t data_node_get = {.uri = "/api/data/node", .method = HTTP_GET, .handler = data_node_get_handler};
+    const httpd_uri_t data_daily_energy_get = {.uri = "/api/data/daily-energy", .method = HTTP_GET, .handler = data_daily_energy_get_handler};
     const httpd_uri_t topology_grid_put = {.uri = "/api/topology/grid", .method = HTTP_PUT, .handler = topology_grid_put_handler};
     const httpd_uri_t topology_solar_put = {.uri = "/api/topology/solar", .method = HTTP_PUT, .handler = topology_solar_put_handler};
     const httpd_uri_t edge_post = {.uri = "/api/edges", .method = HTTP_POST, .handler = edge_post_handler};
@@ -2284,6 +2313,7 @@ esp_err_t web_server_start(void)
     httpd_register_uri_handler(server, &node_delete);
     httpd_register_uri_handler(server, &data_grid_get);
     httpd_register_uri_handler(server, &data_node_get);
+    httpd_register_uri_handler(server, &data_daily_energy_get);
     httpd_register_uri_handler(server, &topology_grid_put);
     httpd_register_uri_handler(server, &topology_solar_put);
     httpd_register_uri_handler(server, &edge_post);

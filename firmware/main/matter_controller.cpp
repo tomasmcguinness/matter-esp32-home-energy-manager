@@ -571,6 +571,14 @@ esp_err_t matter_controller_start(void)
 // event-loop thread (the subscription callbacks below) and from app threads.
 static void subscribe_enqueue(uint64_t node_id);
 
+// Re-queue a node after its current backoff delay (which then doubles), rather
+// than immediately. Reset once the node subscribes successfully.
+static void subscribe_retry_later(uint64_t node_id);
+static void subscribe_mark_established(uint64_t node_id);
+// Decide what to do after a subscription fails or ends: back off and retry, or,
+// for an ICD that has subscribed before, wait for its next Check-In.
+static void subscribe_handle_loss(uint64_t node_id);
+
 void node_subscription_established_cb(uint64_t remote_node_id, uint32_t subscription_id)
 {
     ESP_LOGI(TAG, "Successfully subscribed, node 0x%016llX, subscription id 0x%08X", remote_node_id, subscription_id);
@@ -578,6 +586,7 @@ void node_subscription_established_cb(uint64_t remote_node_id, uint32_t subscrip
     // Flag on the device manager that this node is subscribed, so the UI can reflect that.
     //
     device_manager_mark_subscribed(remote_node_id);
+    subscribe_mark_established(remote_node_id);
 }
 
 void node_subscription_terminated_cb(uint64_t remote_node_id, uint32_t subscription_id)
@@ -587,7 +596,7 @@ void node_subscription_terminated_cb(uint64_t remote_node_id, uint32_t subscript
     // The subscription is gone; reflect that and queue a re-subscribe attempt.
     //
     device_manager_mark_unsubscribed(remote_node_id);
-    subscribe_enqueue(remote_node_id);
+    subscribe_handle_loss(remote_node_id);
 }
 
 void node_subscribe_failed_cb(void *ctx, const chip::ScopedNodeId &node_id, chip::ChipError err)
@@ -599,7 +608,7 @@ void node_subscribe_failed_cb(void *ctx, const chip::ScopedNodeId &node_id, chip
     // Flag the subscription failure so the UI can reflect that, then queue a retry.
     //
     device_manager_mark_unsubscribed(remote_node_id);
-    subscribe_enqueue(remote_node_id);
+    subscribe_handle_loss(remote_node_id);
 }
 
 static void on_attribute_data_cb(uint64_t node_id,
@@ -736,13 +745,75 @@ void matter_controller_seed_value_cache(void)
 // Subscriptions are driven through a FreeRTOS queue of node ids. matter_controller_subscribe
 // enqueues the nodes to subscribe to; a single worker task dequeues each one and establishes
 // the subscription. When a subscription fails or is terminated, the callbacks above drop the
-// node back onto the queue so the worker re-establishes it. Per the chosen policy, retries are
-// re-queued immediately and naturally paced by the CASE-session setup time.
+// node back into a per-node retry table with an exponential backoff (2s doubling to 60s, reset on
+// success). The worker sleeps until the earliest retry is due. Retrying immediately let an
+// unreachable node spin, and a fast failure such as CHIP_ERROR_NO_MEMORY kept itself going.
+//
+// Battery-powered ICDs are the exception once they have subscribed at least once: they sleep
+// for long periods, so polling them only produces CASE timeouts. Instead we wait for the ICD's
+// Check-In message (sent when it wakes and finds its subscription gone) and resubscribe then,
+// while it is in its active window. Until the first successful subscription they use the same
+// backoff as everything else, so a node that was asleep at boot is still picked up.
 // ---------------------------------------------------------------------------
 
 static QueueHandle_t s_subscribe_queue = nullptr;
 static TaskHandle_t  s_subscribe_task  = nullptr;
 static constexpr size_t kSubscribeQueueLen = kMaxNodes;
+
+// Node id 0 is never a valid operational node id; it is used only to wake the
+// worker so it recomputes when the next retry is due.
+static constexpr uint64_t kWakeNodeId = 0;
+static constexpr uint32_t kRetryInitialMs = 2000;
+static constexpr uint32_t kRetryMaxMs     = 60000;
+
+// Per-node subscription state: the retry backoff plus whether the node has ever
+// subscribed and whether it is subscribed right now.
+struct retry_slot_t {
+    uint64_t   node_id         = 0;     // 0 = slot unused
+    uint32_t   backoff_ms      = kRetryInitialMs;
+    TickType_t due             = 0;
+    bool       pending         = false; // a timed retry is scheduled
+    bool       subscribed_once = false;
+    bool       active          = false; // subscription currently established
+};
+
+static retry_slot_t s_retry[kMaxNodes];
+static portMUX_TYPE s_retry_lock = portMUX_INITIALIZER_UNLOCKED;
+
+// Find the slot for node_id, claiming a free one if create is set. Call with
+// s_retry_lock held.
+static retry_slot_t *retry_slot(uint64_t node_id, bool create)
+{
+    for (auto &r : s_retry)
+        if (r.node_id == node_id) return &r;
+    if (!create) return nullptr;
+    for (auto &r : s_retry)
+    {
+        if (r.node_id == 0)
+        {
+            r = retry_slot_t{};
+            r.node_id = node_id;
+            return &r;
+        }
+    }
+    return nullptr;
+}
+
+// True if the node was commissioned as an ICD and registered us as its Check-In
+// client. Must run on the CHIP thread (the ICD client storage is not locked).
+static bool is_registered_icd(uint64_t node_id)
+{
+    auto &storage = esp_matter::controller::matter_controller_client::get_instance().get_icd_client_storage();
+    auto *iter = storage.IterateICDClientInfo();
+    if (!iter) return false;
+    chip::app::DefaultICDClientStorage::ICDClientInfoIteratorWrapper wrapper(iter);
+    chip::app::ICDClientInfo info;
+    while (iter->Next(info))
+    {
+        if (info.peer_node.GetNodeId() == node_id) return true;
+    }
+    return false;
+}
 
 // Establish (or re-establish) a subscription to one node. Runs on the CHIP event-loop thread
 // via ScheduleWork. The endpoint is wildcarded, so one subscription per node covers every
@@ -808,14 +879,147 @@ static void subscribe_enqueue(uint64_t node_id)
     }
 }
 
+static void subscribe_retry_later(uint64_t node_id)
+{
+    uint32_t delay_ms = 0;
+    bool     tracked  = false;
+
+    taskENTER_CRITICAL(&s_retry_lock);
+    retry_slot_t *slot = retry_slot(node_id, true);
+    if (slot)
+    {
+        tracked       = true;
+        delay_ms      = slot->backoff_ms;
+        slot->due     = xTaskGetTickCount() + pdMS_TO_TICKS(delay_ms);
+        slot->pending = true;
+        slot->backoff_ms = slot->backoff_ms >= kRetryMaxMs / 2 ? kRetryMaxMs : slot->backoff_ms * 2;
+    }
+    taskEXIT_CRITICAL(&s_retry_lock);
+
+    if (!tracked)
+    {
+        ESP_LOGW(TAG, "Retry table full, dropping node 0x%016llX", (unsigned long long)node_id);
+        return;
+    }
+    ESP_LOGI(TAG, "Retrying subscription to node 0x%016llX in %u ms", (unsigned long long)node_id, (unsigned)delay_ms);
+    subscribe_enqueue(kWakeNodeId);
+}
+
+static void subscribe_mark_established(uint64_t node_id)
+{
+    taskENTER_CRITICAL(&s_retry_lock);
+    retry_slot_t *slot = retry_slot(node_id, true);
+    if (slot)
+    {
+        slot->backoff_ms      = kRetryInitialMs;
+        slot->pending         = false;
+        slot->subscribed_once = true;
+        slot->active          = true;
+    }
+    taskEXIT_CRITICAL(&s_retry_lock);
+}
+
+static void subscribe_handle_loss(uint64_t node_id)
+{
+    bool subscribed_once = false;
+    taskENTER_CRITICAL(&s_retry_lock);
+    retry_slot_t *slot = retry_slot(node_id, false);
+    if (slot)
+    {
+        slot->active    = false;
+        subscribed_once = slot->subscribed_once;
+    }
+    taskEXIT_CRITICAL(&s_retry_lock);
+
+    if (subscribed_once && is_registered_icd(node_id))
+    {
+        ESP_LOGI(TAG, "ICD node 0x%016llX lost its subscription; waiting for its Check-In to resubscribe",
+                 (unsigned long long)node_id);
+        return;
+    }
+    subscribe_retry_later(node_id);
+}
+
+// Runs on the CHIP thread when an ICD wakes and sends us a Check-In. That only
+// happens when the ICD has no active subscription for us, so resubscribe now,
+// while it is still in its active window. Nodes we don't subscribe to are ignored.
+static void on_icd_check_in(const chip::app::ICDClientInfo &info)
+{
+    uint64_t node_id = info.peer_node.GetNodeId();
+
+    bool known  = false;
+    bool active = false;
+    taskENTER_CRITICAL(&s_retry_lock);
+    retry_slot_t *slot = retry_slot(node_id, false);
+    if (slot)
+    {
+        known         = true;
+        active        = slot->active;
+        slot->pending = false; // the check-in supersedes any timed retry
+    }
+    taskEXIT_CRITICAL(&s_retry_lock);
+
+    if (!known)
+    {
+        ESP_LOGI(TAG, "Check-In from node 0x%016llX, which we don't subscribe to; ignoring", (unsigned long long)node_id);
+        return;
+    }
+    if (active)
+    {
+        ESP_LOGW(TAG, "Check-In from node 0x%016llX while we believe it is subscribed; resubscribing",
+                 (unsigned long long)node_id);
+    }
+    else
+    {
+        ESP_LOGI(TAG, "Check-In from ICD node 0x%016llX; resubscribing", (unsigned long long)node_id);
+    }
+    subscribe_enqueue(node_id);
+}
+
+// Pop every node whose retry is due into `due_out`; return how long until the
+// next pending retry (portMAX_DELAY when none are pending).
+static TickType_t collect_due_retries(uint64_t *due_out, size_t *due_count)
+{
+    TickType_t now  = xTaskGetTickCount();
+    TickType_t wait = portMAX_DELAY;
+    *due_count = 0;
+
+    taskENTER_CRITICAL(&s_retry_lock);
+    for (auto &r : s_retry)
+    {
+        if (!r.pending) continue;
+        int32_t remaining = (int32_t)(r.due - now); // wrap-safe
+        if (remaining <= 0)
+        {
+            r.pending = false;
+            due_out[(*due_count)++] = r.node_id;
+        }
+        else if ((TickType_t)remaining < wait)
+        {
+            wait = (TickType_t)remaining;
+        }
+    }
+    taskEXIT_CRITICAL(&s_retry_lock);
+    return wait;
+}
+
 static void subscribe_task(void *)
 {
-    uint64_t node_id = 0;
+    uint64_t   node_id = 0;
+    TickType_t wait    = portMAX_DELAY;
     for (;;)
     {
-        if (xQueueReceive(s_subscribe_queue, &node_id, portMAX_DELAY) == pdTRUE)
+        if (xQueueReceive(s_subscribe_queue, &node_id, wait) == pdTRUE && node_id != kWakeNodeId)
         {
             establish_subscription(node_id);
+        }
+
+        uint64_t due[kMaxNodes];
+        size_t   due_count = 0;
+        wait = collect_due_retries(due, &due_count);
+        for (size_t i = 0; i < due_count; i++)
+        {
+            establish_subscription(due[i]);
         }
     }
 }
@@ -837,6 +1041,11 @@ esp_err_t matter_controller_subscribe(void)
             s_subscribe_queue = nullptr;
             return ESP_ERR_NO_MEM;
         }
+
+        // ICDs that have subscribed once are resubscribed from their Check-In.
+        chip::DeviceLayer::PlatformMgr().LockChipStack();
+        esp_matter::controller::matter_controller_client::get_instance().set_icd_client_callback(on_icd_check_in, nullptr);
+        chip::DeviceLayer::PlatformMgr().UnlockChipStack();
     }
 
     static constexpr size_t kMaxSensors = 32;
@@ -869,6 +1078,11 @@ esp_err_t matter_controller_subscribe(void)
         ESP_LOGI(TAG, "Queuing subscription to ElectricalPowerMeasurement on %u node(s)", (unsigned)node_count);
         for (size_t i = 0; i < node_count; i++)
         {
+            // Claim a state slot up front so a Check-In from this node is recognised
+            // even before its first subscription attempt completes.
+            taskENTER_CRITICAL(&s_retry_lock);
+            retry_slot(unique_nodes[i], true);
+            taskEXIT_CRITICAL(&s_retry_lock);
             subscribe_enqueue(unique_nodes[i]);
         }
     }

@@ -40,6 +40,7 @@ struct stream_t {
     uint64_t    node_id     = 0; // Matter node id (cache lookup)
     uint16_t    endpoint_id = 0; // Matter endpoint id (cache lookup)
     bool        is_grid     = false; // grid meter: persisted to the grid-* files
+    const char *role        = "load"; // "grid" | "solar" | "load", from the CU handle
     int64_t     sum_mw      = 0;
     uint32_t    count       = 0;
     uint32_t    unix_minute = 0; // start of the minute being accumulated
@@ -122,7 +123,7 @@ static void refresh_streams(void)
     cJSON *edges = cJSON_GetObjectItemCaseSensitive(root, "edges");
 
     // Collect graph ids connected to the CU, remembering which is the grid.
-    std::vector<std::pair<std::string, bool>> connected; // (graph id, is_grid)
+    std::vector<std::pair<std::string, const char *>> connected; // (graph id, role)
     cJSON *e = nullptr;
     cJSON_ArrayForEach(e, edges) {
         const char *src = json_str(e, "source");
@@ -142,15 +143,18 @@ static void refresh_streams(void)
         else continue;
 
         bool is_grid = other == GRID_NODE_ID || (cu_handle && strcmp(cu_handle, "grid") == 0);
+        const char *role = is_grid ? "grid"
+                         : (cu_handle && strncmp(cu_handle, "solar", 5) == 0) ? "solar"
+                         : "load";
 
         bool seen = false;
         for (const auto &c : connected) if (c.first == other) { seen = true; break; }
-        if (!seen) connected.emplace_back(other, is_grid);
+        if (!seen) connected.emplace_back(other, role);
     }
 
     // Resolve each connected graph id to its Matter node/endpoint via settings.
     std::vector<stream_t> next;
-    for (const auto &[gid, is_grid] : connected) {
+    for (const auto &[gid, role] : connected) {
         char clean[40];
         if (!sanitize_token(gid.c_str(), clean, sizeof(clean))) continue;
 
@@ -166,7 +170,8 @@ static void refresh_streams(void)
                 s.graph_id    = clean;
                 s.node_id     = (uint64_t)nid->valuedouble;
                 s.endpoint_id = (uint16_t)eid->valuedouble;
-                s.is_grid     = is_grid;
+                s.role        = role;
+                s.is_grid     = strcmp(role, "grid") == 0;
                 next.push_back(std::move(s));
             }
             break;
@@ -473,6 +478,85 @@ char *node_power_logger_hourly_json(const char *node_id, const char *date_str)
             }
             fclose(f);
         }
+    }
+
+    char *json = cJSON_PrintUnformatted(root);
+    cJSON_Delete(root);
+    return json; // caller must free
+}
+
+// Energy in kWh for one stream-day. The hourly rollup is preferred (each record
+// is a 1-hour average, so Σ mW / 1e6 = kWh); days not yet rolled up (today, or
+// a missed midnight job) fall back to the minute file (Σ mW / 60 / 1e6).
+// Returns false when neither file exists so callers can tell "no data" from 0.
+static bool file_kwh(const char *hourly_path, const char *minute_path, double *kwh)
+{
+    const char *paths[2]   = { hourly_path, minute_path };
+    const double divisor[2] = { 1e6, 60.0 * 1e6 };
+    for (int i = 0; i < 2; i++) {
+        FILE *f = fopen(paths[i], "rb");
+        if (!f) continue;
+        int64_t sum_mw = 0;
+        power_record_t rec;
+        while (fread(&rec, sizeof(rec), 1, f) == 1)
+            sum_mw += rec.power_mw;
+        fclose(f);
+        *kwh = (double)sum_mw / divisor[i];
+        return true;
+    }
+    return false;
+}
+
+char *node_power_logger_daily_energy_json(int days)
+{
+    struct info_t { std::string graph_id; const char *role; bool is_grid; };
+    std::vector<info_t> streams;
+    xSemaphoreTake(s_mutex, portMAX_DELAY);
+    for (const auto &s : s_streams)
+        streams.push_back({ s.graph_id, s.role, s.is_grid });
+    xSemaphoreGive(s_mutex);
+
+    cJSON *root  = cJSON_CreateObject();
+    cJSON *nodes = cJSON_AddArrayToObject(root, "nodes");
+    for (const auto &s : streams) {
+        cJSON *obj = cJSON_CreateObject();
+        cJSON_AddStringToObject(obj, "id",   s.graph_id.c_str());
+        cJSON_AddStringToObject(obj, "role", s.role);
+        cJSON_AddItemToArray(nodes, obj);
+    }
+
+    cJSON *arr = cJSON_AddArrayToObject(root, "days");
+    time_t now = time(NULL);
+    struct tm today;
+    localtime_r(&now, &today);
+
+    // Oldest first. Step the calendar day via mktime so DST changes are handled.
+    for (int back = days - 1; back >= 0; back--) {
+        struct tm d = today;
+        d.tm_hour = 12; // midday avoids DST edge cases when normalising
+        d.tm_mday -= back;
+        mktime(&d);
+        char date[11];
+        strftime(date, sizeof(date), "%Y-%m-%d", &d);
+
+        cJSON *day = cJSON_CreateObject();
+        cJSON_AddStringToObject(day, "date", date);
+        cJSON *kwh = cJSON_AddObjectToObject(day, "kwh");
+
+        for (const auto &s : streams) {
+            char hourly[96], minute[96];
+            if (s.is_grid) {
+                snprintf(hourly, sizeof(hourly), "%s/grid-hourly-%s", SD_BASE, date);
+                snprintf(minute, sizeof(minute), "%s/grid-%s", SD_BASE, date);
+            } else {
+                snprintf(hourly, sizeof(hourly), "%s/nodeh-%s-%s", SD_BASE, s.graph_id.c_str(), date);
+                snprintf(minute, sizeof(minute), "%s/node-%s-%s", SD_BASE, s.graph_id.c_str(), date);
+            }
+            double v;
+            if (file_kwh(hourly, minute, &v))
+                cJSON_AddNumberToObject(kwh, s.graph_id.c_str(), v);
+        }
+        cJSON_AddItemToArray(arr, day);
     }
 
     char *json = cJSON_PrintUnformatted(root);

@@ -234,6 +234,56 @@ export const handlers = [
     return HttpResponse.json({ records })
   }),
 
+  http.get('/api/data/daily-energy', ({ request }) => {
+    const url = new URL(request.url)
+    const days = Math.min(60, Math.max(1, Number(url.searchParams.get('days') ?? 30) || 30))
+
+    // Mirror the firmware: every node wired to the consumer unit is a stream,
+    // its role taken from the CU handle it connects to.
+    const streams: { id: string; role: 'grid' | 'solar' | 'load' }[] = []
+    for (const e of edgeConfigs) {
+      let id: string | null = null
+      let handle: string | undefined
+      if (e.source === 'consumer_unit') { id = e.target; handle = e.sourceHandle }
+      else if (e.target === 'consumer_unit') { id = e.source; handle = e.targetHandle }
+      if (!id || streams.some(s => s.id === id)) continue
+      const role = handle === 'grid' ? 'grid' : handle?.startsWith('solar') ? 'solar' : 'load'
+      streams.push({ id, role })
+    }
+
+    // Deterministic per-(node, day) noise so the chart is stable across reloads.
+    const rand = (seed: string) => {
+      let h = 2166136261
+      for (const c of seed) h = Math.imul(h ^ c.charCodeAt(0), 16777619)
+      return ((h >>> 0) % 1000) / 1000
+    }
+
+    const today = new Date()
+    const result = []
+    for (let back = days - 1; back >= 0; back--) {
+      const d = new Date(today.getFullYear(), today.getMonth(), today.getDate() - back)
+      const date = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+      // A couple of missing days to exercise the no-data rendering.
+      if (back === 12 || back === 13) { result.push({ date, kwh: {} }); continue }
+
+      const kwh: Record<string, number> = {}
+      let loads = 0
+      for (const s of streams.filter(s => s.role === 'load')) {
+        const v = +(0.5 + rand(`${s.id}-${date}`) * 3).toFixed(3)
+        kwh[s.id] = v
+        loads += v
+      }
+      const total = loads + 4 + rand(`base-${date}`) * 3
+      const solar = streams.some(s => s.role === 'solar') ? rand(`sun-${date}`) * 10 : 0
+      for (const s of streams) {
+        if (s.role === 'solar') kwh[s.id] = +solar.toFixed(3)
+        if (s.role === 'grid') kwh[s.id] = +(total - solar).toFixed(3)
+      }
+      result.push({ date, kwh })
+    }
+    return HttpResponse.json({ nodes: streams, days: result })
+  }),
+
   http.put('/api/topology/grid', async ({ request }) => {
     const body = (await request.json()) as { nodeId: number; endpointId: number; label: string }
     const cu = nodeConfigs.find(n => n.id === 'consumer_unit')

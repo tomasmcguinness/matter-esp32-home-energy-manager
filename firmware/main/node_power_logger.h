@@ -29,6 +29,12 @@ char      *node_power_logger_day_json(const char *node_id, const char *date_str)
 esp_err_t  node_power_logger_rollup_hourly(const char *date_str);                    // rolls up every node file for the date
 char      *node_power_logger_hourly_json(const char *node_id, const char *date_str); // caller must free
 
+// Per-stream daily energy (kWh) for the last `days` local dates, today included,
+// oldest first: {"nodes":[{"id","role"}], "days":[{"date","kwh":{"<id>":n}}]}.
+// role is "grid" | "solar" | "load". A stream with no file for a day is omitted
+// from that day's kwh object. Caller must free.
+char      *node_power_logger_daily_energy_json(int days);
+
 #ifdef __cplusplus
 }
 #endif
