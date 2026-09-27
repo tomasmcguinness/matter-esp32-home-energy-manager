@@ -5,6 +5,7 @@ import { GridModal } from './GridModal'
 import { AddLoadModal, type AddedLoad } from './AddLoadModal'
 import { useWebSocket, type WsMessage } from './useWebSocket'
 import { DnDProvider, useDnD } from './DnDContext';
+import { type TariffDay, currentSlot, fmtUnitPrice, localDateString, slotPrice } from './tariff'
 
 const edgeTypes = { powerFlow: PowerFlowEdge }
 
@@ -20,6 +21,8 @@ function ConsumerUnitNode({ data }: { data: { label: string } }) {
     <>
       <Handle type="target" position={Position.Left} id="grid" />
       <Handle type="target" position={Position.Left} id="solar_input" />
+      {/* The tariff source prices the grid import; it carries no power. */}
+      <Handle type="target" position={Position.Bottom} id="tariff" style={{ left: '15%' }} />
       <div style={{ padding: '5px 12px', fontSize: 13, fontWeight: 500, color: '#1e293b', whiteSpace: 'nowrap' }}>
         {data.label}
       </div>
@@ -222,6 +225,44 @@ function SubConsumerUnitNode({ id, data }: { id: string; data: { label: string; 
 
 // Appliance nodes are functionally identical to device nodes on the canvas (a metered
 // endpoint with a power-in handle); they only differ by their semantic role/type.
+// The device publishing the Commodity Tariff. Wired to the consumer unit's
+// `tariff` handle; shows the price in force right now.
+function TariffNode({ data }: { data: DeviceNodeData }) {
+  const [day, setDay] = useState<TariffDay | null>(null)
+  const [slot, setSlot] = useState(currentSlot())
+
+  useEffect(() => {
+    const load = () => {
+      setSlot(currentSlot())
+      fetch(`/api/tariff?date=${localDateString(new Date())}`)
+        .then(r => r.ok ? r.json() : Promise.reject())
+        .then((d: TariffDay) => setDay(d))
+        .catch(() => { })
+    }
+    load()
+    const timer = setInterval(load, 5 * 60 * 1000)
+    return () => clearInterval(timer)
+  }, [])
+
+  const price = day ? slotPrice(day, slot) : null
+  return (
+    <>
+      <div style={{ padding: '4px 10px', background: '#fef3c7', borderBottom: '1px solid #fde68a', fontSize: 12, fontWeight: 600, color: '#1e293b', whiteSpace: 'nowrap' }}>
+        Tariff | {data.label}
+      </div>
+      <div style={{ padding: '5px 10px', fontSize: 12, textAlign: 'right' }}>
+        {price !== null ? fmtUnitPrice(price, day?.currency) : '—'}
+      </div>
+      <Handle type="source" position={Position.Right} id="tariff-out" />
+    </>
+  )
+}
+
+// Tariff edges carry pricing, not power: draw them as a plain dashed line.
+const TARIFF_EDGE_STYLE = { strokeDasharray: '4 4', stroke: '#f59e0b' }
+const isTariffEdge = (e: { targetHandle?: string | null; sourceHandle?: string | null }) =>
+  e.targetHandle === 'tariff' || e.sourceHandle === 'tariff'
+
 const nodeTypes = {
   consumerUnit: ConsumerUnitNode,
   device: DeviceNode,
@@ -230,6 +271,7 @@ const nodeTypes = {
   pvString: PvStringNode,
   battery: BatteryNode,
   subConsumerUnit: SubConsumerUnitNode,
+  tariff: TariffNode,
   // Legacy: graphs saved before the sub-CU replaced the Henley block render with
   // the same component so they still display.
   henley: SubConsumerUnitNode,
@@ -498,7 +540,9 @@ function Topology() {
 
   const onConnect = useCallback((params: any) => {
     const edgeId = [params.source, params.sourceHandle, params.target, params.targetHandle].filter(Boolean).join('-')
-    const newEdge = { ...params, id: edgeId, type: 'powerFlow', data: { kw: 0 } }
+    const newEdge = isTariffEdge(params)
+      ? { ...params, id: edgeId, style: TARIFF_EDGE_STYLE }
+      : { ...params, id: edgeId, type: 'powerFlow', data: { kw: 0 } }
     setEdges(eds => addEdge(newEdge, eds))
     fetch('/api/edges', {
       method: 'POST',
@@ -664,6 +708,9 @@ function Topology() {
           setEdges(data.edges.map(e => {
             // The metered node may be at either end: a meter feeds into the CU
             // (it is the source), an appliance hangs off the CU (it is the target).
+            if (isTariffEdge(e)) {
+              return { id: e.id, source: e.source, target: e.target, sourceHandle: e.sourceHandle, targetHandle: e.targetHandle, style: TARIFF_EDGE_STYLE }
+            }
             const power = powerByNode.get(edgePowerNodeId(e))
             return {
               id: e.id,

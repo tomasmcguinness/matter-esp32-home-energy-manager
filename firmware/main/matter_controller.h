@@ -19,6 +19,8 @@ void      matter_controller_forget_node(uint64_t node_id);
 esp_err_t matter_controller_interrogate_node(uint64_t node_id);
 esp_err_t matter_controller_get_nodes(uint64_t *nodes, size_t max, size_t *count_out);
 esp_err_t matter_controller_subscribe(void);
+// Queue a subscription to one node now (e.g. a newly assigned tariff source).
+esp_err_t matter_controller_subscribe_node(uint64_t node_id);
 void      matter_controller_seed_value_cache(void);
 esp_err_t matter_factory_reset(void);
 

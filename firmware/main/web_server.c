@@ -18,6 +18,7 @@
 #include "managers/node_manager.h"
 #include "power_logger.h"
 #include "node_power_logger.h"
+#include "tariff.h"
 #include "solar_forecast.h"
 #include "consumption_forecast.h"
 #include "surplus_forecast.h"
@@ -829,6 +830,19 @@ static esp_err_t node_settings_put_handler(httpd_req_t *req)
     return httpd_resp_sendstr(req, "{}");
 }
 
+// Re-derive the tariff source after any graph edit and, if it changed, subscribe
+// to the newly assigned device so its prices arrive without a restart.
+static void on_topology_changed(void)
+{
+    uint64_t before_node = 0, after_node = 0;
+    uint16_t before_ep = 0, after_ep = 0;
+    bool had = tariff_get_source(&before_node, &before_ep);
+    tariff_refresh_source();
+    bool has = tariff_get_source(&after_node, &after_ep);
+    if (has && (!had || before_node != after_node || before_ep != after_ep))
+        matter_controller_subscribe_node(after_node);
+}
+
 static esp_err_t node_delete_handler(httpd_req_t *req)
 {
     const char *last_slash = strrchr(req->uri, '/');
@@ -850,6 +864,7 @@ static esp_err_t node_delete_handler(httpd_req_t *req)
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Delete failed");
         return ESP_FAIL;
     }
+    on_topology_changed();
     httpd_resp_set_type(req, "application/json");
     return httpd_resp_sendstr(req, "{}");
 }
@@ -1142,6 +1157,143 @@ static esp_err_t topology_grid_put_handler(httpd_req_t *req)
 // electrical-sensor child is a PV string (feeds the inverter's "dc_in" handle).
 // Best-effort: failures to upsert an individual child are logged and skipped so
 // the inverter itself still configures.
+// Assign the tariff source: a `tariff` node wired to the consumer unit's
+// `tariff` handle. Mirrors topology_grid_put_handler; the node sits beside the
+// grid meter and the controller subscribes to it straight away.
+static esp_err_t topology_tariff_put_handler(httpd_req_t *req)
+{
+    if (req->content_len <= 0 || req->content_len > MAX_POST_BODY)
+    {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid body");
+        return ESP_FAIL;
+    }
+    char body[MAX_POST_BODY + 1];
+    int received = 0;
+    while (received < (int)req->content_len)
+    {
+        int r = httpd_req_recv(req, body + received, req->content_len - received);
+        if (r <= 0)
+        {
+            httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Recv failed");
+            return ESP_FAIL;
+        }
+        received += r;
+    }
+    body[received] = '\0';
+
+    cJSON *req_json = cJSON_Parse(body);
+    if (!req_json)
+    {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Bad JSON");
+        return ESP_FAIL;
+    }
+    cJSON *matter_node_id_j = cJSON_GetObjectItemCaseSensitive(req_json, "nodeId");
+    cJSON *matter_ep_id_j   = cJSON_GetObjectItemCaseSensitive(req_json, "endpointId");
+    cJSON *label_j          = cJSON_GetObjectItemCaseSensitive(req_json, "label");
+    if (!cJSON_IsNumber(matter_node_id_j) || !cJSON_IsNumber(matter_ep_id_j) || !cJSON_IsString(label_j))
+    {
+        cJSON_Delete(req_json);
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Missing nodeId/endpointId/label");
+        return ESP_FAIL;
+    }
+
+    // Place it beside the grid meter, below the consumer unit's grid input.
+    float cu_x = 0.0f, cu_y = 0.0f;
+    char *all_json = node_manager_get_all_json();
+    if (all_json)
+    {
+        cJSON *all = cJSON_Parse(all_json);
+        free(all_json);
+        if (all)
+        {
+            cJSON *n;
+            cJSON_ArrayForEach(n, cJSON_GetObjectItemCaseSensitive(all, "nodes"))
+            {
+                cJSON *id_j = cJSON_GetObjectItemCaseSensitive(n, "id");
+                if (cJSON_IsString(id_j) && strcmp(id_j->valuestring, "consumer_unit") == 0)
+                {
+                    cJSON *xj = cJSON_GetObjectItemCaseSensitive(n, "x");
+                    cJSON *yj = cJSON_GetObjectItemCaseSensitive(n, "y");
+                    if (cJSON_IsNumber(xj)) cu_x = (float)xj->valuedouble;
+                    if (cJSON_IsNumber(yj)) cu_y = (float)yj->valuedouble;
+                    break;
+                }
+            }
+            cJSON_Delete(all);
+        }
+    }
+    float node_x = cu_x - 220.0f;
+    float node_y = cu_y + 120.0f;
+
+    cJSON *settings = cJSON_CreateObject();
+    cJSON_AddStringToObject(settings, "label", label_j->valuestring);
+    cJSON_AddStringToObject(settings, "type", "tariff");
+    cJSON_AddNumberToObject(settings, "nodeId", matter_node_id_j->valuedouble);
+    cJSON_AddNumberToObject(settings, "endpointId", matter_ep_id_j->valuedouble);
+    char *settings_str = cJSON_PrintUnformatted(settings);
+
+    const char *edge_id = "tariff-tariff-out-consumer_unit-tariff";
+    esp_err_t err = node_manager_upsert("tariff", node_x, node_y, settings_str);
+    free(settings_str);
+    if (err == ESP_OK)
+        err = node_manager_upsert_edge(edge_id, "tariff", "consumer_unit", "tariff-out", "tariff");
+    cJSON_Delete(req_json);
+    if (err != ESP_OK)
+    {
+        cJSON_Delete(settings);
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Persist failed");
+        return ESP_FAIL;
+    }
+
+    on_topology_changed();
+
+    cJSON *resp = cJSON_CreateObject();
+    cJSON *node_obj = cJSON_AddObjectToObject(resp, "node");
+    cJSON_AddStringToObject(node_obj, "id", "tariff");
+    cJSON_AddNumberToObject(node_obj, "x", node_x);
+    cJSON_AddNumberToObject(node_obj, "y", node_y);
+    cJSON_AddItemToObject(node_obj, "settings", settings);
+
+    cJSON *edge_obj = cJSON_AddObjectToObject(resp, "edge");
+    cJSON_AddStringToObject(edge_obj, "id", edge_id);
+    cJSON_AddStringToObject(edge_obj, "source", "tariff");
+    cJSON_AddStringToObject(edge_obj, "sourceHandle", "tariff-out");
+    cJSON_AddStringToObject(edge_obj, "target", "consumer_unit");
+    cJSON_AddStringToObject(edge_obj, "targetHandle", "tariff");
+
+    return send_json(req, resp, 200);
+}
+
+static esp_err_t tariff_get_handler(httpd_req_t *req)
+{
+    char date[16] = {0};
+    size_t qlen = httpd_req_get_url_query_len(req);
+    if (qlen > 0 && qlen < 32)
+    {
+        char query[32];
+        if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK)
+            httpd_query_key_value(query, "date", date, sizeof(date));
+    }
+    if (!date[0])
+    {
+        time_t now = time(NULL);
+        struct tm tm_info;
+        localtime_r(&now, &tm_info);
+        strftime(date, sizeof(date), "%Y-%m-%d", &tm_info);
+    }
+
+    char *json = tariff_day_json(date);
+    if (!json)
+    {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "OOM");
+        return ESP_FAIL;
+    }
+    httpd_resp_set_type(req, "application/json");
+    esp_err_t err = httpd_resp_sendstr(req, json);
+    free(json);
+    return err;
+}
+
 static void topology_solar_build_children(uint64_t matter_node_id, uint16_t solar_ep_id,
                                           float inv_x, float inv_y)
 {
@@ -1776,6 +1928,7 @@ static esp_err_t edge_post_handler(httpd_req_t *req)
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Persist failed");
         return ESP_FAIL;
     }
+    on_topology_changed();
     httpd_resp_set_type(req, "application/json");
     httpd_resp_sendstr(req, "{}");
     return ESP_OK;
@@ -1795,6 +1948,7 @@ static esp_err_t edge_delete_handler(httpd_req_t *req)
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Delete failed");
         return ESP_FAIL;
     }
+    on_topology_changed();
     httpd_resp_set_type(req, "application/json");
     httpd_resp_sendstr(req, "{}");
     return ESP_OK;
@@ -2273,6 +2427,8 @@ esp_err_t web_server_start(void)
     const httpd_uri_t data_daily_energy_get = {.uri = "/api/data/daily-energy", .method = HTTP_GET, .handler = data_daily_energy_get_handler};
     const httpd_uri_t topology_grid_put = {.uri = "/api/topology/grid", .method = HTTP_PUT, .handler = topology_grid_put_handler};
     const httpd_uri_t topology_solar_put = {.uri = "/api/topology/solar", .method = HTTP_PUT, .handler = topology_solar_put_handler};
+    const httpd_uri_t topology_tariff_put = {.uri = "/api/topology/tariff", .method = HTTP_PUT, .handler = topology_tariff_put_handler};
+    const httpd_uri_t tariff_get = {.uri = "/api/tariff", .method = HTTP_GET, .handler = tariff_get_handler};
     const httpd_uri_t edge_post = {.uri = "/api/edges", .method = HTTP_POST, .handler = edge_post_handler};
     const httpd_uri_t edge_delete = {.uri = "/api/edges/*", .method = HTTP_DELETE, .handler = edge_delete_handler};
     const httpd_uri_t forecast_solar_get = {.uri = "/api/forecast/solar", .method = HTTP_GET, .handler = forecast_solar_get_handler};
@@ -2316,6 +2472,8 @@ esp_err_t web_server_start(void)
     httpd_register_uri_handler(server, &data_daily_energy_get);
     httpd_register_uri_handler(server, &topology_grid_put);
     httpd_register_uri_handler(server, &topology_solar_put);
+    httpd_register_uri_handler(server, &topology_tariff_put);
+    httpd_register_uri_handler(server, &tariff_get);
     httpd_register_uri_handler(server, &edge_post);
     httpd_register_uri_handler(server, &edge_delete);
     httpd_register_uri_handler(server, &forecast_solar_get);

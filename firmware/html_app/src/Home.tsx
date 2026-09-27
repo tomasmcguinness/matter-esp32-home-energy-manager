@@ -119,7 +119,21 @@ function ConfiguredSlot({ label, device, onReconfigure, onDelete }: { label: str
   )
 }
 
-function GridSensorModal({ initialSelected, onSave, onClose }: { initialSelected: SimpleDevice | null; onSave: (device: SimpleDevice) => void; onClose: () => void }) {
+type EndpointModalProps = {
+  initialSelected: SimpleDevice | null
+  onSave: (device: SimpleDevice) => void
+  onClose: () => void
+}
+
+// Picks one endpoint of a given device type and assigns it to a topology role
+// via the matching /api/topology/<role> route.
+function EndpointSelectModal({ title, description, emptyText, deviceTypeId, saveUrl, initialSelected, onSave, onClose }: EndpointModalProps & {
+  title: string
+  description: string
+  emptyText: string
+  deviceTypeId: string
+  saveUrl: string
+}) {
   type EndpointEntry = { nodeId: number; endpointId: number; label: string; deviceName: string }
 
   const [devices, setDevices] = useState<EndpointEntry[]>([])
@@ -129,12 +143,12 @@ function GridSensorModal({ initialSelected, onSave, onClose }: { initialSelected
   const [error, setError] = useState<string | null>(null)
 
   useEffect(() => {
-    fetch('/api/devices/endpoints?deviceTypeId=0x0510')
+    fetch(`/api/devices/endpoints?deviceTypeId=${deviceTypeId}`)
       .then(r => r.ok ? r.json() : Promise.reject(`HTTP ${r.status}`))
       .then((data: { endpoints: EndpointEntry[] }) => {
         let entries = data.endpoints
         // The new endpoint excludes already-assigned sensors. If one is already
-        // configured as the grid sensor, re-insert it at the top so the user can
+        // configured for this role, re-insert it at the top so the user can
         // reconfirm or switch to a different channel.
         if (initialSelected) {
           const alreadyListed = entries.some(
@@ -151,12 +165,12 @@ function GridSensorModal({ initialSelected, onSave, onClose }: { initialSelected
         setError(e instanceof Error ? e.message : String(e))
         setLoading(false)
       })
-  }, [])
+  }, [deviceTypeId]) // eslint-disable-line react-hooks/exhaustive-deps -- initialSelected only seeds the list on open
 
   function handleSave() {
     if (!selected) return
     setSaving(true)
-    fetch('/api/topology/grid', {
+    fetch(saveUrl, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ nodeId: selected.nodeId, endpointId: selected.endpointId, label: selected.label }),
@@ -172,11 +186,11 @@ function GridSensorModal({ initialSelected, onSave, onClose }: { initialSelected
   return (
     <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.4)', zIndex: 200, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
       <div style={{ background: '#fff', borderRadius: 12, padding: 24, width: 380, maxWidth: '90vw', boxShadow: '0 8px 32px rgba(0,0,0,0.18)' }}>
-        <h2 style={{ margin: '0 0 4px', fontSize: 16, fontWeight: 700, color: '#1e293b' }}>Select Grid Sensor</h2>
-        <p style={{ margin: '0 0 16px', fontSize: 13, color: '#64748b' }}>Choose the device that measures power at the grid connection.</p>
+        <h2 style={{ margin: '0 0 4px', fontSize: 16, fontWeight: 700, color: '#1e293b' }}>{title}</h2>
+        <p style={{ margin: '0 0 16px', fontSize: 13, color: '#64748b' }}>{description}</p>
         {error && <div style={{ marginBottom: 12, padding: '8px 12px', background: '#fef2f2', border: '1px solid #fca5a5', borderRadius: 6, fontSize: 13, color: '#b91c1c' }}>{error}</div>}
         {loading && <p style={{ fontSize: 13, color: '#94a3b8' }}>Loading devices…</p>}
-        {!loading && devices.length === 0 && <p style={{ fontSize: 13, color: '#94a3b8' }}>No devices with power measurement found.</p>}
+        {!loading && devices.length === 0 && <p style={{ fontSize: 13, color: '#94a3b8' }}>{emptyText}</p>}
         {!loading && devices.length > 0 && (
           <select
             value={selected ? `${selected.nodeId}-${selected.endpointId}` : ''}
@@ -209,6 +223,29 @@ function GridSensorModal({ initialSelected, onSave, onClose }: { initialSelected
         </div>
       </div>
     </div>
+  )
+}
+
+function GridSensorModal(props: EndpointModalProps) {
+  return (
+    <EndpointSelectModal {...props}
+      title="Select Grid Sensor"
+      description="Choose the device that measures power at the grid connection."
+      emptyText="No devices with power measurement found."
+      deviceTypeId="0x0510"
+      saveUrl="/api/topology/grid" />
+  )
+}
+
+// Electrical Energy Tariff device type; its Commodity Tariff cluster prices the grid import.
+function TariffModal(props: EndpointModalProps) {
+  return (
+    <EndpointSelectModal {...props}
+      title="Select Tariff"
+      description="Choose the device that publishes your electricity tariff (Commodity Tariff cluster)."
+      emptyText="No Electrical Energy Tariff devices found."
+      deviceTypeId="0x0513"
+      saveUrl="/api/topology/tariff" />
   )
 }
 
@@ -514,6 +551,8 @@ function Home() {
   const [gridSensor, setGridSensor] = useState<SimpleDevice | null>(null)
   const [solarModalOpen, setSolarModalOpen] = useState(false)
   const [solarInverter, setSolarInverter] = useState<SimpleDevice | null>(null)
+  const [tariffModalOpen, setTariffModalOpen] = useState(false)
+  const [tariff, setTariff] = useState<SimpleDevice | null>(null)
   const [appliances, setAppliances] = useState<(SimpleDevice | null)[]>(() => APPLIANCE_SLOTS.map(() => null))
   const [applianceModalSlot, setApplianceModalSlot] = useState<number | null>(null)
   // Consumer Unit position, used to place newly created appliance nodes on the canvas.
@@ -530,6 +569,10 @@ function Home() {
         const si = data.nodes.find(n => n.id === 'solar_inverter')
         if (si?.settings?.nodeId !== undefined && si.settings.endpointId !== undefined && si.settings.label) {
           setSolarInverter({ nodeId: si.settings.nodeId as number, endpointId: si.settings.endpointId as number, label: si.settings.label as string, hasElectricalSensor: false, hasSolarPower: true })
+        }
+        const tn = data.nodes.find(n => n.id === 'tariff')
+        if (tn?.settings?.nodeId !== undefined && tn.settings.endpointId !== undefined && tn.settings.label) {
+          setTariff({ nodeId: tn.settings.nodeId as number, endpointId: tn.settings.endpointId as number, label: tn.settings.label as string, hasElectricalSensor: false, hasSolarPower: false })
         }
         const cu = data.nodes.find(n => n.id === 'consumer_unit')
         if (cu?.x !== undefined && cu.y !== undefined) {
@@ -575,6 +618,18 @@ function Home() {
       .catch(() => { })
   }
 
+  function handleTariffSave(device: SimpleDevice) {
+    setTariff(device)
+    setTariffModalOpen(false)
+  }
+
+  function handleTariffDelete() {
+    fetch('/api/edges/tariff-tariff-out-consumer_unit-tariff', { method: 'DELETE' })
+      .then(() => fetch('/api/nodes/tariff', { method: 'DELETE' }))
+      .then(() => setTariff(null))
+      .catch(() => { })
+  }
+
   function handleSolarDelete() {
     fetch('/api/edges/solar_inverter-power-out-consumer_unit-solar_input', { method: 'DELETE' })
       .then(() => fetch('/api/nodes/solar_inverter', { method: 'DELETE' }))
@@ -596,6 +651,13 @@ function Home() {
           initialSelected={solarInverter}
           onSave={handleSolarSave}
           onClose={() => setSolarModalOpen(false)}
+        />
+      )}
+      {tariffModalOpen && (
+        <TariffModal
+          initialSelected={tariff}
+          onSave={handleTariffSave}
+          onClose={() => setTariffModalOpen(false)}
         />
       )}
       {applianceModalSlot !== null && (
@@ -631,6 +693,15 @@ function Home() {
               label="Solar Inverter"
               description="Device measuring power generated by your solar panels"
               onConfigure={() => setSolarModalOpen(true)}
+            />
+          )}
+          {tariff ? (
+            <ConfiguredSlot label="Tariff" device={tariff} onReconfigure={() => setTariffModalOpen(true)} onDelete={handleTariffDelete} />
+          ) : (
+            <UnconfiguredSlot
+              label="Tariff"
+              description="Device publishing your electricity prices"
+              onConfigure={() => setTariffModalOpen(true)}
             />
           )}
         </div>

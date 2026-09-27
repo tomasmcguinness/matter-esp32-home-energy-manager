@@ -22,6 +22,7 @@
 #include "sd_card.h"
 #include "solar_forecast.h"
 #include "node_power_logger.h"
+#include "tariff.h"
 
 #include "esp_netif_net_stack.h"
 
@@ -217,6 +218,7 @@ extern "C" void app_main(void)
     ESP_ERROR_CHECK(device_manager_init());
     matter_controller_seed_value_cache();
     ESP_ERROR_CHECK(node_power_logger_init());
+    ESP_ERROR_CHECK(tariff_init());
 
     uint8_t eth_port_cnt = 0;
     esp_eth_handle_t *eth_handles;

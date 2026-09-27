@@ -19,6 +19,7 @@
 #include "managers/node_manager.h"
 #include "ws_server.h"
 #include "value_cache.h"
+#include "tariff.h"
 #include "cJSON.h"
 
 #include <app/server/Dnssd.h>
@@ -627,6 +628,9 @@ static void on_attribute_data_cb(uint64_t node_id,
     if (path.mClusterId == ElectricalPowerMeasurement::Id || path.mClusterId == PowerSource::Id) {
         cache_attribute(node_id, path, data);
     }
+    else if (path.mClusterId == CommodityTariff::Id) {
+        tariff_on_attribute(node_id, path, data);
+    }
 
     return;
 }
@@ -822,14 +826,25 @@ static void establish_subscription(uint64_t node_id)
 {
     ESP_LOGI(TAG, "Subscribing to ElectricalPowerMeasurement on node 0x%016llX (all endpoints), requested MaxInterval = %us", (unsigned long long)node_id, (unsigned)kSubMaxIntervalSec);
 
-    auto *args = new uint64_t(node_id);
+    // The tariff source additionally gets the whole Commodity Tariff cluster on
+    // its tariff endpoint. One cluster-wide path keeps the per-subscription path
+    // count low, and no other node's subscription carries it.
+    struct sub_args_t { uint64_t node_id; bool tariff; uint16_t tariff_endpoint; };
+    auto *args = new sub_args_t{ node_id, false, 0 };
+    uint64_t tariff_node = 0;
+    if (tariff_get_source(&tariff_node, &args->tariff_endpoint) && tariff_node == node_id)
+    {
+        args->tariff = true;
+        ESP_LOGI(TAG, "Including Commodity Tariff (endpoint %u) in node 0x%016llX subscription",
+                 (unsigned)args->tariff_endpoint, (unsigned long long)node_id);
+    }
 
     chip::DeviceLayer::PlatformMgr().ScheduleWork([](intptr_t arg)
                                                   {
-        auto *args = reinterpret_cast<uint64_t *>(arg);
+        auto *args = reinterpret_cast<sub_args_t *>(arg);
 
         ScopedMemoryBufferWithSize<AttributePathParams> attr_paths;
-        attr_paths.Alloc(4);
+        attr_paths.Alloc(args->tariff ? 5 : 4);
 
         // Endpoint left as wildcard (kInvalidEndpointId): subscribe to
         // these attributes on every endpoint of the node that exposes
@@ -841,13 +856,15 @@ static void establish_subscription(uint64_t node_id)
         // Battery state of charge. Only battery power sources expose this optional
         // attribute, so wildcarding the endpoint is harmless on other endpoints.
         attr_paths[3] = AttributePathParams(PowerSource::Id, PowerSource::Attributes::BatPercentRemaining::Id);
+        if (args->tariff)
+            attr_paths[4] = AttributePathParams(args->tariff_endpoint, CommodityTariff::Id);
 
         ScopedMemoryBufferWithSize<EventPathParams> event_paths;
         event_paths.Alloc(0);
 
         // This might be an ICD device, so we would need to change the MinInterval to zero
         //
-        auto *cmd = chip::Platform::New<esp_matter::controller::subscribe_command>(*args,
+        auto *cmd = chip::Platform::New<esp_matter::controller::subscribe_command>(args->node_id,
             std::move(attr_paths),
             std::move(event_paths),
             kSubMinIntervalSec, // MinInterval
@@ -1073,6 +1090,16 @@ esp_err_t matter_controller_subscribe(void)
         }
     }
 
+    // The tariff source may not meter anything, so add it explicitly.
+    uint64_t tariff_node = 0;
+    if (tariff_get_source(&tariff_node, nullptr) && node_count < kMaxSensors)
+    {
+        bool seen = false;
+        for (size_t j = 0; j < node_count; j++)
+            if (unique_nodes[j] == tariff_node) { seen = true; break; }
+        if (!seen) unique_nodes[node_count++] = tariff_node;
+    }
+
     if (node_count > 0)
     {
         ESP_LOGI(TAG, "Queuing subscription to ElectricalPowerMeasurement on %u node(s)", (unsigned)node_count);
@@ -1091,6 +1118,38 @@ esp_err_t matter_controller_subscribe(void)
         ESP_LOGI(TAG, "No electrical sensor endpoints found to subscribe to");
     }
 
+    return ESP_OK;
+}
+
+esp_err_t matter_controller_subscribe_node(uint64_t node_id)
+{
+    if (!s_subscribe_queue) return ESP_ERR_INVALID_STATE;
+
+    bool active = false;
+    taskENTER_CRITICAL(&s_retry_lock);
+    retry_slot_t *slot = retry_slot(node_id, true);
+    if (slot)
+    {
+        active        = slot->active;
+        slot->pending = false;
+    }
+    taskEXIT_CRITICAL(&s_retry_lock);
+
+    if (!slot)
+    {
+        ESP_LOGW(TAG, "Retry table full, cannot subscribe to node 0x%016llX", (unsigned long long)node_id);
+        return ESP_ERR_NO_MEM;
+    }
+    if (active)
+    {
+        // Re-subscribing a live node would leave its old ReadClient running
+        // alongside the new one. The new paths are picked up the next time the
+        // subscription is re-established (or after a restart).
+        ESP_LOGW(TAG, "Node 0x%016llX is already subscribed; new paths apply on its next resubscription",
+                 (unsigned long long)node_id);
+        return ESP_OK;
+    }
+    subscribe_enqueue(node_id);
     return ESP_OK;
 }
 

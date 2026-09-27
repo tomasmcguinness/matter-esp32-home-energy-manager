@@ -2,12 +2,14 @@
 #include "power_logger.h"        // power_record_t + grid file writer/rollup
 #include "consumption_forecast.h"
 #include "value_cache.h"
+#include "tariff.h"
 #include "managers/node_manager.h"
 
 #include <stdio.h>
 #include <string.h>
 #include <ctype.h>
 #include <time.h>
+#include <math.h>
 #include <dirent.h>
 #include <string>
 #include <vector>
@@ -53,6 +55,7 @@ static esp_timer_handle_t    s_flush_timer;
 static esp_timer_handle_t    s_daily_timer;
 
 static void schedule_midnight_rollup(void);
+static void cost_day_cached(const char *date, bool allow_cache_write);
 
 // Copy a node/date token into out only if it is filesystem-safe ([A-Za-z0-9_-],
 // length 1..32). Blocks '/', '.' and anything that could escape /sdcard.
@@ -141,6 +144,9 @@ static void refresh_streams(void)
         if (src_dist && !tgt_dist) { other = tgt; cu_handle = json_str(e, "sourceHandle"); }
         else if (tgt_dist && !src_dist) { other = src; cu_handle = json_str(e, "targetHandle"); }
         else continue;
+
+        // The tariff source hangs off the CU but meters nothing.
+        if (cu_handle && strcmp(cu_handle, "tariff") == 0) continue;
 
         bool is_grid = other == GRID_NODE_ID || (cu_handle && strcmp(cu_handle, "grid") == 0);
         const char *role = is_grid ? "grid"
@@ -275,6 +281,7 @@ static void on_midnight_timer(void *arg)
     // freshly-rolled grid-hourly history.
     node_power_logger_rollup_hourly(yesterday);
     power_logger_rollup_hourly(yesterday);
+    cost_day_cached(yesterday, true); // freeze yesterday's cost while the minute files are fresh
     consumption_forecast_compute(tomorrow);
     schedule_midnight_rollup();
 }
@@ -507,14 +514,196 @@ static bool file_kwh(const char *hourly_path, const char *minute_path, double *k
     return false;
 }
 
-char *node_power_logger_daily_energy_json(int days)
+struct stream_info_t { std::string graph_id; const char *role; bool is_grid; };
+
+static std::vector<stream_info_t> snapshot_streams(void)
 {
-    struct info_t { std::string graph_id; const char *role; bool is_grid; };
-    std::vector<info_t> streams;
+    std::vector<stream_info_t> streams;
     xSemaphoreTake(s_mutex, portMAX_DELAY);
     for (const auto &s : s_streams)
         streams.push_back({ s.graph_id, s.role, s.is_grid });
     xSemaphoreGive(s_mutex);
+    return streams;
+}
+
+// Minutes in a local day (1380..1500 across DST changes), indexed from local midnight.
+static constexpr int kMaxDayMinutes = 1500;
+
+// Load a minute file into per-minute-of-day mW, indexed from day_start. Returns
+// false if the file is absent. Minutes with no record stay at 0.
+static bool load_minutes(const char *path, time_t day_start, std::vector<int32_t> &mw)
+{
+    FILE *f = fopen(path, "rb");
+    if (!f) return false;
+    mw.assign(kMaxDayMinutes, 0);
+    power_record_t rec;
+    while (fread(&rec, sizeof(rec), 1, f) == 1) {
+        long idx = ((long)rec.unix_minute - (long)day_start) / 60;
+        if (idx >= 0 && idx < kMaxDayMinutes) mw[idx] = rec.power_mw;
+    }
+    fclose(f);
+    return true;
+}
+
+struct day_cost_t {
+    uint16_t currency = 0;
+    uint8_t  decimals = 0;
+    std::vector<std::pair<std::string, double>> cost; // graph id (or UNMONITORED_KEY) -> money units
+};
+
+static const char *UNMONITORED_KEY = "__unmonitored";
+
+// Cost one day from its minute files and resolved tariff. The bill only charges
+// grid import, so each minute costs max(grid, 0) kWh x that slot's price; that
+// cost is then shared across the appliances and the unmonitored remainder in
+// proportion to their share of the minute's consumption (grid + solar). The
+// per-device costs therefore add up to the import cost, and solar-covered
+// consumption is free. Returns false when there is no tariff or grid data.
+static bool compute_day_cost(const char *date, const std::vector<stream_info_t> &streams, day_cost_t &out)
+{
+    tariff_day_t tariff;
+    if (!tariff_load_day(date, &tariff)) return false;
+
+    struct tm tm_day = {};
+    if (sscanf(date, "%d-%d-%d", &tm_day.tm_year, &tm_day.tm_mon, &tm_day.tm_mday) != 3) return false;
+    tm_day.tm_year -= 1900;
+    tm_day.tm_mon  -= 1;
+    tm_day.tm_isdst = -1;
+    time_t day_start = mktime(&tm_day);
+
+    char path[96];
+    std::vector<int32_t> grid, solar(kMaxDayMinutes, 0), tmp;
+    snprintf(path, sizeof(path), "%s/grid-%s", SD_BASE, date);
+    if (!load_minutes(path, day_start, grid)) return false;
+
+    std::vector<std::pair<std::string, std::vector<int32_t>>> loads;
+    for (const auto &s : streams) {
+        if (s.is_grid) continue;
+        snprintf(path, sizeof(path), "%s/node-%s-%s", SD_BASE, s.graph_id.c_str(), date);
+        if (!load_minutes(path, day_start, tmp)) tmp.assign(kMaxDayMinutes, 0);
+        if (strcmp(s.role, "solar") == 0) {
+            for (int i = 0; i < kMaxDayMinutes; i++) solar[i] += tmp[i];
+        } else {
+            loads.emplace_back(s.graph_id, tmp);
+        }
+    }
+
+    std::vector<double> load_cost(loads.size(), 0.0);
+    double unmonitored_cost = 0.0;
+
+    for (int i = 0; i < kMaxDayMinutes; i++) {
+        if (grid[i] <= 0) continue; // exporting or idle: nothing bought this minute
+
+        time_t t = day_start + (time_t)i * 60;
+        struct tm lt;
+        localtime_r(&t, &lt);
+        int slot = (lt.tm_hour * 60 + lt.tm_min) / TARIFF_SLOT_MINUTES;
+        if (slot < 0 || slot >= TARIFF_SLOTS || tariff.price[slot] == TARIFF_NO_PRICE) continue;
+
+        double minute_cost = (grid[i] / 60.0 / 1e6) * (double)tariff.price[slot];
+
+        double total = (double)grid[i] + (double)solar[i];
+        double loads_sum = 0.0;
+        for (const auto &l : loads) loads_sum += l.second[i] > 0 ? l.second[i] : 0;
+        if (loads_sum > total) total = loads_sum; // metering disagreement: never negative remainder
+        if (total <= 0) {
+            unmonitored_cost += minute_cost;
+            continue;
+        }
+        for (size_t k = 0; k < loads.size(); k++) {
+            int32_t v = loads[k].second[i];
+            if (v > 0) load_cost[k] += minute_cost * (v / total);
+        }
+        unmonitored_cost += minute_cost * ((total - loads_sum) / total);
+    }
+
+    out.currency = tariff.currency;
+    out.decimals = tariff.decimals;
+    out.cost.clear();
+    for (size_t k = 0; k < loads.size(); k++) out.cost.emplace_back(loads[k].first, load_cost[k]);
+    out.cost.emplace_back(UNMONITORED_KEY, unmonitored_cost);
+    return true;
+}
+
+static void cost_path(const char *date, char *buf, size_t len)
+{
+    snprintf(buf, len, "%s/cost-%s", SD_BASE, date);
+}
+
+static bool read_cost_cache(const char *date, day_cost_t &out)
+{
+    char path[64];
+    cost_path(date, path, sizeof(path));
+    FILE *f = fopen(path, "rb");
+    if (!f) return false;
+    fseek(f, 0, SEEK_END);
+    long len = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    if (len <= 0 || len > 8192) { fclose(f); return false; }
+    std::string buf((size_t)len, '\0');
+    size_t got = fread(&buf[0], 1, (size_t)len, f);
+    fclose(f);
+    if (got != (size_t)len) return false;
+
+    cJSON *root = cJSON_Parse(buf.c_str());
+    if (!root) return false;
+    cJSON *cur  = cJSON_GetObjectItemCaseSensitive(root, "currency");
+    cJSON *dec  = cJSON_GetObjectItemCaseSensitive(root, "decimals");
+    cJSON *cost = cJSON_GetObjectItemCaseSensitive(root, "cost");
+    bool ok = cJSON_IsNumber(cur) && cJSON_IsNumber(dec) && cJSON_IsObject(cost);
+    if (ok) {
+        out.currency = (uint16_t)cur->valuedouble;
+        out.decimals = (uint8_t)dec->valuedouble;
+        out.cost.clear();
+        cJSON *c = nullptr;
+        cJSON_ArrayForEach(c, cost)
+            if (cJSON_IsNumber(c)) out.cost.emplace_back(c->string, c->valuedouble);
+    }
+    cJSON_Delete(root);
+    return ok;
+}
+
+static void write_cost_cache(const char *date, const day_cost_t &dc)
+{
+    cJSON *root = cJSON_CreateObject();
+    cJSON_AddNumberToObject(root, "currency", dc.currency);
+    cJSON_AddNumberToObject(root, "decimals", dc.decimals);
+    cJSON *cost = cJSON_AddObjectToObject(root, "cost");
+    for (const auto &c : dc.cost) cJSON_AddNumberToObject(cost, c.first.c_str(), c.second);
+    char *json = cJSON_PrintUnformatted(root);
+    cJSON_Delete(root);
+    if (!json) return;
+
+    char path[64];
+    cost_path(date, path, sizeof(path));
+    FILE *f = fopen(path, "wb");
+    if (f) {
+        fputs(json, f);
+        fclose(f);
+    }
+    free(json);
+}
+
+// A finished day's minute files and tariff never change, so its cost is
+// computed once and cached. Today is always computed live and never cached.
+static bool day_cost(const char *date, bool is_today, const std::vector<stream_info_t> &streams,
+                     day_cost_t &out, bool allow_cache_write)
+{
+    if (!is_today && read_cost_cache(date, out)) return true;
+    if (!compute_day_cost(date, streams, out)) return false;
+    if (!is_today && allow_cache_write) write_cost_cache(date, out);
+    return true;
+}
+
+static void cost_day_cached(const char *date, bool allow_cache_write)
+{
+    day_cost_t dc;
+    day_cost(date, false, snapshot_streams(), dc, allow_cache_write);
+}
+
+char *node_power_logger_daily_energy_json(int days)
+{
+    std::vector<stream_info_t> streams = snapshot_streams();
 
     cJSON *root  = cJSON_CreateObject();
     cJSON *nodes = cJSON_AddArrayToObject(root, "nodes");
@@ -529,6 +718,9 @@ char *node_power_logger_daily_energy_json(int days)
     time_t now = time(NULL);
     struct tm today;
     localtime_r(&now, &today);
+
+    bool     have_currency = false;
+    uint16_t currency = 0;
 
     // Oldest first. Step the calendar day via mktime so DST changes are handled.
     for (int back = days - 1; back >= 0; back--) {
@@ -556,8 +748,21 @@ char *node_power_logger_daily_energy_json(int days)
             if (file_kwh(hourly, minute, &v))
                 cJSON_AddNumberToObject(kwh, s.graph_id.c_str(), v);
         }
+
+        // Cost in major currency units (the stored money value / 10^decimals),
+        // so days priced with different precision still add up. Omitted without a tariff.
+        day_cost_t dc;
+        if (day_cost(date, back == 0, streams, dc, true)) {
+            double scale = pow(10.0, dc.decimals);
+            cJSON *cost = cJSON_AddObjectToObject(day, "cost");
+            for (const auto &c : dc.cost) cJSON_AddNumberToObject(cost, c.first.c_str(), c.second / scale);
+            have_currency = true;
+            currency = dc.currency;
+        }
         cJSON_AddItemToArray(arr, day);
     }
+
+    if (have_currency) cJSON_AddNumberToObject(root, "currency", currency);
 
     char *json = cJSON_PrintUnformatted(root);
     cJSON_Delete(root);

@@ -9,6 +9,7 @@ idf_component_register(SRCS
         "sd_card.c"
         "power_logger.c"
         "node_power_logger.cpp"
+        "tariff.cpp"
         "value_cache.cpp"
         "solar_forecast.c"
         "consumption_forecast.c"

@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { useSearchParams } from 'react-router'
+import { fmtMoney } from './tariff'
 
 type PowerRecord = { minute: number; power_w: number }
 
@@ -195,6 +196,7 @@ function connectedNodes(nodes: SavedNodeConfig[], edges: SavedEdgeConfig[]): Con
     if (e.source === CU_ID) { otherId = e.target; cuHandle = e.sourceHandle }
     else if (e.target === CU_ID) { otherId = e.source; cuHandle = e.targetHandle }
     if (!otherId || seen.has(otherId)) continue
+    if (cuHandle === 'tariff') continue // the tariff source prices power; it doesn't meter any
     seen.add(otherId)
     result.push({
       graphId: otherId,
@@ -239,10 +241,12 @@ function ProfileSection({ url, date }: { url: string; date: string }) {
 type EnergyRole = 'grid' | 'solar' | 'load'
 type DailyEnergy = {
   nodes: { id: string; role: EnergyRole }[]
-  days: { date: string; kwh: Record<string, number> }[]
+  // cost is in major currency units, present only for days with a recorded tariff.
+  days: { date: string; kwh: Record<string, number>; cost?: Record<string, number> }[]
+  currency?: number
 }
 
-type Series = { id: string; label: string; color: string; total: number }
+type Series = { id: string; label: string; color: string; total: number; cost: number }
 
 const HISTORY_DAYS = 30
 const UNMONITORED_ID = '__unmonitored'
@@ -291,12 +295,15 @@ function buildHistory(data: DailyEnergy, labels: Map<string, string>) {
   })
 
   const totalOf = (id: string) => days.reduce((acc, d) => acc + (d.parts[id] ?? 0), 0)
+  // The firmware keys the remainder's cost as "__unmonitored", matching UNMONITORED_ID.
+  const costOf = (id: string) => data.days.reduce((acc, d) => acc + (d.cost?.[id] ?? 0), 0)
   const series: Series[] = loadIds
-    .map((id, i) => ({ id, label: labels.get(id) ?? id, color: PALETTE[i % PALETTE.length], total: totalOf(id) }))
+    .map((id, i) => ({ id, label: labels.get(id) ?? id, color: PALETTE[i % PALETTE.length], total: totalOf(id), cost: costOf(id) }))
     .sort((a, b) => b.total - a.total)
-  series.push({ id: UNMONITORED_ID, label: 'Unmonitored', color: UNMONITORED_COLOR, total: totalOf(UNMONITORED_ID) })
+  series.push({ id: UNMONITORED_ID, label: 'Unmonitored', color: UNMONITORED_COLOR, total: totalOf(UNMONITORED_ID), cost: costOf(UNMONITORED_ID) })
 
-  return { days, series, hasGrid: gridIds.length > 0 }
+  const costedDays = data.days.filter(d => d.cost !== undefined).length
+  return { days, series, hasGrid: gridIds.length > 0, costedDays }
 }
 
 function UsageHistory({ labels }: { labels: Map<string, string> }) {
@@ -315,7 +322,9 @@ function UsageHistory({ labels }: { labels: Map<string, string> }) {
   if (error) body = <div className="alert alert-danger">{error}</div>
   else if (!data) body = <p style={{ color: '#94a3b8', fontSize: 13 }}>Loading…</p>
   else {
-    const { days, series, hasGrid } = buildHistory(data, labels)
+    const { days, series, hasGrid, costedDays } = buildHistory(data, labels)
+    const hasCost = costedDays > 0
+    const totalCost = series.reduce((acc, s) => acc + s.cost, 0)
     if (!hasGrid) {
       body = <p style={{ color: '#94a3b8', fontSize: 13 }}>Assign a grid meter on the Topology page to see usage history.</p>
     } else {
@@ -386,6 +395,7 @@ function UsageHistory({ labels }: { labels: Map<string, string> }) {
                 <th style={{ fontWeight: 600 }}>Device</th>
                 <th style={{ fontWeight: 600, textAlign: 'right' }}>Consumption</th>
                 <th style={{ fontWeight: 600, textAlign: 'right' }}>Share</th>
+                <th style={{ fontWeight: 600, textAlign: 'right' }}>Cost</th>
               </tr>
             </thead>
             <tbody>
@@ -405,17 +415,29 @@ function UsageHistory({ labels }: { labels: Map<string, string> }) {
                   <td style={{ textAlign: 'right', background: hovered === s.id ? '#f1f5f9' : undefined }}>
                     {grandTotal > 0 ? `${((s.total / grandTotal) * 100).toFixed(1)}%` : '—'}
                   </td>
+                  <td style={{ textAlign: 'right', background: hovered === s.id ? '#f1f5f9' : undefined, color: hasCost ? undefined : '#94a3b8' }}>
+                    {hasCost ? fmtMoney(s.cost, data.currency) : '—'}
+                  </td>
                 </tr>
               ))}
               <tr style={{ fontWeight: 600 }}>
                 <td>Total</td>
                 <td style={{ textAlign: 'right' }}>{fmtKwh(grandTotal)}</td>
                 <td style={{ textAlign: 'right' }}>{grandTotal > 0 ? '100%' : '—'}</td>
+                <td />
               </tr>
               <tr style={{ fontWeight: 600 }}>
-                <td>Total cost</td>
-                <td style={{ textAlign: 'right', color: '#94a3b8' }}>N/A</td>
+                <td>
+                  Total cost
+                  {hasCost && costedDays < days.length && (
+                    <span style={{ fontWeight: 400, color: '#94a3b8' }}> ({costedDays} of {days.length} days)</span>
+                  )}
+                </td>
                 <td />
+                <td />
+                <td style={{ textAlign: 'right', color: hasCost ? undefined : '#94a3b8' }}>
+                  {hasCost ? fmtMoney(totalCost, data.currency) : 'N/A'}
+                </td>
               </tr>
             </tbody>
           </table>

@@ -11,16 +11,30 @@ type NodeConfig = { id: string; x: number; y: number; settings: Record<string, u
 type EdgeConfig = { id: string; source: string; target: string; sourceHandle?: string; targetHandle?: string }
 
 // Seed a small topology so the Power page has connected nodes to render in dev:
-// a consumer unit fed by a grid meter, with an oven hanging off circuit 1.
+// a consumer unit fed by a grid meter, with an oven hanging off circuit 1 and a
+// tariff device wired to the CU's tariff handle.
 let nodeConfigs: NodeConfig[] = [
   { id: 'consumer_unit', x: 0, y: 0, settings: { label: 'Consumer Unit', type: 'consumerUnit', deletable: false } },
   { id: 'grid_meter', x: -220, y: 0, settings: { label: 'Grid Meter', type: 'device', nodeId: 30001, endpointId: 1 } },
   { id: 'node_11', x: 260, y: -40, settings: { name: 'Oven', label: 'Oven', type: 'appliance', nodeId: 20001, endpointId: 1, excludeFromScheduling: true } },
+  { id: 'tariff', x: -220, y: 120, settings: { label: 'Energy Tariff', type: 'tariff', nodeId: 40001, endpointId: 1 } },
 ]
 let edgeConfigs: EdgeConfig[] = [
   { id: 'grid_meter-power-out-consumer_unit-grid', source: 'grid_meter', target: 'consumer_unit', sourceHandle: 'power-out', targetHandle: 'grid' },
   { id: 'consumer_unit-circuit_1-node_11-power-in', source: 'consumer_unit', target: 'node_11', sourceHandle: 'circuit_1', targetHandle: 'power-in' },
+  { id: 'tariff-tariff-out-consumer_unit-tariff', source: 'tariff', target: 'consumer_unit', sourceHandle: 'tariff-out', targetHandle: 'tariff' },
 ]
+
+// Mock time-of-use tariff, in 1e-5 GBP per kWh (decimals = 5): off-peak
+// 00:30-05:30, peak 16:00-19:00, standard otherwise. Days before the tariff was
+// "assigned" have no prices, so the usage history shows a partial cost.
+const TARIFF_DAYS_OF_HISTORY = 20
+function mockTariffPrice(slot: number): number {
+  const minute = slot * 15
+  if (minute >= 30 && minute < 330) return 7500
+  if (minute >= 960 && minute < 1140) return 35000
+  return 24500
+}
 
 let devices: Device[] = [
   {
@@ -49,6 +63,16 @@ let devices: Device[] = [
       { endpointId: 0, label: 'Root Node',   included: false, deviceTypes: [0x0016], parts: [1] },
       { endpointId: 1, label: 'Grid Meter',  included: true,  deviceTypes: [0x0512], parts: [2], hasDem: true },
       { endpointId: 2, label: 'Grid Sensor', included: false, deviceTypes: [0x0510], parts: [] },
+    ],
+  },
+  {
+    nodeId: 40001,
+    vendorName: 'Matter Energy',
+    productName: 'Energy Gateway',
+    hasSubscription: true,
+    endpoints: [
+      { endpointId: 0, label: 'Root Node', included: false, deviceTypes: [0x0016], parts: [1] },
+      { endpointId: 1, label: 'Energy Tariff', included: true, deviceTypes: [0x0513], parts: [] },
     ],
   },
   {
@@ -247,6 +271,7 @@ export const handlers = [
       if (e.source === 'consumer_unit') { id = e.target; handle = e.sourceHandle }
       else if (e.target === 'consumer_unit') { id = e.source; handle = e.targetHandle }
       if (!id || streams.some(s => s.id === id)) continue
+      if (handle === 'tariff') continue // prices power, meters none
       const role = handle === 'grid' ? 'grid' : handle?.startsWith('solar') ? 'solar' : 'load'
       streams.push({ id, role })
     }
@@ -279,9 +304,51 @@ export const handlers = [
         if (s.role === 'solar') kwh[s.id] = +solar.toFixed(3)
         if (s.role === 'grid') kwh[s.id] = +(total - solar).toFixed(3)
       }
-      result.push({ date, kwh })
+
+      // Cost mirrors the firmware: only grid import is paid for, shared across
+      // consumers by their share of consumption, at a blended ~£0.22/kWh.
+      if (back < TARIFF_DAYS_OF_HISTORY && nodeConfigs.some(n => n.id === 'tariff')) {
+        const importCost = Math.max(0, total - solar) * 0.22
+        const cost: Record<string, number> = {}
+        for (const s of streams.filter(s => s.role === 'load')) cost[s.id] = +(importCost * kwh[s.id] / total).toFixed(4)
+        cost.__unmonitored = +(importCost * (total - loads) / total).toFixed(4)
+        result.push({ date, kwh, cost })
+      } else {
+        result.push({ date, kwh })
+      }
     }
-    return HttpResponse.json({ nodes: streams, days: result })
+    const currency = nodeConfigs.some(n => n.id === 'tariff') ? { currency: 826 } : {}
+    return HttpResponse.json({ nodes: streams, days: result, ...currency })
+  }),
+
+  http.get('/api/tariff', ({ request }) => {
+    const url = new URL(request.url)
+    const date = url.searchParams.get('date') ?? new Date().toISOString().slice(0, 10)
+    const assigned = nodeConfigs.some(n => n.id === 'tariff')
+    const [y, m, d] = date.split('-').map(Number)
+    const today = new Date()
+    const daysAgo = Math.round((new Date(today.getFullYear(), today.getMonth(), today.getDate()).getTime() - new Date(y, m - 1, d).getTime()) / 86400000)
+    // Prices exist from the day the tariff was assigned up to tomorrow.
+    const priced = assigned && daysAgo < TARIFF_DAYS_OF_HISTORY && daysAgo >= -1
+    return HttpResponse.json({
+      date,
+      assigned,
+      ...(assigned ? { provider: 'Mock Energy', label: 'Time of Use' } : {}),
+      ...(priced ? { currency: 826, decimals: 5, unit: 0 } : {}),
+      slots: priced ? Array.from({ length: 96 }, (_, i) => mockTariffPrice(i)) : [],
+    })
+  }),
+
+  http.put('/api/topology/tariff', async ({ request }) => {
+    const body = (await request.json()) as { nodeId: number; endpointId: number; label: string }
+    const cu = nodeConfigs.find(n => n.id === 'consumer_unit')
+    const x = (cu?.x ?? 0) - 220
+    const y = (cu?.y ?? 0) + 120
+    const settings = { label: body.label, type: 'tariff', nodeId: body.nodeId, endpointId: body.endpointId }
+    const edge = { id: 'tariff-tariff-out-consumer_unit-tariff', source: 'tariff', sourceHandle: 'tariff-out', target: 'consumer_unit', targetHandle: 'tariff' }
+    nodeConfigs = [...nodeConfigs.filter(n => n.id !== 'tariff'), { id: 'tariff', x, y, settings }]
+    edgeConfigs = [...edgeConfigs.filter(e => e.id !== edge.id), edge]
+    return HttpResponse.json({ node: { id: 'tariff', x, y, settings }, edge })
   }),
 
   http.put('/api/topology/grid', async ({ request }) => {

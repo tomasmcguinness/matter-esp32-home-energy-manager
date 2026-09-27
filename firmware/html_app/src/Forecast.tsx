@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import { type TariffDay, SLOT_MINUTES, currentSlot, fmtUnitPrice, localDateString, slotPrice } from './tariff'
 
 type Estimate = { time: string; watts: number }
 type ForecastResult = { date: string; estimates: Estimate[]; total_wh: number }
@@ -109,6 +110,108 @@ function SurplusChart({ slots }: { slots: SurplusSlot[] }) {
 
       <line x1={PAD.left} y1={midY} x2={PAD.left + PLOT_W} y2={midY} stroke="#e2e8f0" strokeWidth={1} />
     </svg>
+  )
+}
+
+// Today's and tomorrow's 15-minute prices as one step line across 48 hours.
+// Unpriced slots break the line; a marker shows the slot in force now.
+function TariffChart({ days }: { days: TariffDay[] }) {
+  const prices: (number | null)[] = days.flatMap(d =>
+    d.slots.length ? d.slots.map((_, i) => slotPrice(d, i)) : Array(96).fill(null))
+  const known = prices.filter((p): p is number => p !== null)
+  if (known.length === 0) {
+    return <p style={{ color: '#94a3b8', fontSize: 13 }}>No prices published for today or tomorrow yet.</p>
+  }
+  const currency = days.find(d => d.currency !== undefined)?.currency
+
+  const yMin = Math.min(0, ...known)
+  const yMax = Math.max(...known) * 1.1 || 1
+  const slotW = PLOT_W / prices.length
+  const x = (i: number) => PAD.left + i * slotW
+  const y = (p: number) => PAD.top + PLOT_H - ((p - yMin) / (yMax - yMin)) * PLOT_H
+
+  // Contiguous runs of priced slots, each drawn as its own step path.
+  const runs: string[] = []
+  let d = ''
+  prices.forEach((p, i) => {
+    if (p === null) { if (d) runs.push(d); d = ''; return }
+    d += d ? ` H${x(i).toFixed(1)} V${y(p).toFixed(1)}` : `M${x(i).toFixed(1)},${y(p).toFixed(1)}`
+    if (i === prices.length - 1 || prices[i + 1] === null) d += ` H${x(i + 1).toFixed(1)}`
+  })
+  if (d) runs.push(d)
+
+  const now = currentSlot()
+  const yTicks = [yMin, (yMin + yMax) / 2, yMax]
+  const perDay = 96
+
+  return (
+    <svg viewBox={`0 0 ${SVG_W} ${SVG_H}`} style={{ width: '100%', fontFamily: 'inherit' }}>
+      {yTicks.map(t => (
+        <g key={t}>
+          <line x1={PAD.left} y1={y(t)} x2={PAD.left + PLOT_W} y2={y(t)} stroke="#e2e8f0" strokeWidth={1} />
+          <text x={PAD.left - 6} y={y(t) + 4} textAnchor="end" fontSize={10} fill="#94a3b8">
+            {fmtUnitPrice(t, currency).replace('/kWh', '')}
+          </text>
+        </g>
+      ))}
+      {/* Midnight divider between today and tomorrow */}
+      <line x1={x(perDay)} y1={PAD.top} x2={x(perDay)} y2={PAD.top + PLOT_H} stroke="#cbd5e1" strokeDasharray="3 3" />
+      {runs.map((r, i) => <path key={i} d={r} fill="none" stroke="#f59e0b" strokeWidth={2} />)}
+      <line x1={x(now + 0.5)} y1={PAD.top} x2={x(now + 0.5)} y2={PAD.top + PLOT_H} stroke="#3b82f6" strokeWidth={1.5} />
+      {[0, 6, 12, 18, 24, 30, 36, 42].map(h => (
+        <text key={h} x={x((h * 60) / SLOT_MINUTES)} y={SVG_H - 18} textAnchor="middle" fontSize={10} fill="#94a3b8">
+          {String(h % 24).padStart(2, '0')}:00
+        </text>
+      ))}
+      <text x={x(perDay / 2)} y={SVG_H - 4} textAnchor="middle" fontSize={10} fill="#64748b">Today</text>
+      <text x={x(perDay * 1.5)} y={SVG_H - 4} textAnchor="middle" fontSize={10} fill="#64748b">Tomorrow</text>
+    </svg>
+  )
+}
+
+function TariffSection() {
+  const [days, setDays] = useState<TariffDay[] | null>(null)
+  const [error, setError] = useState<string | null>(null)
+
+  useEffect(() => {
+    const now = new Date()
+    const tomorrow = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1)
+    Promise.all([now, tomorrow].map(d =>
+      fetch(`/api/tariff?date=${localDateString(d)}`)
+        .then(r => r.ok ? r.json() as Promise<TariffDay> : Promise.reject(`HTTP ${r.status}`))))
+      .then(setDays)
+      .catch((e: unknown) => setError(e instanceof Error ? e.message : String(e)))
+  }, [])
+
+  const today = days?.[0]
+  const nowPrice = today ? slotPrice(today, currentSlot()) : null
+
+  return (
+    <div style={{ marginTop: 40 }}>
+      <div style={{ marginBottom: 16 }}>
+        <h2 style={{ margin: 0, fontSize: 18, fontWeight: 700, color: '#1e293b' }}>Tariff</h2>
+        <p style={{ margin: '4px 0 0', fontSize: 13, color: '#64748b' }}>
+          {today?.provider || today?.label
+            ? [today.provider, today.label].filter(Boolean).join(' · ')
+            : 'Import price per kWh, from the assigned tariff device.'}
+          {nowPrice !== null && <> — now <strong>{fmtUnitPrice(nowPrice, today?.currency)}</strong></>}
+        </p>
+      </div>
+      {error && (
+        <div style={{ marginBottom: 20, padding: '10px 14px', background: '#fef2f2', border: '1px solid #fca5a5', borderRadius: 8, fontSize: 13, color: '#b91c1c' }}>
+          {error}
+        </div>
+      )}
+      {days && !days[0].assigned ? (
+        <div style={{ padding: '24px 0', textAlign: 'center', color: '#94a3b8', fontSize: 13 }}>
+          No tariff device assigned. Choose one on the Home page.
+        </div>
+      ) : days && (
+        <div style={{ background: '#fff', border: '1px solid #e2e8f0', borderRadius: 10, padding: '16px 20px' }}>
+          <TariffChart days={days} />
+        </div>
+      )}
+    </div>
   )
 }
 
@@ -284,6 +387,8 @@ function Forecast() {
           Surplus appears once both solar and consumption forecasts exist for this date.
         </div>
       )}
+
+      <TariffSection />
     </div>
   )
 }
