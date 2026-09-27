@@ -26,4 +26,13 @@ esp_err_t matter_factory_reset(void);
 
 #ifdef __cplusplus
 }
+
+#include <app/ConcreteAttributePath.h>
+#include <app/MessageDef/StatusIB.h>
+#include <lib/core/TLVReader.h>
+
+// Attribute report sink for every subscription (see managers/subscription_manager.cpp): caches
+// power/battery readings and forwards Commodity Tariff reports to tariff.cpp.
+void matter_controller_attribute_data_cb(uint64_t node_id, const chip::app::ConcreteDataAttributePath &path,
+                                         chip::TLV::TLVReader *data, const chip::app::StatusIB &status);
 #endif

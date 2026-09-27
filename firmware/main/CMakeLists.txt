@@ -6,6 +6,7 @@ idf_component_register(SRCS
         "matter_controller.cpp"
         "managers/device_manager.cpp"
         "managers/node_manager.cpp"
+        "managers/subscription_manager.cpp"
         "sd_card.c"
         "power_logger.c"
         "node_power_logger.cpp"
