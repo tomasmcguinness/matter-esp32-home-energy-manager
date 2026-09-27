@@ -49,7 +49,7 @@ Per-day, per-stream append-only files on SD card (`consumption-*`, `solar-actual
 
 ## Building
 
-The firmware is built with ESP-IDF and the ESP-Matter SDK. From `firmware/`:
+The firmware is built with ESP-IDF (v5.5.4) and the ESP-Matter SDK (v1.6). From `firmware/`:
 
 ```sh
 idf.py set-target esp32p4
