@@ -1,14 +1,15 @@
 ---
 id: TASK-33
 title: Expose a companion app API for the MCC iOS app
-status: In Progress
+status: Done
 assignee: []
 created_date: '2026-09-20 14:41'
-updated_date: '2026-09-20 14:46'
+updated_date: '2026-09-27 15:18'
 labels: []
 dependencies: []
 references:
   - 'https://github.com/tomasmcguinness/matter-controller-companion-app'
+ordinal: 11000
 ---
 
 ## Description

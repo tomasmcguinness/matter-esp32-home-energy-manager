@@ -4,9 +4,10 @@ title: Forecast tab should default to the current date.
 status: Done
 assignee: []
 created_date: '2026-06-17 10:57'
-updated_date: '2026-06-17 15:53'
+updated_date: '2026-09-27 15:18'
 labels: []
 dependencies: []
+ordinal: 8000
 ---
 
 ## Implementation Notes

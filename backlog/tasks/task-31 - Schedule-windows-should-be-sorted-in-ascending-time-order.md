@@ -4,9 +4,10 @@ title: Schedule windows should be sorted in ascending time order
 status: Done
 assignee: []
 created_date: '2026-06-17 10:58'
-updated_date: '2026-06-17 14:58'
+updated_date: '2026-09-27 15:18'
 labels: []
 dependencies: []
+ordinal: 10000
 ---
 
 ## Implementation Notes

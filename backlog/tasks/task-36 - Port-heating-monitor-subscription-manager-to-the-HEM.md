@@ -1,11 +1,13 @@
 ---
 id: TASK-36
 title: Port heating monitor subscription manager to the HEM
-status: In Progress
+status: Done
 assignee: []
 created_date: '2026-09-27 05:58'
+updated_date: '2026-09-27 15:18'
 labels: []
 dependencies: []
+ordinal: 13000
 ---
 
 ## Description

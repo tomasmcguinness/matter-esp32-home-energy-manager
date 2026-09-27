@@ -1,16 +1,17 @@
 ---
 id: TASK-34
 title: Add 30-day usage history chart to the Power tab
-status: In Progress
+status: Done
 assignee: []
 created_date: '2026-09-26 09:16'
-updated_date: '2026-09-26 09:18'
+updated_date: '2026-09-27 15:18'
 labels: []
 dependencies: []
 references:
   - firmware/html_app/src/Power.tsx
   - firmware/main/node_power_logger.cpp
   - firmware/main/web_server.c
+ordinal: 12000
 ---
 
 ## Description
