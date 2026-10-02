@@ -11,19 +11,28 @@ type NodeConfig = { id: string; x: number; y: number; settings: Record<string, u
 type EdgeConfig = { id: string; source: string; target: string; sourceHandle?: string; targetHandle?: string }
 
 // Seed a small topology so the Power page has connected nodes to render in dev:
-// a consumer unit fed by a grid meter, with an oven hanging off circuit 1 and a
-// tariff device wired to the CU's tariff handle.
+// a consumer unit fed by a grid meter, with an oven (running), a dishwasher
+// (standby) and a kettle (off) on circuits 1-3, and a tariff device wired to the
+// CU's tariff handle.
 let nodeConfigs: NodeConfig[] = [
   { id: 'consumer_unit', x: 0, y: 0, settings: { label: 'Consumer Unit', type: 'consumerUnit', deletable: false } },
   { id: 'grid_meter', x: -220, y: 0, settings: { label: 'Grid Meter', type: 'device', nodeId: 30001, endpointId: 1 } },
   { id: 'node_11', x: 260, y: -40, settings: { name: 'Oven', label: 'Oven', type: 'appliance', nodeId: 20001, endpointId: 1, excludeFromScheduling: true } },
+  { id: 'node_12', x: 260, y: 80, settings: { name: 'Dishwasher', label: 'Dishwasher', type: 'appliance', nodeId: 20002, endpointId: 1 } },
+  { id: 'node_13', x: 260, y: 200, settings: { name: 'Kettle', label: 'Kettle', type: 'appliance', nodeId: 20003, endpointId: 1 } },
   { id: 'tariff', x: -220, y: 120, settings: { label: 'Energy Tariff', type: 'tariff', nodeId: 40001, endpointId: 1 } },
 ]
 let edgeConfigs: EdgeConfig[] = [
   { id: 'grid_meter-power-out-consumer_unit-grid', source: 'grid_meter', target: 'consumer_unit', sourceHandle: 'power-out', targetHandle: 'grid' },
   { id: 'consumer_unit-circuit_1-node_11-power-in', source: 'consumer_unit', target: 'node_11', sourceHandle: 'circuit_1', targetHandle: 'power-in' },
+  { id: 'consumer_unit-circuit_2-node_12-power-in', source: 'consumer_unit', target: 'node_12', sourceHandle: 'circuit_2', targetHandle: 'power-in' },
+  { id: 'consumer_unit-circuit_3-node_13-power-in', source: 'consumer_unit', target: 'node_13', sourceHandle: 'circuit_3', targetHandle: 'power-in' },
   { id: 'tariff-tariff-out-consumer_unit-tariff', source: 'tariff', target: 'consumer_unit', sourceHandle: 'tariff-out', targetHandle: 'tariff' },
 ]
+
+// Initial ActivePower (mW) for nodes that shouldn't read the default 1 kW: the
+// dishwasher idles just under its learned standby, the kettle is off.
+const mockPowerMw: Record<string, number> = { node_12: 6000, node_13: 0 }
 
 // Mock time-of-use tariff, in 1e-5 GBP per kWh (decimals = 5): off-peak
 // 00:30-05:30, peak 16:00-19:00, standard otherwise. Days before the tariff was
@@ -180,7 +189,7 @@ export const handlers = [
       const activePower =
         type === 'pvString' ? 1800000 :
         type === 'battery'  ? -2500000 :
-        1000000
+        mockPowerMw[n.id] ?? 1000000
       return {
         ...n,
         values: [
@@ -305,6 +314,20 @@ export const handlers = [
         if (s.role === 'grid') kwh[s.id] = +(total - solar).toFixed(3)
       }
 
+      // Solar vs grid split per load. Mirrors the firmware's shape; the mock
+      // topology has no solar meter, so a varying self-powered share stands in
+      // for one, scaled per device so the column shows a spread.
+      const selfFrac = solar > 0 ? Math.min(1, solar / total) : rand(`sun-${date}`) * 0.6
+      const solar_kwh: Record<string, number> = {}
+      const grid_kwh: Record<string, number> = {}
+      const splitInto = (id: string, v: number) => {
+        const f = Math.min(1, selfFrac * (0.5 + rand(`self-${id}`)))
+        solar_kwh[id] = +(v * f).toFixed(3)
+        grid_kwh[id] = +(v * (1 - f)).toFixed(3)
+      }
+      for (const s of streams.filter(s => s.role === 'load')) splitInto(s.id, kwh[s.id])
+      splitInto('__unmonitored', total - loads)
+
       // Cost mirrors the firmware: only grid import is paid for, shared across
       // consumers by their share of consumption, at a blended ~£0.22/kWh.
       if (back < TARIFF_DAYS_OF_HISTORY && nodeConfigs.some(n => n.id === 'tariff')) {
@@ -312,9 +335,9 @@ export const handlers = [
         const cost: Record<string, number> = {}
         for (const s of streams.filter(s => s.role === 'load')) cost[s.id] = +(importCost * kwh[s.id] / total).toFixed(4)
         cost.__unmonitored = +(importCost * (total - loads) / total).toFixed(4)
-        result.push({ date, kwh, cost })
+        result.push({ date, kwh, cost, solar_kwh, grid_kwh })
       } else {
-        result.push({ date, kwh })
+        result.push({ date, kwh, solar_kwh, grid_kwh })
       }
     }
     const currency = nodeConfigs.some(n => n.id === 'tariff') ? { currency: 826 } : {}
@@ -508,7 +531,8 @@ export const handlers = [
   }),
 
   http.get('/api/appliance/profiles', () => {
-    // node_11 (Oven) has a learned profile; a second appliance is still learning.
+    // node_11 (Oven) and node_12 (Dishwasher, 7.5 W standby) have learned profiles;
+    // node_13 (Kettle) idles at 0 W so its standby is 0; node_42 is still learning.
     return HttpResponse.json({
       appliances: [
         {
@@ -524,6 +548,8 @@ export const handlers = [
           trained_unix: Math.floor(Date.now() / 1000) - 3600,
           window_days: 30,
         },
+        { graph_id: 'node_12', trained: true, standby_w: 7.5, avg_program_power_w: 1150, std_program_power_w: 90, avg_program_len_min: 95, std_program_len_min: 12, program_count: 9, days_with_data: 26, trained_unix: Math.floor(Date.now() / 1000) - 3600, window_days: 30 },
+        { graph_id: 'node_13', trained: true, standby_w: 0, avg_program_power_w: 2900, std_program_power_w: 60, avg_program_len_min: 4, std_program_len_min: 1, program_count: 40, days_with_data: 26, trained_unix: Math.floor(Date.now() / 1000) - 3600, window_days: 30 },
         {
           graph_id: 'node_42',
           trained: false,
@@ -581,6 +607,8 @@ export const handlers = [
           entry(13484, Math.round(2600000 * Math.sin(tick / 3))),       // Battery: ± charge/discharge
           // Battery state of charge, half-percent units (0..200), drifting around 75%.
           entry(13484, Math.round(150 + 30 * Math.sin(tick / 5)), 0x2f, 0x0c),
+          // Dishwasher alternates between a run and standby so the badge/flow toggle live.
+          { nodeId: 20002, endpointId: 1, clusterId: 144, attributeId: 0x08, value: Math.floor(tick / 3) % 2 ? 1150000 : 6000 },
         ],
       }))
     }, 5000)

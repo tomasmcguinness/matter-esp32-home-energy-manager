@@ -24,7 +24,7 @@ typedef struct {
     uint16_t version;              // APPLIANCE_PROFILE_VERSION
     uint16_t window_days;          // days of history scanned
     uint32_t trained_unix;         // when the profile was computed
-    int32_t  standby_mw;           // estimated idle draw
+    int32_t  standby_mw;           // estimated idle draw (centre of the modal 5 W band; 0 if idle is 0-5 W)
     int32_t  avg_program_power_mw; // mean power while running
     int32_t  std_program_power_mw; // stddev of per-cycle mean power
     uint32_t avg_program_len_min;  // mean cycle length (minutes)

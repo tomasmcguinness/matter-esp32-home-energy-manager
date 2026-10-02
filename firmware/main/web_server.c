@@ -1483,8 +1483,10 @@ static esp_err_t topology_solar_put_handler(httpd_req_t *req)
         }
     }
 
-    float node_x = cu_x + 220.0f;
-    float node_y = cu_y;
+    // Below the consumer unit, lined up with its bottom `solar_input` handle
+    // (the right-hand side is taken by the circuit outputs).
+    float node_x = cu_x;
+    float node_y = cu_y + 220.0f;
 
     cJSON *settings = cJSON_CreateObject();
     cJSON_AddStringToObject(settings, "label", label);
@@ -2398,6 +2400,13 @@ esp_err_t web_server_start(void)
     config.stack_size = 12288;
     config.max_uri_handlers = 52;
     config.max_resp_headers = 20;
+    // TCP keep-alive reaps clients that vanish without closing (sleeping tabs,
+    // locked phones). Otherwise a dead WebSocket client's socket lingers and every
+    // broadcast to it stalls the single httpd task for send_wait_timeout.
+    config.keep_alive_enable = true;
+    config.keep_alive_idle = 5;
+    config.keep_alive_interval = 5;
+    config.keep_alive_count = 3;
 
     httpd_handle_t server = NULL;
     err = httpd_start(&server, &config);

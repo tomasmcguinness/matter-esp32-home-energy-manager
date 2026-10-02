@@ -238,15 +238,17 @@ function ProfileSection({ url, date }: { url: string; date: string }) {
 
 // ---- 30-day usage history -------------------------------------------------
 
-type EnergyRole = 'grid' | 'solar' | 'load'
+type EnergyRole = 'grid' | 'solar' | 'load' | 'battery'
 type DailyEnergy = {
   nodes: { id: string; role: EnergyRole }[]
   // cost is in major currency units, present only for days with a recorded tariff.
-  days: { date: string; kwh: Record<string, number>; cost?: Record<string, number> }[]
+  // solar_kwh / grid_kwh split each load's energy by source (battery discharge
+  // counted by where its stored energy came from); present for days with grid data.
+  days: { date: string; kwh: Record<string, number>; cost?: Record<string, number>; solar_kwh?: Record<string, number>; grid_kwh?: Record<string, number> }[]
   currency?: number
 }
 
-type Series = { id: string; label: string; color: string; total: number; cost: number }
+type Series = { id: string; label: string; color: string; total: number; cost: number; solar: number; grid: number }
 
 const HISTORY_DAYS = 30
 const UNMONITORED_ID = '__unmonitored'
@@ -268,6 +270,14 @@ function kwhStep(max: number): number {
 
 function fmtKwh(v: number): string {
   return `${v.toFixed(1)} kWh`
+}
+
+// Share of a device's energy that came from solar (directly or via the battery),
+// with the kWh breakdown as a tooltip. '—' when there is no split data.
+function SelfPowered({ solar, grid }: { solar: number; grid: number }) {
+  const sum = solar + grid
+  if (sum <= 0) return <span style={{ color: '#94a3b8' }}>—</span>
+  return <span title={`${fmtKwh(solar)} solar · ${fmtKwh(grid)} grid`}>{((solar / sum) * 100).toFixed(0)}%</span>
 }
 
 function fmtDay(date: string): string {
@@ -297,10 +307,15 @@ function buildHistory(data: DailyEnergy, labels: Map<string, string>) {
   const totalOf = (id: string) => days.reduce((acc, d) => acc + (d.parts[id] ?? 0), 0)
   // The firmware keys the remainder's cost as "__unmonitored", matching UNMONITORED_ID.
   const costOf = (id: string) => data.days.reduce((acc, d) => acc + (d.cost?.[id] ?? 0), 0)
+  // The firmware keys the remainder's split as "__unmonitored" too.
+  const solarOf = (id: string) => data.days.reduce((acc, d) => acc + (d.solar_kwh?.[id] ?? 0), 0)
+  const gridOf = (id: string) => data.days.reduce((acc, d) => acc + (d.grid_kwh?.[id] ?? 0), 0)
+  const seriesFor = (id: string, label: string, color: string): Series =>
+    ({ id, label, color, total: totalOf(id), cost: costOf(id), solar: solarOf(id), grid: gridOf(id) })
   const series: Series[] = loadIds
-    .map((id, i) => ({ id, label: labels.get(id) ?? id, color: PALETTE[i % PALETTE.length], total: totalOf(id), cost: costOf(id) }))
+    .map((id, i) => seriesFor(id, labels.get(id) ?? id, PALETTE[i % PALETTE.length]))
     .sort((a, b) => b.total - a.total)
-  series.push({ id: UNMONITORED_ID, label: 'Unmonitored', color: UNMONITORED_COLOR, total: totalOf(UNMONITORED_ID), cost: costOf(UNMONITORED_ID) })
+  series.push(seriesFor(UNMONITORED_ID, 'Unmonitored', UNMONITORED_COLOR))
 
   const costedDays = data.days.filter(d => d.cost !== undefined).length
   return { days, series, hasGrid: gridIds.length > 0, costedDays }
@@ -395,6 +410,7 @@ function UsageHistory({ labels }: { labels: Map<string, string> }) {
                 <th style={{ fontWeight: 600 }}>Device</th>
                 <th style={{ fontWeight: 600, textAlign: 'right' }}>Consumption</th>
                 <th style={{ fontWeight: 600, textAlign: 'right' }}>Share</th>
+                <th style={{ fontWeight: 600, textAlign: 'right' }} title="Energy supplied by solar, directly or from solar-charged battery">Self-powered</th>
                 <th style={{ fontWeight: 600, textAlign: 'right' }}>Cost</th>
               </tr>
             </thead>
@@ -415,6 +431,9 @@ function UsageHistory({ labels }: { labels: Map<string, string> }) {
                   <td style={{ textAlign: 'right', background: hovered === s.id ? '#f1f5f9' : undefined }}>
                     {grandTotal > 0 ? `${((s.total / grandTotal) * 100).toFixed(1)}%` : '—'}
                   </td>
+                  <td style={{ textAlign: 'right', background: hovered === s.id ? '#f1f5f9' : undefined }}>
+                    <SelfPowered solar={s.solar} grid={s.grid} />
+                  </td>
                   <td style={{ textAlign: 'right', background: hovered === s.id ? '#f1f5f9' : undefined, color: hasCost ? undefined : '#94a3b8' }}>
                     {hasCost ? fmtMoney(s.cost, data.currency) : '—'}
                   </td>
@@ -424,6 +443,9 @@ function UsageHistory({ labels }: { labels: Map<string, string> }) {
                 <td>Total</td>
                 <td style={{ textAlign: 'right' }}>{fmtKwh(grandTotal)}</td>
                 <td style={{ textAlign: 'right' }}>{grandTotal > 0 ? '100%' : '—'}</td>
+                <td style={{ textAlign: 'right' }}>
+                  <SelfPowered solar={series.reduce((a, s) => a + s.solar, 0)} grid={series.reduce((a, s) => a + s.grid, 0)} />
+                </td>
                 <td />
               </tr>
               <tr style={{ fontWeight: 600 }}>
@@ -433,6 +455,7 @@ function UsageHistory({ labels }: { labels: Map<string, string> }) {
                     <span style={{ fontWeight: 400, color: '#94a3b8' }}> ({costedDays} of {days.length} days)</span>
                   )}
                 </td>
+                <td />
                 <td />
                 <td />
                 <td style={{ textAlign: 'right', color: hasCost ? undefined : '#94a3b8' }}>

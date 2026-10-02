@@ -14,7 +14,10 @@ function kwToChevronSize(kw: number | undefined): number {
   return MIN_SIZE + t * (MAX_SIZE - MIN_SIZE)
 }
 
-type PowerFlowData = { kw?: number }
+// kw: flow along the edge. Negative = source → target, positive = target → source.
+// idle: the metered appliance is in standby or off, so draw the edge at rest
+// even though it still reads a small non-zero power.
+type PowerFlowData = { kw?: number; idle?: boolean }
 
 function measurePath(d: string): number {
   const el = document.createElementNS('http://www.w3.org/2000/svg', 'path')
@@ -28,20 +31,21 @@ export function PowerFlowEdge({
 }: EdgeProps) {
   const [edgePath, labelX, labelY] = getBezierPath({ sourceX, sourceY, sourcePosition, targetX, targetY, targetPosition })
 
-  const { kw } = (data ?? {}) as PowerFlowData
-  const isIdle = kw === 0
-  const isOut = kw && kw < 0;
+  const { kw, idle } = (data ?? {}) as PowerFlowData
+  const isIdle = kw === 0 || idle === true
+  const isReverse = kw !== undefined && kw > 0
   const formattedkw = kw == undefined ? '' : Math.abs(kw!).toFixed(1);
 
-  // For 'out', animate along the geometrically reversed path so chevrons travel
+  // For target → source, animate along the geometrically reversed path so chevrons travel
   // target → source. Swapping source ↔ target with their handle positions gives
   // the exact reverse bezier, so chevrons follow the drawn line correctly.
-  const [animPath] = isOut
+  const [animPath] = isReverse
     ? getBezierPath({ sourceX: targetX, sourceY: targetY, sourcePosition: targetPosition, targetX: sourceX, targetY: sourceY, targetPosition: sourcePosition })
     : [edgePath]
 
-  const lineColor = isIdle ? 'rgba(148,163,184,0.4)' : isOut ? 'rgba(99,153,34,0.3)' : 'rgba(226,75,74,0.3)'
-  const chevronColor = isOut ? 'rgba(99,153,34,0.8)' : 'rgba(226,75,74,0.8)'
+  // Neutral grey until good/bad flow colouring is decided; direction is shown by the chevrons.
+  const lineColor = isIdle ? 'rgba(148,163,184,0.4)' : 'rgba(100,116,139,0.35)'
+  const chevronColor = 'rgba(71,85,105,0.8)'
   const size = kwToChevronSize(Math.abs(kw!))
   const chevronPoints = `-${size},-${(size * 0.7).toFixed(1)} 0,0 -${size},${(size * 0.7).toFixed(1)}`
 
@@ -56,9 +60,9 @@ export function PowerFlowEdge({
   const labelStyle: React.CSSProperties = {
     position: 'absolute',
     transform: `translate(-50%, -50%) translate(${labelX}px, ${labelY}px)`,
-    background: isOut ? '#EAF3DE' : '#FCEBEB',
-    color: isOut ? '#3B6D11' : '#A32D2D',
-    border: `1px solid ${isOut ? '#97C459' : '#F09595'}`,
+    background: '#F1F5F9',
+    color: '#475569',
+    border: '1px solid #CBD5E1',
     borderRadius: 6,
     padding: '2px 8px',
     fontSize: 12,

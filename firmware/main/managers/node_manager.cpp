@@ -244,12 +244,29 @@ esp_err_t node_manager_delete(const char *node_id)
             return ESP_ERR_NOT_SUPPORTED;
         }
     }
-    auto it = s_nodes.begin();
-    while (it != s_nodes.end()) {
-        if (it->id == node_id) { it = s_nodes.erase(it); break; }
-        ++it;
+    // Children hang off a solar inverter's `dc_in` (PV strings) and `battery`
+    // handles and are meaningless without it, so they go with it. Every edge
+    // touching a removed node goes too, so nothing is left dangling.
+    std::vector<std::string> removed{ node_id };
+    for (const auto &ec : s_edges) {
+        if (ec.target == node_id && ec.target_handle == "dc_in")   removed.push_back(ec.source);
+        if (ec.source == node_id && ec.source_handle == "battery") removed.push_back(ec.target);
+    }
+    auto is_removed = [&](const std::string &id) {
+        for (const auto &r : removed) if (r == id) return true;
+        return false;
+    };
+    for (auto it = s_nodes.begin(); it != s_nodes.end();) {
+        if (is_removed(it->id)) it = s_nodes.erase(it);
+        else ++it;
+    }
+    for (auto it = s_edges.begin(); it != s_edges.end();) {
+        if (is_removed(it->source) || is_removed(it->target)) it = s_edges.erase(it);
+        else ++it;
     }
     xSemaphoreGive(s_mutex);
+    if (removed.size() > 1)
+        ESP_LOGI(TAG, "Deleted %s and %u child node(s)", node_id, (unsigned)(removed.size() - 1));
     return node_manager_persist();
 }
 

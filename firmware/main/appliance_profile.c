@@ -199,8 +199,10 @@ int appliance_profile_train(const char *graph_id, int window_days)
     int mode_bin = 0;
     for (int b = 1; b < STANDBY_NBINS; b++)
         if (hist[b] > hist[mode_bin]) mode_bin = b;
-    // Centre of the modal band, in mW.
-    int32_t standby_mw = (mode_bin * STANDBY_BIN_W + STANDBY_BIN_W / 2) * 1000;
+    // Centre of the modal band, in mW. A mode in the lowest band (0..STANDBY_BIN_W)
+    // means the appliance is effectively off when idle, so report a standby of 0.
+    int32_t standby_mw = (mode_bin == 0) ? 0
+                       : (mode_bin * STANDBY_BIN_W + STANDBY_BIN_W / 2) * 1000;
 
     // Thresholds derived from standby (with a relative floor scaled to the peak).
     int32_t rel = (int32_t)(((int64_t)(peak_mw - standby_mw) * ON_REL_NUM) / ON_REL_DEN);

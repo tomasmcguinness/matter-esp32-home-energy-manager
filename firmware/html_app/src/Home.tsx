@@ -60,9 +60,44 @@ function TrashIcon() {
   )
 }
 
+// Asks before a slot's device is unassigned. Clicks are stopped at the overlay
+// because it renders inside the slot card, whose own click opens the editor.
+function ConfirmRemoveModal({ label, deviceName, onConfirm, onCancel }: { label: string; deviceName: string; onConfirm: () => void; onCancel: () => void }) {
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onCancel() }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [onCancel])
+
+  return (
+    <div
+      onClick={e => { e.stopPropagation(); onCancel() }}
+      style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.4)', zIndex: 200, display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'default' }}
+    >
+      <div
+        onClick={e => e.stopPropagation()}
+        role="alertdialog"
+        aria-modal="true"
+        aria-labelledby="confirm-remove-title"
+        style={{ background: '#fff', borderRadius: 12, padding: 24, width: 380, maxWidth: '90vw', boxShadow: '0 8px 32px rgba(0,0,0,0.18)' }}
+      >
+        <h2 id="confirm-remove-title" style={{ margin: '0 0 4px', fontSize: 16, fontWeight: 700, color: '#1e293b' }}>Remove {label}?</h2>
+        <p style={{ margin: '0 0 20px', fontSize: 13, color: '#64748b' }}>
+          <strong style={{ color: '#1e293b' }}>{deviceName}</strong> will be unassigned from {label}. The device stays commissioned and can be assigned again later.
+        </p>
+        <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+          <button autoFocus onClick={onCancel} style={{ padding: '8px 16px', borderRadius: 6, border: '1px solid #e2e8f0', background: '#fff', fontSize: 13, cursor: 'pointer' }}>Cancel</button>
+          <button onClick={onConfirm} style={{ padding: '8px 16px', borderRadius: 6, border: 'none', background: '#ef4444', color: '#fff', fontSize: 13, fontWeight: 600, cursor: 'pointer' }}>Remove</button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 function ConfiguredSlot({ label, device, onReconfigure, onDelete }: { label: string; device: SimpleDevice; onReconfigure: () => void; onDelete: () => void }) {
   const [hovered, setHovered] = useState(false)
   const [trashHovered, setTrashHovered] = useState(false)
+  const [confirmOpen, setConfirmOpen] = useState(false)
   return (
     <div
       onMouseEnter={() => setHovered(true)}
@@ -85,7 +120,7 @@ function ConfiguredSlot({ label, device, onReconfigure, onDelete }: { label: str
       }}
     >
       <button
-        onClick={e => { e.stopPropagation(); onDelete() }}
+        onClick={e => { e.stopPropagation(); setConfirmOpen(true) }}
         onMouseEnter={() => setTrashHovered(true)}
         onMouseLeave={() => setTrashHovered(false)}
         title="Remove"
@@ -115,6 +150,14 @@ function ConfiguredSlot({ label, device, onReconfigure, onDelete }: { label: str
       <div style={{ marginTop: 4, fontSize: 11, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '.06em', color: hovered ? '#3b82f6' : '#94a3b8', transition: 'color .15s' }}>
         ✎ Edit
       </div>
+      {confirmOpen && (
+        <ConfirmRemoveModal
+          label={label}
+          deviceName={device.name || device.label}
+          onConfirm={() => { setConfirmOpen(false); onDelete() }}
+          onCancel={() => setConfirmOpen(false)}
+        />
+      )}
     </div>
   )
 }
@@ -530,13 +573,9 @@ function FlowArrow() {
   )
 }
 
-const APPLIANCE_SLOTS = [
-  'Appliance 1',
-  'Appliance 2',
-  'Appliance 3',
-  'Appliance 4',
-  'Appliance 5',
-]
+// Must match CU_CIRCUITS in Topology.tsx: each slot hangs off its own circuit handle.
+const APPLIANCE_SLOTS = Array.from({ length: 10 }, (_, i) => `Appliance ${i + 1}`)
+const SLOTS_PER_ROW = 5
 
 // Stable topology identifiers for each appliance slot (index 0 => "appliance_1", ...).
 // Each appliance hangs off its own Consumer Unit circuit handle.
@@ -664,7 +703,10 @@ function Home() {
         <EditApplianceModal
           slotLabel={APPLIANCE_SLOTS[applianceModalSlot]}
           topologyNodeId={applianceNodeId(applianceModalSlot)}
-          position={{ x: cuPos.x + (applianceModalSlot - 2) * 170, y: cuPos.y + 200 }}
+          position={{
+            x: cuPos.x + ((applianceModalSlot % SLOTS_PER_ROW) - 2) * 170,
+            y: cuPos.y + 200 + Math.floor(applianceModalSlot / SLOTS_PER_ROW) * 150,
+          }}
           sourceHandle={applianceCircuitHandle(applianceModalSlot)}
           edgeId={applianceEdgeId(applianceModalSlot)}
           initialSelected={appliances[applianceModalSlot]}
@@ -730,7 +772,7 @@ function Home() {
       {/* Loads */}
       <section>
         <SectionLabel>Loads</SectionLabel>
-        <div style={{ display: 'flex', gap: 12 }}>
+        <div style={{ display: 'grid', gridTemplateColumns: `repeat(${SLOTS_PER_ROW}, minmax(0, 1fr))`, gap: 12 }}>
           {APPLIANCE_SLOTS.map((name, slot) => {
             const device = appliances[slot]
             return device ? (

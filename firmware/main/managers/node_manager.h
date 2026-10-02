@@ -9,6 +9,8 @@ extern "C" {
 esp_err_t  node_manager_init(void);
 esp_err_t  node_manager_upsert(const char *node_id, float x, float y, const char *settings_json);
 esp_err_t  node_manager_update_settings(const char *node_id, const char *settings_json);
+// Deletes the node, its inverter children (nodes on its `dc_in` / `battery`
+// handles) and every edge touching any of them.
 esp_err_t  node_manager_delete(const char *node_id);
 esp_err_t  node_manager_upsert_edge(const char *id, const char *source, const char *target, const char *source_handle, const char *target_handle);
 esp_err_t  node_manager_delete_edge(const char *id);

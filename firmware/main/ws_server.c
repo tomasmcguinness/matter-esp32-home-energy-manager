@@ -30,7 +30,10 @@ static void ws_async_send(void *arg)
     };
     esp_err_t err = httpd_ws_send_frame_async(a->hd, a->fd, &pkt);
     if (err != ESP_OK) {
-        ESP_LOGW(TAG, "send to fd=%d failed: 0x%x", a->fd, err);
+        // A failed send means the client is gone or wedged; close the session so
+        // later broadcasts stop stalling the httpd task on this fd.
+        ESP_LOGW(TAG, "send to fd=%d failed: 0x%x, closing session", a->fd, err);
+        httpd_sess_trigger_close(a->hd, a->fd);
     }
     free(a->payload);
     free(a);

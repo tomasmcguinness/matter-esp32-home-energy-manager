@@ -14,16 +14,17 @@ function fmt(value: number | undefined, unit: string): string {
 }
 
 // One output circuit per appliance slot on the Home screen.
-const CU_CIRCUITS = [0, 1, 2, 3, 4]
+const CU_CIRCUITS = Array.from({ length: 10 }, (_, i) => i)
 
 function ConsumerUnitNode({ data }: { data: { label: string } }) {
   return (
     <>
-      <Handle type="target" position={Position.Left} id="grid" />
-      <Handle type="target" position={Position.Left} id="solar_input" />
+      <Handle type="target" position={Position.Left} id="grid" style={{ top: '30%' }} />
       {/* The tariff source prices the grid import; it carries no power. */}
-      <Handle type="target" position={Position.Bottom} id="tariff" style={{ left: '15%' }} />
-      <div style={{ padding: '5px 12px', fontSize: 13, fontWeight: 500, color: '#1e293b', whiteSpace: 'nowrap' }}>
+      <Handle type="target" position={Position.Left} id="tariff" style={{ top: '70%' }} />
+      <Handle type="target" position={Position.Bottom} id="solar_input" />
+      {/* Tall enough that the circuit handles on the right edge don't overlap. */}
+      <div style={{ padding: '5px 12px', fontSize: 13, fontWeight: 500, color: '#1e293b', whiteSpace: 'nowrap', minHeight: CU_CIRCUITS.length * 12, display: 'flex', alignItems: 'center' }}>
         {data.label}
       </div>
       {CU_CIRCUITS.map((slot, i) => (
@@ -40,7 +41,34 @@ function ConsumerUnitNode({ data }: { data: { label: string } }) {
 }
 
 type PowerMeasurement = { voltage?: number, current?: number, power?: number }
-type DeviceNodeData = { label: string; nodeId?: number; endpointId?: number; power?: PowerMeasurement; batteryPercent?: number }
+type DeviceNodeData = { label: string; nodeId?: number; endpointId?: number; power?: PowerMeasurement; batteryPercent?: number; standbyW?: number; status?: LoadStatus }
+
+// Running state of an appliance, derived from its live draw and learned standby.
+type LoadStatus = 'running' | 'standby' | 'off'
+
+// Learned profile fields served by GET /api/appliance/profiles (see Appliances.tsx).
+type ProfilesResponse = { appliances: { graph_id: string; trained: boolean; standby_w?: number }[] }
+
+// The learned standby is the centre of a 5 W histogram band, so the threshold is
+// the top of that band to stop readings that wobble around the centre flickering.
+const STANDBY_BAND_HALF_W = 2.5
+// Below this an appliance with a real standby is unplugged / switched off at the wall.
+const OFF_FLOOR_W = 1
+
+// standbyW is 0 for appliances that idle at 0-5 W (and untrained ones), which
+// show "Off" while inside that band. Undefined power (no reading yet) => no status.
+function loadStatus(powerMw: number | undefined, standbyW: number): LoadStatus | undefined {
+  if (powerMw === undefined) return undefined
+  const w = powerMw / 1000
+  if (standbyW <= 0) return w <= STANDBY_BAND_HALF_W * 2 ? 'off' : 'running'
+  if (w < OFF_FLOOR_W) return 'off'
+  return w <= standbyW + STANDBY_BAND_HALF_W ? 'standby' : 'running'
+}
+
+const STATUS_BADGE: Record<'standby' | 'off', { text: string; background: string; color: string }> = {
+  standby: { text: 'Standby', background: '#fef3c7', color: '#92400e' },
+  off: { text: 'Off', background: '#e2e8f0', color: '#475569' },
+}
 
 // ElectricalPowerMeasurement cluster (0x0090) and its attribute ids.
 const EPM_CLUSTER = 144
@@ -79,12 +107,21 @@ function batteryPercentFromAttribute(clusterId: number, attributeId: number, val
 }
 
 function DeviceNode({ data }: { data: DeviceNodeData }) {
+  const badge = data.status && data.status !== 'running' ? STATUS_BADGE[data.status] : null
 
   return (
     <>
       <Handle type="target" position={Position.Left} id="power-in" />
-      <div style={{ padding: '4px 10px', background: '#f1f5f9', borderBottom: '1px solid #e2e8f0', fontSize: 12, fontWeight: 600, color: '#1e293b', whiteSpace: 'nowrap' }}>
-        0x{data.nodeId?.toString(16).toUpperCase()} | {data.endpointId} | {data.label}
+      <div style={{ padding: '4px 10px', background: '#f1f5f9', borderBottom: '1px solid #e2e8f0', fontSize: 12, fontWeight: 600, color: '#1e293b', whiteSpace: 'nowrap', display: 'flex', alignItems: 'center', gap: 6 }}>
+        <span>0x{data.nodeId?.toString(16).toUpperCase()} | {data.endpointId} | {data.label}</span>
+        {badge && (
+          <span
+            title={`Learned standby ≈ ${(data.standbyW ?? 0).toFixed(1)} W`}
+            style={{ marginLeft: 'auto', padding: '1px 6px', borderRadius: 999, fontSize: 10, fontWeight: 600, background: badge.background, color: badge.color }}
+          >
+            {badge.text}
+          </span>
+        )}
       </div>
 
       <div style={{ minWidth: '100px', padding: '5px 10px', display: 'grid', gridTemplateColumns: 'auto 1fr', columnGap: 8, rowGap: 2, fontSize: 12 }}>
@@ -133,15 +170,15 @@ function PvStringNode({ data }: { data: DeviceNodeData }) {
 }
 
 // The home battery, hanging off the inverter. Renders charge/discharge power and
-// direction from the sign of ActivePower. Convention: positive = discharging to
-// the house, negative = charging. Flip here if the inverter reports the opposite.
+// direction from the sign of ActivePower. Matter convention: positive = power
+// into the battery (charging), negative = power out of it (discharging).
 function BatteryNode({ data }: { data: DeviceNodeData }) {
   const w = data.power?.power
   let label = 'Idle'
   let color = '#94a3b8'
   let bg = '#f1f5f9'
   if (w !== undefined && w !== 0) {
-    const discharging = w > 0
+    const discharging = w < 0
     label = discharging ? `Discharging ${fmt(Math.abs(w), 'W')}` : `Charging ${fmt(Math.abs(w), 'W')}`
     color = discharging ? '#a32d2d' : '#3b6d11'
     bg = discharging ? '#fcebeb' : '#eaf3de'
@@ -290,6 +327,15 @@ function edgePowerNodeId(e: { source: string; sourceHandle?: string | null; targ
   return e.sourceHandle === 'power-out' ? e.source : e.target
 }
 
+// Convert a metered ActivePower reading (mW) into the edge's kW flow. Matter's
+// convention is positive = into the metered device, negative = out of it. Edge
+// kW is negative for source → target and positive for target → source, so a
+// reading metered at the target is negated to express it along the edge.
+function edgeKw(e: { target: string }, meteredId: string, powerMw: number): number {
+  const kw = powerMw / 1000000
+  return meteredId === e.target ? -kw : kw
+}
+
 type DeviceSpec = {
   nodeId: number,
   endpointId: number,
@@ -372,7 +418,10 @@ function Topology() {
   const reactFlowInstance = useRef<ReactFlowInstance | null>(null)
   const nodeIdCounter = useRef(10)
   const toastIdCounter = useRef(0)
-  const { screenToFlowPosition, getNodes } = useReactFlow();
+  // Learned standby (W) per appliance graph id. Only appliances are present, so
+  // membership doubles as "this node gets a Standby/Off status".
+  const standbyByNodeId = useRef(new Map<string, number>())
+  const { screenToFlowPosition, getNodes, getEdges } = useReactFlow();
   const [type] = useDnD();
 
   const dismissToast = useCallback((id: number) => {
@@ -423,12 +472,15 @@ function Topology() {
       const power = powerByKey.get(key)
       const battery = batteryByKey.get(key)
       if (!power && battery === undefined) return n
+      const standbyW = standbyByNodeId.current.get(n.id)
+      const status = power?.power !== undefined && standbyW !== undefined ? loadStatus(power.power, standbyW) : undefined
       return {
         ...n,
         data: {
           ...n.data,
           ...(power ? { power: { ...(n.data.power ?? {}), ...power } } : {}),
           ...(battery !== undefined ? { batteryPercent: battery } : {}),
+          ...(status ? { status } : {}),
         },
       }
     }))
@@ -443,8 +495,12 @@ function Topology() {
       }
       if (powerByRfId.size > 0) {
         setEdges(eds => eds.map(e => {
-          const power = powerByRfId.get(edgePowerNodeId(e))
-          return power ? { ...e, data: { ...(e.data ?? {}), kw: power.power! / 1000000 } } : e
+          const meteredId = edgePowerNodeId(e)
+          const power = powerByRfId.get(meteredId)
+          if (!power) return e
+          const standbyW = standbyByNodeId.current.get(meteredId)
+          const idle = standbyW !== undefined && loadStatus(power.power, standbyW) !== 'running'
+          return { ...e, data: { ...(e.data ?? {}), kw: edgeKw(e, meteredId, power.power!), idle } }
         }))
       }
     }
@@ -460,6 +516,12 @@ function Topology() {
           nds.filter(n => n.selected && n.deletable !== false).map(n => n.id)
         )
         if (deletedIds.size === 0) return nds
+        // A solar inverter takes its PV strings (dc_in) and battery with it,
+        // mirroring the firmware's cascade in node_manager_delete.
+        const children = getEdges()
+          .filter(e => (deletedIds.has(e.target) && e.targetHandle === 'dc_in') || (deletedIds.has(e.source) && e.sourceHandle === 'battery'))
+          .map(e => (deletedIds.has(e.target) ? e.source : e.target))
+        children.forEach(id => deletedIds.add(id))
         setEdges(eds => {
           const removed = eds.filter(e => deletedIds.has(e.source) || deletedIds.has(e.target))
           removed.forEach(e => fetch(`/api/edges/${e.id}`, { method: 'DELETE' }).catch(() => { }))
@@ -473,7 +535,7 @@ function Topology() {
     }
     window.addEventListener('keydown', handleKeyDown)
     return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [setNodes, setEdges])
+  }, [setNodes, setEdges, getEdges])
 
   const onDragOver = useCallback((e: React.DragEvent) => {
     e.preventDefault()
@@ -666,9 +728,22 @@ function Topology() {
 
   const onInit = useCallback((instance: ReactFlowInstance) => {
     reactFlowInstance.current = instance
-    fetch('/api/nodes')
+    // Profiles are optional: if they fail to load the canvas still renders, just
+    // without Standby/Off statuses.
+    const profiles: Promise<ProfilesResponse> = fetch('/api/appliance/profiles')
       .then(r => r.ok ? r.json() : Promise.reject())
-      .then((data: { nodes: SavedNodeConfig[]; edges?: SavedEdgeConfig[] }) => {
+      .catch(() => ({ appliances: [] }))
+    Promise.all([fetch('/api/nodes').then(r => r.ok ? r.json() : Promise.reject()), profiles])
+      .then(([data, profileData]: [{ nodes: SavedNodeConfig[]; edges?: SavedEdgeConfig[] }, ProfilesResponse]) => {
+        // Untrained appliances count as standby 0. Profiles saved before the firmware
+        // reported 0 for a 0-5 W idle carry the 2.5 W band centre; treat that as 0 too.
+        const standbyMap = new Map<string, number>()
+        for (const p of profileData.appliances ?? []) {
+          const w = p.trained ? (p.standby_w ?? 0) : 0
+          standbyMap.set(p.graph_id, w <= STANDBY_BAND_HALF_W ? 0 : w)
+        }
+        standbyByNodeId.current = standbyMap
+
         // Current cached values ride along in the node list, so power renders
         // immediately on load without waiting for the first websocket update.
         const powerByNode = new Map<string, PowerMeasurement>()
@@ -679,6 +754,8 @@ function Topology() {
           if (hasPower) powerByNode.set(n.id, power)
           const batteryPercent = (n.values ?? []).reduce<number | undefined>(
             (acc, v) => batteryPercentFromAttribute(v.clusterId, v.attributeId, v.value) ?? acc, undefined)
+          const standbyW = standbyMap.get(n.id)
+          const status = standbyW !== undefined ? loadStatus(power.power, standbyW) : undefined
           return {
             id: n.id,
             type: typeof n.settings?.type === 'string' ? n.settings.type as string : undefined,
@@ -693,6 +770,8 @@ function Topology() {
               ...(typeof n.settings?.circuits === 'number' ? { circuits: n.settings.circuits } : {}),
               ...(hasPower ? { power } : {}),
               ...(batteryPercent !== undefined ? { batteryPercent } : {}),
+              ...(standbyW !== undefined ? { standbyW } : {}),
+              ...(status ? { status } : {}),
             },
           }
         })
@@ -711,7 +790,10 @@ function Topology() {
             if (isTariffEdge(e)) {
               return { id: e.id, source: e.source, target: e.target, sourceHandle: e.sourceHandle, targetHandle: e.targetHandle, style: TARIFF_EDGE_STYLE }
             }
-            const power = powerByNode.get(edgePowerNodeId(e))
+            const meteredId = edgePowerNodeId(e)
+            const power = powerByNode.get(meteredId)
+            const standbyW = standbyMap.get(meteredId)
+            const status = standbyW !== undefined ? loadStatus(power?.power, standbyW) : undefined
             return {
               id: e.id,
               source: e.source,
@@ -719,7 +801,10 @@ function Topology() {
               sourceHandle: e.sourceHandle,
               targetHandle: e.targetHandle,
               type: 'powerFlow',
-              data: { kw: power?.power !== undefined ? power.power / 1000000 : 0 },
+              data: {
+                kw: power?.power !== undefined ? edgeKw(e, meteredId, power.power) : 0,
+                idle: status !== undefined && status !== 'running',
+              },
             }
           }))
         }

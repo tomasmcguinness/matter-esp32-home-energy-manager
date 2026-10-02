@@ -42,7 +42,7 @@ struct stream_t {
     uint64_t    node_id     = 0; // Matter node id (cache lookup)
     uint16_t    endpoint_id = 0; // Matter endpoint id (cache lookup)
     bool        is_grid     = false; // grid meter: persisted to the grid-* files
-    const char *role        = "load"; // "grid" | "solar" | "load", from the CU handle
+    const char *role        = "load"; // "grid" | "solar" | "load" from the CU handle, or "battery"
     int64_t     sum_mw      = 0;
     uint32_t    count       = 0;
     uint32_t    unix_minute = 0; // start of the minute being accumulated
@@ -56,6 +56,7 @@ static esp_timer_handle_t    s_daily_timer;
 
 static void schedule_midnight_rollup(void);
 static void cost_day_cached(const char *date, bool allow_cache_write);
+static void split_day_cached(const char *date);
 
 // Copy a node/date token into out only if it is filesystem-safe ([A-Za-z0-9_-],
 // length 1..32). Blocks '/', '.' and anything that could escape /sdcard.
@@ -132,6 +133,16 @@ static void refresh_streams(void)
         const char *src = json_str(e, "source");
         const char *tgt = json_str(e, "target");
         if (!src || !tgt) continue;
+
+        // The home battery hangs off the inverter's `battery` handle rather than
+        // the CU. Record it too so the solar/grid split can track what it stores.
+        const char *src_handle = json_str(e, "sourceHandle");
+        if (src_handle && strcmp(src_handle, "battery") == 0) {
+            bool seen = false;
+            for (const auto &c : connected) if (c.first == tgt) { seen = true; break; }
+            if (!seen) connected.emplace_back(tgt, "battery");
+            continue;
+        }
 
         // The metered node is the non-distribution end of an edge that touches a
         // distribution node. Edges between two distribution nodes (CU -> sub-CU)
@@ -282,6 +293,7 @@ static void on_midnight_timer(void *arg)
     node_power_logger_rollup_hourly(yesterday);
     power_logger_rollup_hourly(yesterday);
     cost_day_cached(yesterday, true); // freeze yesterday's cost while the minute files are fresh
+    split_day_cached(yesterday);      // ...and its solar/grid split, carrying the battery ledger on
     consumption_forecast_compute(tomorrow);
     schedule_midnight_rollup();
 }
@@ -578,7 +590,7 @@ static bool compute_day_cost(const char *date, const std::vector<stream_info_t> 
 
     std::vector<std::pair<std::string, std::vector<int32_t>>> loads;
     for (const auto &s : streams) {
-        if (s.is_grid) continue;
+        if (s.is_grid || strcmp(s.role, "battery") == 0) continue; // the battery is not a load
         snprintf(path, sizeof(path), "%s/node-%s-%s", SD_BASE, s.graph_id.c_str(), date);
         if (!load_minutes(path, day_start, tmp)) tmp.assign(kMaxDayMinutes, 0);
         if (strcmp(s.role, "solar") == 0) {
@@ -701,6 +713,238 @@ static void cost_day_cached(const char *date, bool allow_cache_write)
     day_cost(date, false, snapshot_streams(), dc, allow_cache_write);
 }
 
+// ---- Solar vs grid energy split ---------------------------------------------
+// Each minute, house consumption (grid + inverter AC output) is supplied by grid
+// import, PV directly, and battery discharge. Every load (and the unmonitored
+// remainder) takes the same mix, in proportion to its draw, like the cost split
+// above. Battery discharge is solar or grid according to where the energy it
+// holds came from, tracked by a ledger carried from day to day. The inverter
+// AC output is assumed to net battery flow (DC-coupled hybrid inverter), so a
+// negative output while charging is power pulled from the grid.
+
+// Energy held in the battery (Wh, as charged) and the fraction of it that came
+// from solar. Unknown origin (cold start, or drained) counts as grid, so the
+// split never overstates self-consumption.
+struct battery_ledger_t {
+    double e_wh  = 0.0;
+    double f     = 0.0;
+    bool   known = false;
+};
+
+struct day_split_t {
+    // graph id (or UNMONITORED_KEY) -> (solar Wh, grid Wh)
+    std::vector<std::pair<std::string, std::pair<double, double>>> wh;
+    battery_ledger_t end;
+};
+
+static constexpr double kBatteryRoundTrip = 0.9;
+
+// Local midnight for a YYYY-MM-DD date.
+static bool local_day_start(const char *date, time_t *out)
+{
+    struct tm tm_day = {};
+    if (sscanf(date, "%d-%d-%d", &tm_day.tm_year, &tm_day.tm_mon, &tm_day.tm_mday) != 3) return false;
+    tm_day.tm_year -= 1900;
+    tm_day.tm_mon  -= 1;
+    tm_day.tm_isdst = -1;
+    *out = mktime(&tm_day);
+    return true;
+}
+
+static bool compute_day_split(const char *date, const std::vector<stream_info_t> &streams,
+                              const battery_ledger_t &start, day_split_t &out)
+{
+    time_t day_start;
+    if (!local_day_start(date, &day_start)) return false;
+
+    char path[96];
+    std::vector<int32_t> grid, inv(kMaxDayMinutes, 0), bat(kMaxDayMinutes, 0), tmp;
+    snprintf(path, sizeof(path), "%s/grid-%s", SD_BASE, date);
+    if (!load_minutes(path, day_start, grid)) return false;
+
+    std::vector<std::pair<std::string, std::vector<int32_t>>> loads;
+    for (const auto &s : streams) {
+        if (s.is_grid) continue;
+        snprintf(path, sizeof(path), "%s/node-%s-%s", SD_BASE, s.graph_id.c_str(), date);
+        if (!load_minutes(path, day_start, tmp)) tmp.assign(kMaxDayMinutes, 0);
+        if (strcmp(s.role, "solar") == 0) {
+            for (int i = 0; i < kMaxDayMinutes; i++) inv[i] += tmp[i];
+        } else if (strcmp(s.role, "battery") == 0) {
+            for (int i = 0; i < kMaxDayMinutes; i++) bat[i] += tmp[i];
+        } else {
+            loads.emplace_back(s.graph_id, tmp);
+        }
+    }
+
+    std::vector<double> load_solar(loads.size(), 0.0), load_grid(loads.size(), 0.0);
+    double un_solar = 0.0, un_grid = 0.0;
+    battery_ledger_t L = start;
+
+    for (int i = 0; i < kMaxDayMinutes; i++) {
+        double grid_w = grid[i] / 1000.0;
+        double inv_w  = inv[i] / 1000.0;
+        double bat_w  = bat[i] / 1000.0; // + discharging, - charging
+
+        double loads_sum = 0.0;
+        for (const auto &l : loads) loads_sum += l.second[i] > 0 ? l.second[i] / 1000.0 : 0.0;
+        double total = grid_w + inv_w;
+        if (loads_sum > total) total = loads_sum; // metering disagreement: never negative remainder
+
+        if (total > 0) {
+            // Grid share of the house (capped: when the inverter charges the
+            // battery from the grid, import exceeds house use).
+            double g = grid_w > 0 ? grid_w / total : 0.0;
+            if (g > 1.0) g = 1.0;
+            // Of the inverter's output, the part that came out of the battery.
+            double inv_pos = inv_w > 0 ? inv_w : 0.0;
+            double dis     = bat_w > 0 ? bat_w : 0.0;
+            double b = inv_pos > 0 ? (dis < inv_pos ? dis : inv_pos) / inv_pos : 0.0;
+            double f = L.known ? L.f : 0.0;
+            double s = (1.0 - g) * ((1.0 - b) + b * f);
+
+            for (size_t k = 0; k < loads.size(); k++) {
+                int32_t v = loads[k].second[i];
+                if (v <= 0) continue;
+                double wh = v / 1000.0 / 60.0;
+                load_solar[k] += wh * s;
+                load_grid[k]  += wh * (1.0 - s);
+            }
+            double un_wh = (total - loads_sum) / 60.0;
+            un_solar += un_wh * s;
+            un_grid  += un_wh * (1.0 - s);
+        }
+
+        // Update the battery ledger with this minute's flow.
+        if (bat_w < 0) {
+            double c  = -bat_w;
+            double cg = inv_w < 0 ? (-inv_w < c ? -inv_w : c) : 0.0; // pulled from the AC side
+            double cs = c - cg;
+            double solar_held = L.known ? L.f * L.e_wh : 0.0;
+            L.e_wh  = (L.known ? L.e_wh : 0.0) + c / 60.0;
+            L.f     = (solar_held + cs / 60.0) / L.e_wh;
+            L.known = true;
+        } else if (bat_w > 0 && L.known) {
+            L.e_wh -= bat_w / 60.0 / kBatteryRoundTrip;
+            if (L.e_wh <= 0) L = battery_ledger_t{};
+        }
+    }
+
+    out.wh.clear();
+    for (size_t k = 0; k < loads.size(); k++)
+        out.wh.push_back({ loads[k].first, { load_solar[k], load_grid[k] } });
+    out.wh.push_back({ UNMONITORED_KEY, { un_solar, un_grid } });
+    out.end = L;
+    return true;
+}
+
+static void split_path(const char *date, char *buf, size_t len)
+{
+    snprintf(buf, len, "%s/split-%s", SD_BASE, date);
+}
+
+static bool read_split_cache(const char *date, day_split_t &out)
+{
+    char path[64];
+    split_path(date, path, sizeof(path));
+    FILE *f = fopen(path, "rb");
+    if (!f) return false;
+    fseek(f, 0, SEEK_END);
+    long len = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    if (len <= 0 || len > 8192) { fclose(f); return false; }
+    std::string buf((size_t)len, '\0');
+    size_t got = fread(&buf[0], 1, (size_t)len, f);
+    fclose(f);
+    if (got != (size_t)len) return false;
+
+    cJSON *root = cJSON_Parse(buf.c_str());
+    if (!root) return false;
+    cJSON *solar  = cJSON_GetObjectItemCaseSensitive(root, "solar_kwh");
+    cJSON *gridk  = cJSON_GetObjectItemCaseSensitive(root, "grid_kwh");
+    cJSON *ledger = cJSON_GetObjectItemCaseSensitive(root, "ledger");
+    bool ok = cJSON_IsObject(solar) && cJSON_IsObject(gridk) && cJSON_IsObject(ledger);
+    if (ok) {
+        out.wh.clear();
+        cJSON *c = nullptr;
+        cJSON_ArrayForEach(c, solar) {
+            if (!cJSON_IsNumber(c)) continue;
+            cJSON *g = cJSON_GetObjectItemCaseSensitive(gridk, c->string);
+            out.wh.push_back({ c->string, { c->valuedouble * 1000.0, cJSON_IsNumber(g) ? g->valuedouble * 1000.0 : 0.0 } });
+        }
+        cJSON *e  = cJSON_GetObjectItemCaseSensitive(ledger, "e_wh");
+        cJSON *fr = cJSON_GetObjectItemCaseSensitive(ledger, "f");
+        cJSON *kn = cJSON_GetObjectItemCaseSensitive(ledger, "known");
+        out.end = battery_ledger_t{};
+        if (cJSON_IsTrue(kn) && cJSON_IsNumber(e) && cJSON_IsNumber(fr)) {
+            out.end.e_wh  = e->valuedouble;
+            out.end.f     = fr->valuedouble;
+            out.end.known = true;
+        }
+    }
+    cJSON_Delete(root);
+    return ok;
+}
+
+static void write_split_cache(const char *date, const day_split_t &ds)
+{
+    cJSON *root  = cJSON_CreateObject();
+    cJSON *solar = cJSON_AddObjectToObject(root, "solar_kwh");
+    cJSON *gridk = cJSON_AddObjectToObject(root, "grid_kwh");
+    for (const auto &w : ds.wh) {
+        cJSON_AddNumberToObject(solar, w.first.c_str(), w.second.first / 1000.0);
+        cJSON_AddNumberToObject(gridk, w.first.c_str(), w.second.second / 1000.0);
+    }
+    cJSON *ledger = cJSON_AddObjectToObject(root, "ledger");
+    cJSON_AddNumberToObject(ledger, "e_wh", ds.end.e_wh);
+    cJSON_AddNumberToObject(ledger, "f", ds.end.f);
+    cJSON_AddBoolToObject(ledger, "known", ds.end.known);
+    char *json = cJSON_PrintUnformatted(root);
+    cJSON_Delete(root);
+    if (!json) return;
+
+    char path[64];
+    split_path(date, path, sizeof(path));
+    FILE *f = fopen(path, "wb");
+    if (f) {
+        fputs(json, f);
+        fclose(f);
+    }
+    free(json);
+}
+
+// Like day_cost(): a finished day is computed once and cached, today is live.
+static bool day_split(const char *date, bool is_today, const std::vector<stream_info_t> &streams,
+                      const battery_ledger_t &start, day_split_t &out)
+{
+    if (!is_today && read_split_cache(date, out)) return true;
+    if (!compute_day_split(date, streams, start, out)) return false;
+    if (!is_today) write_split_cache(date, out);
+    return true;
+}
+
+// The battery ledger at the end of the day before `date`, from its cached split,
+// or an unknown ledger if that day was never split.
+static battery_ledger_t ledger_before(const char *date)
+{
+    time_t t;
+    if (!local_day_start(date, &t)) return battery_ledger_t{};
+    struct tm d;
+    localtime_r(&t, &d);
+    d.tm_hour = 12; // midday avoids DST edge cases when normalising
+    d.tm_mday -= 1;
+    mktime(&d);
+    char prev[11];
+    strftime(prev, sizeof(prev), "%Y-%m-%d", &d);
+    day_split_t ds;
+    return read_split_cache(prev, ds) ? ds.end : battery_ledger_t{};
+}
+
+static void split_day_cached(const char *date)
+{
+    day_split_t ds;
+    day_split(date, false, snapshot_streams(), ledger_before(date), ds);
+}
+
 char *node_power_logger_daily_energy_json(int days)
 {
     std::vector<stream_info_t> streams = snapshot_streams();
@@ -721,6 +965,8 @@ char *node_power_logger_daily_energy_json(int days)
 
     bool     have_currency = false;
     uint16_t currency = 0;
+    battery_ledger_t ledger; // seeded from the day before the window on the first iteration
+    bool ledger_seeded = false;
 
     // Oldest first. Step the calendar day via mktime so DST changes are handled.
     for (int back = days - 1; back >= 0; back--) {
@@ -758,6 +1004,24 @@ char *node_power_logger_daily_energy_json(int days)
             for (const auto &c : dc.cost) cJSON_AddNumberToObject(cost, c.first.c_str(), c.second / scale);
             have_currency = true;
             currency = dc.currency;
+        }
+
+        // Solar vs grid energy per load, chaining the battery ledger day to day.
+        if (!ledger_seeded) {
+            ledger = ledger_before(date);
+            ledger_seeded = true;
+        }
+        day_split_t ds;
+        if (day_split(date, back == 0, streams, ledger, ds)) {
+            cJSON *solar = cJSON_AddObjectToObject(day, "solar_kwh");
+            cJSON *gridk = cJSON_AddObjectToObject(day, "grid_kwh");
+            for (const auto &w : ds.wh) {
+                cJSON_AddNumberToObject(solar, w.first.c_str(), w.second.first / 1000.0);
+                cJSON_AddNumberToObject(gridk, w.first.c_str(), w.second.second / 1000.0);
+            }
+            ledger = ds.end;
+        } else {
+            ledger = battery_ledger_t{}; // no grid data: the battery's history is lost
         }
         cJSON_AddItemToArray(arr, day);
     }
