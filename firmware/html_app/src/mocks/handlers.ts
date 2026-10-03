@@ -189,6 +189,7 @@ export const handlers = [
       const activePower =
         type === 'pvString' ? 1800000 :
         type === 'battery'  ? -2500000 :
+        type === 'solarInverter' ? -3000000 : // generating
         mockPowerMw[n.id] ?? 1000000
       return {
         ...n,
@@ -310,7 +311,7 @@ export const handlers = [
       const total = loads + 4 + rand(`base-${date}`) * 3
       const solar = streams.some(s => s.role === 'solar') ? rand(`sun-${date}`) * 10 : 0
       for (const s of streams) {
-        if (s.role === 'solar') kwh[s.id] = +solar.toFixed(3)
+        if (s.role === 'solar') kwh[s.id] = -solar.toFixed(3) // raw Matter sign: generating is negative
         if (s.role === 'grid') kwh[s.id] = +(total - solar).toFixed(3)
       }
 

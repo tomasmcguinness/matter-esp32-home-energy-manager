@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { useSearchParams } from 'react-router'
 import { fmtMoney } from './tariff'
+import { isAbortError, queuedFetch } from './fetchQueue'
 
 type PowerRecord = { minute: number; power_w: number }
 
@@ -219,16 +220,21 @@ function ProfileSection({ url, date }: { url: string; date: string }) {
   useEffect(() => {
     setLoading(true)
     setError(null)
-    fetch(url)
+    // Queued: one chart per connected node would otherwise all hit the device at
+    // once. Aborted on date change so stale days don't hold up the queue.
+    const ac = new AbortController()
+    queuedFetch(url, { signal: ac.signal })
       .then(r => r.ok ? r.json() : Promise.reject(`HTTP ${r.status}`))
       .then((data: { records: PowerRecord[] }) => {
         setRecords(data.records)
         setLoading(false)
       })
       .catch((e: unknown) => {
+        if (isAbortError(e)) return
         setError(e instanceof Error ? e.message : String(e))
         setLoading(false)
       })
+    return () => ac.abort()
   }, [url])
 
   if (error) return <div className="alert alert-danger">{error}</div>
@@ -284,9 +290,11 @@ function fmtDay(date: string): string {
   return new Date(`${date}T00:00:00`).toLocaleDateString(undefined, { day: 'numeric', month: 'short' })
 }
 
-// Daily consumption = net grid + solar output (grid is signed, so export days
-// net out). Each appliance stream is a segment; the remainder of the total not
-// covered by a metered appliance is the unmonitored baseload.
+// Daily consumption = net grid import + solar output. kWh keeps the raw Matter
+// sign (+ = into the device), so grid is + import and a generating inverter is
+// negative: solar output is -solar, and export days net out. Each appliance
+// stream is a segment; the remainder of the total not covered by a metered
+// appliance is the unmonitored baseload.
 function buildHistory(data: DailyEnergy, labels: Map<string, string>) {
   const gridIds = data.nodes.filter(n => n.role === 'grid').map(n => n.id)
   const solarIds = data.nodes.filter(n => n.role === 'solar').map(n => n.id)
@@ -299,7 +307,7 @@ function buildHistory(data: DailyEnergy, labels: Map<string, string>) {
     const parts: Record<string, number> = {}
     for (const id of loadIds) parts[id] = Math.max(0, d.kwh[id] ?? 0)
     const loads = Object.values(parts).reduce((a, b) => a + b, 0)
-    const total = Math.max(loads, sum(gridIds) + sum(solarIds))
+    const total = Math.max(loads, sum(gridIds) - sum(solarIds))
     parts[UNMONITORED_ID] = total - loads
     return { date: d.date, total, parts }
   })
@@ -327,7 +335,7 @@ function UsageHistory({ labels }: { labels: Map<string, string> }) {
   const [hovered, setHovered] = useState<string | null>(null)
 
   useEffect(() => {
-    fetch(`/api/data/daily-energy?days=${HISTORY_DAYS}`)
+    queuedFetch(`/api/data/daily-energy?days=${HISTORY_DAYS}`)
       .then(r => r.ok ? r.json() : Promise.reject(`HTTP ${r.status}`))
       .then((d: DailyEnergy) => setData(d))
       .catch((e: unknown) => setError(e instanceof Error ? e.message : String(e)))
@@ -513,7 +521,7 @@ function Power() {
   useEffect(() => {
     setLoading(true)
     setError(null)
-    fetch('/api/nodes')
+    queuedFetch('/api/nodes')
       .then(r => r.ok ? r.json() : Promise.reject(`HTTP ${r.status}`))
       .then((data: { nodes?: SavedNodeConfig[]; edges?: SavedEdgeConfig[] }) => {
         setNodes(connectedNodes(data.nodes ?? [], data.edges ?? []))

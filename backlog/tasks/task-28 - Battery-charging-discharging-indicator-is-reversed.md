@@ -4,7 +4,7 @@ title: Battery charging/discharging indicator is reversed
 status: To Do
 assignee: []
 created_date: '2026-06-17 09:10'
-updated_date: '2026-10-03 08:43'
+updated_date: '2026-10-03 10:24'
 labels:
   - BUG
 dependencies: []
@@ -27,4 +27,6 @@ Current state of the code:
 - The canvas inverter->battery edge is metered at the battery (target) end.
 
 In the same session the solar inverter was changed to be flipped at logging time (on_sample_timer, stream_t.is_solar), so solar files are stored from the consumer unit's perspective (+ supplied to the CU). Decide whether the battery should follow the same 'flip at ingestion' pattern; if it does, remove the negation in compute_day_split.
+
+2026-10-03 update: decided that every reading is stored with the raw Matter sign (no flip on ingestion; the solar flip was reverted). Sign is only interpreted when history is processed: supplied_mw() in node_power_logger.cpp turns inverter and battery readings into power supplied, and grid and load readings are used as stored (+ = import / consumption). The battery now goes through supplied_mw() in compute_day_split. Remaining work is to check the battery against real readings.
 <!-- SECTION:NOTES:END -->

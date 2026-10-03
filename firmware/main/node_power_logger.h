@@ -32,8 +32,8 @@ char      *node_power_logger_hourly_json(const char *node_id, const char *date_s
 // Per-stream daily energy (kWh) for the last `days` local dates, today included,
 // oldest first: {"nodes":[{"id","role"}], "days":[{"date","kwh":{"<id>":n}}]}.
 // role is "grid" | "solar" | "load" | "battery". A stream with no file for a day
-// is omitted from that day's kwh object. Solar kWh is net energy supplied to the
-// consumer unit (+ generated). Days with a resolved tariff also carry
+// is omitted from that day's kwh object. kWh keeps the raw Matter sign (+ = into
+// the device), so a generating inverter's kWh is negative. Days with a resolved tariff also carry
 // "cost":{"<id>":n,"__unmonitored":n} in major currency units, and the root
 // then carries "currency" (ISO 4217 numeric). Days with grid data also carry
 // "solar_kwh" and "grid_kwh" ({"<loadId>":n,"__unmonitored":n}): each load's

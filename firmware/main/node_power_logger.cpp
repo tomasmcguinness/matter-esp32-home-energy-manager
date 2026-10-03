@@ -42,7 +42,6 @@ struct stream_t {
     uint64_t    node_id     = 0; // Matter node id (cache lookup)
     uint16_t    endpoint_id = 0; // Matter endpoint id (cache lookup)
     bool        is_grid     = false; // grid meter: persisted to the grid-* files
-    bool        is_solar    = false; // logged from the CU's side: + supplied to it, - drawn from it
     const char *role        = "load"; // "grid" | "solar" | "load" from the CU handle, or "battery"
     int64_t     sum_mw      = 0;
     uint32_t    count       = 0;
@@ -190,7 +189,6 @@ static void refresh_streams(void)
                 s.endpoint_id = (uint16_t)eid->valuedouble;
                 s.role        = role;
                 s.is_grid     = strcmp(role, "grid") == 0;
-                s.is_solar    = strcmp(role, "solar") == 0;
                 next.push_back(std::move(s));
             }
             break;
@@ -218,9 +216,7 @@ static void on_sample_timer(void *arg)
             if (v.node_id != s.node_id || v.endpoint_id != s.endpoint_id) continue;
             if (v.cluster_id != EPM_CLUSTER_ID || v.attribute_id != EPM_ACTIVE_POWER_ATTR) continue;
             if (s.count == 0) s.unix_minute = minute_start;
-            // Matter reads the inverter as + drawn from the mains; solar files are
-            // stored from the consumer unit's side, + = supplied to it.
-            s.sum_mw += s.is_solar ? -v.value : v.value;
+            s.sum_mw += v.value; // stored with the raw Matter sign (+ = into the device)
             s.count++;
             break;
         }
@@ -530,6 +526,12 @@ static bool file_kwh(const char *hourly_path, const char *minute_path, double *k
     return false;
 }
 
+// Power a device supplies to the premises, from its stored reading. Readings are
+// kept with the raw Matter sign (+ = into the device, - = the device supplying),
+// so an inverter generating or a battery discharging reads negative. Grid and
+// load readings are used as stored: + = import / consumption.
+static inline int32_t supplied_mw(int32_t raw_mw) { return -raw_mw; }
+
 struct stream_info_t { std::string graph_id; const char *role; bool is_grid; };
 
 static std::vector<stream_info_t> snapshot_streams(void)
@@ -598,7 +600,7 @@ static bool compute_day_cost(const char *date, const std::vector<stream_info_t> 
         snprintf(path, sizeof(path), "%s/node-%s-%s", SD_BASE, s.graph_id.c_str(), date);
         if (!load_minutes(path, day_start, tmp)) tmp.assign(kMaxDayMinutes, 0);
         if (strcmp(s.role, "solar") == 0) {
-            for (int i = 0; i < kMaxDayMinutes; i++) solar[i] += tmp[i];
+            for (int i = 0; i < kMaxDayMinutes; i++) solar[i] += supplied_mw(tmp[i]);
         } else {
             loads.emplace_back(s.graph_id, tmp);
         }
@@ -722,8 +724,8 @@ static void cost_day_cached(const char *date, bool allow_cache_write)
 // import, PV directly, and battery discharge. Every load (and the unmonitored
 // remainder) takes the same mix, in proportion to its draw, like the cost split
 // above. Battery discharge is solar or grid according to where the energy it
-// holds came from, tracked by a ledger carried from day to day. Solar files are
-// logged from the consumer unit's side (+ supplied, - drawn; see on_sample_timer).
+// holds came from, tracked by a ledger carried from day to day. Files hold the
+// raw Matter sign, so the inverter and battery are converted with supplied_mw().
 // The inverter AC output is assumed to net battery flow (DC-coupled hybrid
 // inverter), so a negative output while charging is power pulled from the grid.
 
@@ -773,11 +775,9 @@ static bool compute_day_split(const char *date, const std::vector<stream_info_t>
         snprintf(path, sizeof(path), "%s/node-%s-%s", SD_BASE, s.graph_id.c_str(), date);
         if (!load_minutes(path, day_start, tmp)) tmp.assign(kMaxDayMinutes, 0);
         if (strcmp(s.role, "solar") == 0) {
-            for (int i = 0; i < kMaxDayMinutes; i++) inv[i] += tmp[i];
+            for (int i = 0; i < kMaxDayMinutes; i++) inv[i] += supplied_mw(tmp[i]);
         } else if (strcmp(s.role, "battery") == 0) {
-            // Matter: the battery reads + charging, - discharging. Negate so bat
-            // is power supplied by the battery.
-            for (int i = 0; i < kMaxDayMinutes; i++) bat[i] -= tmp[i];
+            for (int i = 0; i < kMaxDayMinutes; i++) bat[i] += supplied_mw(tmp[i]);
         } else {
             loads.emplace_back(s.graph_id, tmp);
         }
