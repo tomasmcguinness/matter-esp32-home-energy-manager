@@ -184,7 +184,7 @@ export const handlers = [
       const nodeId = n.settings?.nodeId
       const endpointId = n.settings?.endpointId
       if (typeof nodeId !== 'number' || typeof endpointId !== 'number') return n
-      // PV strings export DC power; the battery is signed (negative = charging here).
+      // PV strings export DC power; the battery follows Matter (negative = discharging).
       const type = n.settings?.type
       const activePower =
         type === 'pvString' ? 1800000 :

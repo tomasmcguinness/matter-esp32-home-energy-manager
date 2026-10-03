@@ -1,4 +1,5 @@
 #include "tariff.h"
+#include "commodity_price.h"
 #include "managers/node_manager.h"
 
 #include <stdio.h>
@@ -438,9 +439,8 @@ esp_err_t tariff_init(void)
     return ESP_OK;
 }
 
-bool tariff_load_day(const char *date_str, tariff_day_t *out)
+static bool load_tariff_file(const char *date_str, tariff_day_t *out)
 {
-    if (!valid_date(date_str) || !out) return false;
     char path[48];
     snprintf(path, sizeof(path), "%s/tariff-%s", SD_BASE, date_str);
     FILE *f = fopen(path, "rb");
@@ -453,6 +453,31 @@ bool tariff_load_day(const char *date_str, tariff_day_t *out)
     out->currency = hdr.currency;
     out->decimals = hdr.decimals;
     out->unit     = hdr.unit;
+    return true;
+}
+
+// The Commodity Tariff schedule, with every slot recorded from Commodity Price
+// laid over it: the recorded price is what was actually charged.
+bool tariff_load_day(const char *date_str, tariff_day_t *out)
+{
+    if (!valid_date(date_str) || !out) return false;
+    bool have_tariff = load_tariff_file(date_str, out);
+
+    tariff_day_t recorded;
+    if (!commodity_price_load_day(date_str, &recorded)) return have_tariff;
+    if (!have_tariff) {
+        *out = recorded;
+        return true;
+    }
+
+    // Express recorded prices in the schedule's precision if they differ.
+    for (int i = 0; i < TARIFF_SLOTS; i++) {
+        int64_t v = recorded.price[i];
+        if (v == TARIFF_NO_PRICE) continue;
+        for (int d = recorded.decimals; d < out->decimals; d++) v *= 10;
+        for (int d = out->decimals; d < recorded.decimals; d++) v /= 10;
+        out->price[i] = v;
+    }
     return true;
 }
 

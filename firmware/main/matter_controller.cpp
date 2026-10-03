@@ -21,6 +21,7 @@
 #include "ws_server.h"
 #include "value_cache.h"
 #include "tariff.h"
+#include "commodity_price.h"
 #include "cJSON.h"
 
 #include <app/server/Dnssd.h>
@@ -589,8 +590,24 @@ void matter_controller_attribute_data_cb(uint64_t node_id,
     else if (path.mClusterId == CommodityTariff::Id) {
         tariff_on_attribute(node_id, path, data);
     }
+    else if (path.mClusterId == CommodityPrice::Id) {
+        commodity_price_on_attribute(node_id, path, data);
+    }
 
     return;
+}
+
+void matter_controller_event_data_cb(uint64_t node_id,
+                                     const chip::app::EventHeader &header,
+                                     chip::TLV::TLVReader *data,
+                                     const chip::app::StatusIB *status)
+{
+    if (!data || (status && status->mStatus != chip::Protocols::InteractionModel::Status::Success))
+        return;
+
+    if (header.mPath.mClusterId == CommodityPrice::Id) {
+        commodity_price_on_event(node_id, header, data);
+    }
 }
 
 // Persist the latest value of a subscribed attribute into the ValueCache.

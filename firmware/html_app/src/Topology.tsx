@@ -1,11 +1,11 @@
-import { ReactFlow, ReactFlowProvider, Background, BackgroundVariant, useNodesState, useEdgesState, type Node, type Edge, type EdgeChange, type ReactFlowInstance, type Viewport, addEdge, useReactFlow, Handle, Position } from '@xyflow/react'
+import { ReactFlow, ReactFlowProvider, useNodeConnections, Background, BackgroundVariant, useNodesState, useEdgesState, type Node, type Edge, type EdgeChange, type ReactFlowInstance, type Viewport, addEdge, useReactFlow, Handle, Position } from '@xyflow/react'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { PowerFlowEdge } from './PowerFlowEdge'
 import { GridModal } from './GridModal'
 import { AddLoadModal, type AddedLoad } from './AddLoadModal'
 import { useWebSocket, type WsMessage } from './useWebSocket'
 import { DnDProvider, useDnD } from './DnDContext';
-import { type TariffDay, currentSlot, fmtUnitPrice, localDateString, slotPrice } from './tariff'
+import { fmtMoney, fmtUnitPrice, useCurrentPrice } from './tariff'
 
 const edgeTypes = { powerFlow: PowerFlowEdge }
 
@@ -106,8 +106,25 @@ function batteryPercentFromAttribute(clusterId: number, attributeId: number, val
   return undefined
 }
 
+// Price in force and what importing at the current rate costs per hour. Shown
+// on the grid meter (positive power = import) whenever a price is available.
+function ImportCost({ powerMw }: { powerMw?: number }) {
+  const { price, currency } = useCurrentPrice()
+  if (price === null) return null
+  const importKw = powerMw !== undefined && powerMw > 0 ? powerMw / 1000000 : 0
+  return (
+    <>
+      <span style={{ color: '#94a3b8' }}>Price</span><span style={{ textAlign: 'right' }}>{fmtUnitPrice(price, currency)}</span>
+      <span style={{ color: '#94a3b8' }}>Cost</span><span style={{ textAlign: 'right' }}>{fmtMoney(importKw * price, currency)}/h</span>
+    </>
+  )
+}
+
 function DeviceNode({ data }: { data: DeviceNodeData }) {
   const badge = data.status && data.status !== 'running' ? STATUS_BADGE[data.status] : null
+  // The handle is the role: a meter feeding the consumer unit's grid handle is the grid meter.
+  const isGrid = useNodeConnections({ handleType: 'source', handleId: 'power-out' })
+    .some(c => c.target === 'consumer_unit' && c.targetHandle === 'grid')
 
   return (
     <>
@@ -128,6 +145,7 @@ function DeviceNode({ data }: { data: DeviceNodeData }) {
         <span style={{ color: '#94a3b8' }}>V</span><span style={{textAlign: 'right'}}>{fmt(data.power?.voltage, 'V')}</span>
         <span style={{ color: '#94a3b8' }}>I</span><span style={{textAlign: 'right'}}>{fmt(data.power?.current, 'A')}</span>
         <span style={{ color: '#94a3b8' }}>P</span><span style={{textAlign: 'right'}}>{fmt(data.power?.power, 'W')}</span>
+        {isGrid && <ImportCost powerMw={data.power?.power} />}
       </div>
       <Handle type="source" position={Position.Right} id="power-out" />
     </>
@@ -265,30 +283,14 @@ function SubConsumerUnitNode({ id, data }: { id: string; data: { label: string; 
 // The device publishing the Commodity Tariff. Wired to the consumer unit's
 // `tariff` handle; shows the price in force right now.
 function TariffNode({ data }: { data: DeviceNodeData }) {
-  const [day, setDay] = useState<TariffDay | null>(null)
-  const [slot, setSlot] = useState(currentSlot())
-
-  useEffect(() => {
-    const load = () => {
-      setSlot(currentSlot())
-      fetch(`/api/tariff?date=${localDateString(new Date())}`)
-        .then(r => r.ok ? r.json() : Promise.reject())
-        .then((d: TariffDay) => setDay(d))
-        .catch(() => { })
-    }
-    load()
-    const timer = setInterval(load, 5 * 60 * 1000)
-    return () => clearInterval(timer)
-  }, [])
-
-  const price = day ? slotPrice(day, slot) : null
+  const { price, currency } = useCurrentPrice()
   return (
     <>
       <div style={{ padding: '4px 10px', background: '#fef3c7', borderBottom: '1px solid #fde68a', fontSize: 12, fontWeight: 600, color: '#1e293b', whiteSpace: 'nowrap' }}>
         Tariff | {data.label}
       </div>
       <div style={{ padding: '5px 10px', fontSize: 12, textAlign: 'right' }}>
-        {price !== null ? fmtUnitPrice(price, day?.currency) : '—'}
+        {price !== null ? fmtUnitPrice(price, currency) : '—'}
       </div>
       <Handle type="source" position={Position.Right} id="tariff-out" />
     </>
@@ -331,9 +333,20 @@ function edgePowerNodeId(e: { source: string; sourceHandle?: string | null; targ
 // convention is positive = into the metered device, negative = out of it. Edge
 // kW is negative for source → target and positive for target → source, so a
 // reading metered at the target is negated to express it along the edge.
-function edgeKw(e: { target: string }, meteredId: string, powerMw: number): number {
+// A grid meter is the exception (Matter spec 9.2.6.1): its reading is relative
+// to the premises, positive = flowing into them, so a grid edge counts as
+// metered at whichever end carries the consumer unit's grid handle. The edge
+// may be saved in either orientation.
+function edgeKw(
+  e: { target: string; sourceHandle?: string | null; targetHandle?: string | null },
+  meteredId: string,
+  powerMw: number,
+): number {
   const kw = powerMw / 1000000
-  return meteredId === e.target ? -kw : kw
+  const atTarget = e.targetHandle === 'grid' ? true
+    : e.sourceHandle === 'grid' ? false
+    : meteredId === e.target
+  return atTarget ? -kw : kw
 }
 
 type DeviceSpec = {

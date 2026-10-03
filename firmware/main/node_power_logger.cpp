@@ -42,6 +42,7 @@ struct stream_t {
     uint64_t    node_id     = 0; // Matter node id (cache lookup)
     uint16_t    endpoint_id = 0; // Matter endpoint id (cache lookup)
     bool        is_grid     = false; // grid meter: persisted to the grid-* files
+    bool        is_solar    = false; // logged from the CU's side: + supplied to it, - drawn from it
     const char *role        = "load"; // "grid" | "solar" | "load" from the CU handle, or "battery"
     int64_t     sum_mw      = 0;
     uint32_t    count       = 0;
@@ -189,6 +190,7 @@ static void refresh_streams(void)
                 s.endpoint_id = (uint16_t)eid->valuedouble;
                 s.role        = role;
                 s.is_grid     = strcmp(role, "grid") == 0;
+                s.is_solar    = strcmp(role, "solar") == 0;
                 next.push_back(std::move(s));
             }
             break;
@@ -216,7 +218,9 @@ static void on_sample_timer(void *arg)
             if (v.node_id != s.node_id || v.endpoint_id != s.endpoint_id) continue;
             if (v.cluster_id != EPM_CLUSTER_ID || v.attribute_id != EPM_ACTIVE_POWER_ATTR) continue;
             if (s.count == 0) s.unix_minute = minute_start;
-            s.sum_mw += v.value;
+            // Matter reads the inverter as + drawn from the mains; solar files are
+            // stored from the consumer unit's side, + = supplied to it.
+            s.sum_mw += s.is_solar ? -v.value : v.value;
             s.count++;
             break;
         }
@@ -718,9 +722,10 @@ static void cost_day_cached(const char *date, bool allow_cache_write)
 // import, PV directly, and battery discharge. Every load (and the unmonitored
 // remainder) takes the same mix, in proportion to its draw, like the cost split
 // above. Battery discharge is solar or grid according to where the energy it
-// holds came from, tracked by a ledger carried from day to day. The inverter
-// AC output is assumed to net battery flow (DC-coupled hybrid inverter), so a
-// negative output while charging is power pulled from the grid.
+// holds came from, tracked by a ledger carried from day to day. Solar files are
+// logged from the consumer unit's side (+ supplied, - drawn; see on_sample_timer).
+// The inverter AC output is assumed to net battery flow (DC-coupled hybrid
+// inverter), so a negative output while charging is power pulled from the grid.
 
 // Energy held in the battery (Wh, as charged) and the fraction of it that came
 // from solar. Unknown origin (cold start, or drained) counts as grid, so the
@@ -770,7 +775,9 @@ static bool compute_day_split(const char *date, const std::vector<stream_info_t>
         if (strcmp(s.role, "solar") == 0) {
             for (int i = 0; i < kMaxDayMinutes; i++) inv[i] += tmp[i];
         } else if (strcmp(s.role, "battery") == 0) {
-            for (int i = 0; i < kMaxDayMinutes; i++) bat[i] += tmp[i];
+            // Matter: the battery reads + charging, - discharging. Negate so bat
+            // is power supplied by the battery.
+            for (int i = 0; i < kMaxDayMinutes; i++) bat[i] -= tmp[i];
         } else {
             loads.emplace_back(s.graph_id, tmp);
         }
@@ -783,7 +790,7 @@ static bool compute_day_split(const char *date, const std::vector<stream_info_t>
     for (int i = 0; i < kMaxDayMinutes; i++) {
         double grid_w = grid[i] / 1000.0;
         double inv_w  = inv[i] / 1000.0;
-        double bat_w  = bat[i] / 1000.0; // + discharging, - charging
+        double bat_w  = bat[i] / 1000.0; // supplied: + discharging, - charging
 
         double loads_sum = 0.0;
         for (const auto &l : loads) loads_sum += l.second[i] > 0 ? l.second[i] / 1000.0 : 0.0;

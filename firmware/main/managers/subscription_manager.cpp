@@ -382,13 +382,15 @@ static void send_subscription(intptr_t arg)
 
     // What we subscribe to is decided by what the HEM needs of the node. Every wanted node gets the
     // power measurement and battery paths (harmless where absent, since the endpoint is wildcard);
-    // the tariff source also gets the Commodity Tariff cluster on its tariff endpoint.
+    // the tariff source also gets the Commodity Tariff and Commodity Price clusters, and the
+    // PriceChange event, on its tariff endpoint. A device lacking one of the clusters just answers
+    // that path with an unsupported status.
     uint64_t tariff_node     = 0;
     uint16_t tariff_endpoint = 0;
     bool wants_tariff = tariff_get_source(&tariff_node, &tariff_endpoint) && tariff_node == node_id;
 
     ScopedMemoryBufferWithSize<AttributePathParams> attr_paths;
-    attr_paths.Alloc(4 + (wants_tariff ? 1 : 0));
+    attr_paths.Alloc(4 + (wants_tariff ? 2 : 0));
 
     if (!attr_paths.Get())
     {
@@ -414,13 +416,27 @@ static void send_subscription(intptr_t arg)
     {
         // One cluster-wide path keeps the per-subscription path count low.
         attr_paths[path_index++] = AttributePathParams(tariff_endpoint, CommodityTariff::Id);
+        attr_paths[path_index++] = AttributePathParams(tariff_endpoint, CommodityPrice::Id);
     }
 
+    // PriceChange events buffered by the device while we were away are replayed on resubscribe,
+    // which fills gaps in the recorded price history.
     ScopedMemoryBufferWithSize<EventPathParams> event_paths;
-    event_paths.Alloc(0);
+    event_paths.Alloc(wants_tariff ? 1 : 0);
+    if (wants_tariff)
+    {
+        if (!event_paths.Get())
+        {
+            ESP_LOGE(TAG, "Failed to alloc memory for event paths");
+            mark_node_has_no_subscription(node_id, 0);
+            subscription_attempt_finished(node_id);
+            return;
+        }
+        event_paths[0] = EventPathParams(tariff_endpoint, CommodityPrice::Id, CommodityPrice::Events::PriceChange::Id);
+    }
 
     ESP_LOGI(TAG, "Subscribing to node 0x%016llX (%u path(s): electrical battery%s)", node_id,
-             (unsigned)path_index, wants_tariff ? " tariff" : "");
+             (unsigned)path_index, wants_tariff ? " tariff price" : "");
 
     auto *cmd = Platform::New<esp_matter::controller::subscribe_command>(node_id,
                                                                          std::move(attr_paths),
@@ -429,7 +445,7 @@ static void send_subscription(intptr_t arg)
                                                                          SUBSCRIBE_MAX_INTERVAL,
                                                                          false, // auto resubscribe
                                                                          matter_controller_attribute_data_cb,
-                                                                         nullptr,
+                                                                         matter_controller_event_data_cb,
                                                                          node_subscription_established_cb,
                                                                          node_subscription_terminated_cb,
                                                                          node_subscribe_failed_cb,

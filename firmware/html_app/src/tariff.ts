@@ -1,4 +1,7 @@
-// Shared helpers for the Commodity Tariff data served by /api/tariff.
+// Shared helpers for the tariff data served by /api/tariff (Commodity Tariff
+// schedule with any Commodity Price recordings laid over it).
+
+import { useEffect, useState } from 'react'
 
 export type TariffDay = {
   date: string
@@ -53,4 +56,26 @@ export function currentSlot(now = new Date()): number {
 
 export function localDateString(d: Date): string {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+}
+
+// The price per kWh in force now, refreshed every 5 minutes. price is null when
+// the current slot is unpriced or no tariff data is available.
+export function useCurrentPrice(): { price: number | null; currency?: number } {
+  const [day, setDay] = useState<TariffDay | null>(null)
+  const [slot, setSlot] = useState(currentSlot())
+
+  useEffect(() => {
+    const load = () => {
+      setSlot(currentSlot())
+      fetch(`/api/tariff?date=${localDateString(new Date())}`)
+        .then(r => r.ok ? r.json() : Promise.reject())
+        .then((d: TariffDay) => setDay(d))
+        .catch(() => { })
+    }
+    load()
+    const timer = setInterval(load, 5 * 60 * 1000)
+    return () => clearInterval(timer)
+  }, [])
+
+  return { price: day ? slotPrice(day, slot) : null, currency: day?.currency }
 }

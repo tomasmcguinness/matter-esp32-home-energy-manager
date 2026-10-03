@@ -11,6 +11,7 @@ idf_component_register(SRCS
         "power_logger.c"
         "node_power_logger.cpp"
         "tariff.cpp"
+        "commodity_price.cpp"
         "value_cache.cpp"
         "solar_forecast.c"
         "consumption_forecast.c"

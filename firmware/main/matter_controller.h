@@ -28,11 +28,17 @@ esp_err_t matter_factory_reset(void);
 }
 
 #include <app/ConcreteAttributePath.h>
+#include <app/EventHeader.h>
 #include <app/MessageDef/StatusIB.h>
 #include <lib/core/TLVReader.h>
 
 // Attribute report sink for every subscription (see managers/subscription_manager.cpp): caches
-// power/battery readings and forwards Commodity Tariff reports to tariff.cpp.
+// power/battery readings and forwards Commodity Tariff / Commodity Price reports to tariff.cpp /
+// commodity_price.cpp.
 void matter_controller_attribute_data_cb(uint64_t node_id, const chip::app::ConcreteDataAttributePath &path,
                                          chip::TLV::TLVReader *data, const chip::app::StatusIB &status);
+
+// Event report sink for every subscription: forwards Commodity Price PriceChange events.
+void matter_controller_event_data_cb(uint64_t node_id, const chip::app::EventHeader &header,
+                                     chip::TLV::TLVReader *data, const chip::app::StatusIB *status);
 #endif

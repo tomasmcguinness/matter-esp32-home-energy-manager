@@ -10,6 +10,9 @@
 // reports is resolved to fixed 15-minute price slots and persisted to
 // /sdcard/tariff-YYYY-MM-DD. Those files are the price history that cost
 // calculations use; days before a tariff was assigned simply have no file.
+// Prices recorded from the Commodity Price cluster (commodity_price.h) are laid
+// over those slots by tariff_load_day(), so a device exposing only Commodity
+// Price is priced too.
 //
 // Prices are Matter `money`: the value in currency units scaled by
 // 10^decimals, per TariffUnit (kWh, or kVAh treated as kWh).
