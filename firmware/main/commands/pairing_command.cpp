@@ -135,6 +135,8 @@ namespace home_energy_manager
             PeerAddress peerAddress = PeerAddress::UDP(nodeData.ipAddress[0], port, interfaceId);
             RendezvousParameters params = RendezvousParameters().SetSetupPINCode(m_setup_pincode).SetPeerAddress(peerAddress);
             CommissioningParameters commissioning_params = CommissioningParameters();
+            // Set a custom Device Attestation Delegate to skip DAC verification
+            commissioning_params.SetDeviceAttestationDelegate(&pairing_command::get_instance());
             NodeId commissioner_node_id = controller_instance.get_commissioner()->GetNodeId();
             if (m_icd_registration)
             {
