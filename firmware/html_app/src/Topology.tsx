@@ -1,8 +1,9 @@
-import { ReactFlow, ReactFlowProvider, useNodeConnections, Background, BackgroundVariant, useNodesState, useEdgesState, type Node, type Edge, type EdgeChange, type ReactFlowInstance, type Viewport, addEdge, useReactFlow, Handle, Position } from '@xyflow/react'
+import { ReactFlow, ReactFlowProvider, useNodeConnections, useEdges, Background, BackgroundVariant, useNodesState, useEdgesState, type Node, type Edge, type EdgeChange, type ReactFlowInstance, type Viewport, addEdge, useReactFlow, Handle, Position } from '@xyflow/react'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { PowerFlowEdge } from './PowerFlowEdge'
 import { GridModal } from './GridModal'
 import { AddLoadModal, type AddedLoad } from './AddLoadModal'
+import { EditNodeModal, type NodeSettings } from './EditNodeModal'
 import { useWebSocket, type WsMessage } from './useWebSocket'
 import { DnDProvider, useDnD } from './DnDContext';
 import { fmtMoney, fmtUnitPrice, useCurrentPrice } from './tariff'
@@ -23,6 +24,8 @@ function ConsumerUnitNode({ data }: { data: { label: string } }) {
       {/* The tariff source prices the grid import; it carries no power. */}
       <Handle type="target" position={Position.Left} id="tariff" style={{ top: '70%' }} />
       <Handle type="target" position={Position.Bottom} id="solar_input" />
+      {/* Fixed feed to the Unallocated node; not a circuit the user can wire. */}
+      <Handle type="source" position={Position.Top} id="unallocated" isConnectable={false} />
       {/* Tall enough that the circuit handles on the right edge don't overlap. */}
       <div style={{ padding: '5px 12px', fontSize: 13, fontWeight: 500, color: '#1e293b', whiteSpace: 'nowrap', minHeight: CU_CIRCUITS.length * 12, display: 'flex', alignItems: 'center' }}>
         {data.label}
@@ -260,7 +263,7 @@ function SubConsumerUnitNode({ id, data }: { id: string; data: { label: string; 
       <Handle type="target" position={Position.Left} id="power-in" />
       <div style={{ padding: '5px 10px', background: '#ecfeff', border: '1px solid #67e8f9', borderRadius: 4, fontSize: 12, fontWeight: 600, color: '#1e293b', whiteSpace: 'nowrap', display: 'flex', alignItems: 'center', gap: 8 }}>
         <span>▦ {data.label}</span>
-        <span className="nodrag" style={{ display: 'flex', gap: 2 }}>
+        <span className="nodrag" style={{ display: 'flex', gap: 2 }} onDoubleClick={e => e.stopPropagation()}>
           <button style={btn} onClick={() => setCircuits(circuits - 1)} disabled={circuits <= 1} title="Remove circuit">−</button>
           <button style={btn} onClick={() => setCircuits(circuits + 1)} disabled={circuits >= 8} title="Add circuit">+</button>
         </span>
@@ -274,6 +277,52 @@ function SubConsumerUnitNode({ id, data }: { id: string; data: { label: string; 
           style={{ top: `${((i + 1) * 100) / (circuits + 1)}%` }}
         />
       ))}
+    </>
+  )
+}
+
+// The consumer unit's unmetered remainder: whatever enters the main consumer
+// unit and isn't accounted for by a metered circuit. Derived, not measured, so
+// it has no device; the value rides on its feed edge (see withUnallocated).
+// A remainder that stays negative means the metered loads add up to more than
+// the supply, which points at an inverted CT or a missing meter rather than at
+// real power, so it is shown as zero with a warning.
+const UNALLOCATED_ID = 'unallocated'
+const UNALLOCATED_EDGE_ID = 'consumer_unit-unallocated-unallocated-power-in'
+// Meters report at different moments, so a brief or small negative is just skew.
+const UNALLOCATED_NEGATIVE_W = -50
+const UNALLOCATED_NEGATIVE_HOLD_MS = 30000
+
+function UnallocatedNode({ data }: { data: { label: string } }) {
+  const edge = useEdges().find(e => e.id === UNALLOCATED_EDGE_ID)
+  const rawKw = edge?.data?.rawKw as number | undefined
+  const negative = rawKw !== undefined && rawKw * 1000 < UNALLOCATED_NEGATIVE_W
+  const [warn, setWarn] = useState(false)
+
+  // Raise the warning only once the remainder has stayed negative; clear it at once.
+  useEffect(() => {
+    const timer = setTimeout(() => setWarn(negative), negative ? UNALLOCATED_NEGATIVE_HOLD_MS : 0)
+    return () => clearTimeout(timer)
+  }, [negative])
+
+  return (
+    <>
+      <div style={{ padding: '4px 10px', background: '#f1f5f9', borderBottom: '1px solid #e2e8f0', fontSize: 12, fontWeight: 600, color: '#1e293b', whiteSpace: 'nowrap', display: 'flex', alignItems: 'center', gap: 6 }}>
+        <span>{data.label}</span>
+        {warn && (
+          <span
+            title={`Metered loads exceed the supply by ${Math.abs(rawKw! * 1000).toFixed(0)} W. Check for an inverted CT or a missing meter.`}
+            style={{ marginLeft: 'auto', padding: '1px 6px', borderRadius: 999, fontSize: 10, fontWeight: 600, background: '#fee2e2', color: '#b91c1c' }}
+          >
+            ⚠ Check metering
+          </span>
+        )}
+      </div>
+      <div style={{ minWidth: '100px', padding: '5px 10px', display: 'grid', gridTemplateColumns: 'auto 1fr', columnGap: 8, fontSize: 12 }}>
+        <span style={{ color: '#94a3b8' }}>P</span>
+        <span style={{ textAlign: 'right' }}>{rawKw === undefined ? '—' : `${(Math.max(0, rawKw) * 1000).toFixed(1)} W`}</span>
+      </div>
+      <Handle type="target" position={Position.Bottom} id="power-in" isConnectable={false} />
     </>
   )
 }
@@ -311,6 +360,7 @@ const nodeTypes = {
   battery: BatteryNode,
   subConsumerUnit: SubConsumerUnitNode,
   tariff: TariffNode,
+  unallocated: UnallocatedNode,
   // Legacy: graphs saved before the sub-CU replaced the Henley block render with
   // the same component so they still display.
   henley: SubConsumerUnitNode,
@@ -347,6 +397,119 @@ function edgeKw(
     : e.sourceHandle === 'grid' ? false
     : meteredId === e.target
   return atTarget ? -kw : kw
+}
+
+const SUB_CU_TYPES = ['subConsumerUnit', 'henley']
+
+function subCuIdsOf(nodes: Node[]): Set<string> {
+  return new Set(nodes.filter(n => SUB_CU_TYPES.includes(n.type ?? '')).map(n => n.id))
+}
+
+// A sub consumer unit has no meter of its own, so the flow on its feed (the edge
+// into its `power-in` handle) is the sum of the flows on its circuit edges, i.e.
+// the loads hanging off it. Whatever sits upstream (a grid meter, a CU circuit)
+// must not stamp its own reading onto the feed. Sub-CUs can nest, so a board's
+// total is resolved recursively; `visiting` guards against a wiring loop.
+//
+// Power that goes to a sub-CU never reaches whatever else hangs off the same
+// upstream handle. Where a metered handle feeds sub-CUs plus exactly one other
+// edge (a grid meter feeding both the main consumer unit and a sub-CU), that
+// edge carries the remainder: the meter's reading (`meteredKw`, the raw value
+// stamped on it) less the sub-CU feeds. With no such single edge there is
+// nothing to attribute the remainder to, so the siblings are left alone.
+function withSubCuFeeds(edges: Edge[], subCuIds: Set<string>): Edge[] {
+  if (subCuIds.size === 0) return edges
+  const totals = new Map<string, { kw: number; idle: boolean }>()
+  const visiting = new Set<string>()
+
+  const totalFor = (subCuId: string): { kw: number; idle: boolean } => {
+    const known = totals.get(subCuId)
+    if (known) return known
+    if (visiting.has(subCuId)) return { kw: 0, idle: true }
+    visiting.add(subCuId)
+    let kw = 0
+    let idle = true
+    for (const e of edges) {
+      if (e.source !== subCuId) continue
+      const flow = subCuIds.has(e.target)
+        ? totalFor(e.target)
+        : { kw: (e.data?.kw as number | undefined) ?? 0, idle: e.data?.idle === true }
+      kw += flow.kw
+      if (!flow.idle && flow.kw !== 0) idle = false
+    }
+    visiting.delete(subCuId)
+    const total = { kw, idle }
+    totals.set(subCuId, total)
+    return total
+  }
+
+  // Flow leaving each upstream node + handle towards sub-CUs. Edge kW is negative
+  // for source → target, so the flow away from the source is its negation.
+  const handleKey = (nodeId: string, handle?: string | null) => `${nodeId}|${handle ?? ''}`
+  const toSubCus = new Map<string, number>()
+  for (const e of edges) {
+    if (!subCuIds.has(e.target)) continue
+    const key = handleKey(e.source, e.sourceHandle)
+    toSubCus.set(key, (toSubCus.get(key) ?? 0) - totalFor(e.target).kw)
+  }
+
+  // The other edges on each of those handles. A grid edge may be saved in either
+  // orientation, so the shared handle can be at its source or its target end.
+  const siblings = new Map<string, { edge: Edge; atSource: boolean }[]>()
+  for (const e of edges) {
+    if (subCuIds.has(e.target)) continue
+    for (const atSource of [true, false]) {
+      const key = atSource ? handleKey(e.source, e.sourceHandle) : handleKey(e.target, e.targetHandle)
+      if (!toSubCus.has(key)) continue
+      siblings.set(key, [...(siblings.get(key) ?? []), { edge: e, atSource }])
+    }
+  }
+  const remainderKw = new Map<string, number>()
+  for (const [key, list] of siblings) {
+    if (list.length !== 1) continue
+    const { edge, atSource } = list[0]
+    const metered = edge.data?.meteredKw as number | undefined
+    if (metered === undefined) continue
+    const away = (atSource ? -metered : metered) - toSubCus.get(key)!
+    remainderKw.set(edge.id, atSource ? -away : away)
+  }
+
+  return edges.map(e => {
+    if (subCuIds.has(e.target)) {
+      const { kw, idle } = totalFor(e.target)
+      if (e.data?.kw === kw && e.data?.idle === idle) return e
+      return { ...e, data: { ...(e.data ?? {}), kw, idle } }
+    }
+    const kw = remainderKw.get(e.id)
+    if (kw === undefined || e.data?.kw === kw) return e
+    return { ...e, data: { ...(e.data ?? {}), kw } }
+  })
+}
+
+// Set the Unallocated feed to whatever the main consumer unit takes in and
+// doesn't hand to a metered circuit: the net of every other power edge touching
+// it (edge kW is negative for source → target, so flow into the CU is -kw where
+// the CU is the target and +kw where it is the source). `rawKw` keeps the true
+// remainder for the node's metering warning; the drawn flow never goes negative.
+function withUnallocated(edges: Edge[]): Edge[] {
+  let rawKw = 0
+  for (const e of edges) {
+    if (e.id === UNALLOCATED_EDGE_ID || isTariffEdge(e)) continue
+    const kw = (e.data?.kw as number | undefined) ?? 0
+    if (e.target === 'consumer_unit') rawKw -= kw
+    else if (e.source === 'consumer_unit') rawKw += kw
+  }
+  const kw = -Math.max(0, rawKw)
+  return edges.map(e => {
+    if (e.id !== UNALLOCATED_EDGE_ID) return e
+    if (e.data?.kw === kw && e.data?.rawKw === rawKw) return e
+    return { ...e, data: { ...(e.data ?? {}), kw, rawKw } }
+  })
+}
+
+// Every derived (unmetered) flow, applied after meter readings are stamped on.
+function withDerivedFlows(edges: Edge[], subCuIds: Set<string>): Edge[] {
+  return withUnallocated(withSubCuFeeds(edges, subCuIds))
 }
 
 type DeviceSpec = {
@@ -418,10 +581,23 @@ function ToastStack({ toasts, onDismiss }: { toasts: Toast[]; onDismiss: (id: nu
   )
 }
 
+// Node types the user can edit (double-click) or delete (right-click): loads and
+// sub consumer units. 'henley' is accepted for legacy graphs that predate the sub-CU.
+const EDITABLE_TYPES = ['subConsumerUnit', 'henley', 'device', 'appliance']
+
+// The settings object to edit for a node. The circuit count is changed on the
+// node itself (see SubConsumerUnitNode), so the live value wins over the copy
+// captured when the graph loaded.
+function editSettings(node: Node): NodeSettings {
+  const settings = { type: node.type, ...((node.data.settings as NodeSettings | undefined) ?? {}) }
+  return typeof node.data.circuits === 'number' ? { ...settings, circuits: node.data.circuits } : settings
+}
+
 function Topology() {
   const [nodes, setNodes, onNodesChange] = useNodesState(initialNodes)
   const [edges, setEdges, onEdgesChangeBase] = useEdgesState(initialEdges)
   const [gridModalOpen, setGridModalOpen] = useState(false)
+  const [editNode, setEditNode] = useState<Node | null>(null)
   const [nodeMenu, setNodeMenu] = useState<{ node: Node; x: number; y: number } | null>(null)
   const [paneMenu, setPaneMenu] = useState<{ x: number; y: number } | null>(null)
   // Flow-space position where an "Add load" node should be created (captured from
@@ -507,14 +683,18 @@ function Topology() {
         if (power && power.power !== undefined) powerByRfId.set(n.id, power)
       }
       if (powerByRfId.size > 0) {
-        setEdges(eds => eds.map(e => {
+        const subCuIds = subCuIdsOf(getNodes())
+        setEdges(eds => withDerivedFlows(eds.map(e => {
+          // A sub-CU's feed is derived from its loads, not metered upstream.
+          if (subCuIds.has(e.target)) return e
           const meteredId = edgePowerNodeId(e)
           const power = powerByRfId.get(meteredId)
           if (!power) return e
           const standbyW = standbyByNodeId.current.get(meteredId)
           const idle = standbyW !== undefined && loadStatus(power.power, standbyW) !== 'running'
-          return { ...e, data: { ...(e.data ?? {}), kw: edgeKw(e, meteredId, power.power!), idle } }
-        }))
+          const kw = edgeKw(e, meteredId, power.power!)
+          return { ...e, data: { ...(e.data ?? {}), kw, meteredKw: kw, idle } }
+        }), subCuIds))
       }
     }
   }, [addToast, setNodes, setEdges, getNodes])
@@ -569,13 +749,14 @@ function Topology() {
       });
 
       const id = `node_${++nodeIdCounter.current}`
+      const settings = { label: device.label, type: 'device', nodeId: device.nodeId, endpointId: device.endpointId }
 
       const newNode: Node = {
         id,
         type: 'device',
         position,
         draggable: true,
-        data: { label: device.label, nodeId: device.nodeId, endpointId: device.endpointId },
+        data: { label: device.label, nodeId: device.nodeId, endpointId: device.endpointId, settings },
       }
 
       fetch(`/api/nodes/${id}`, {
@@ -584,7 +765,7 @@ function Topology() {
         body: JSON.stringify({
           x: position.x,
           y: position.y,
-          settings: { label: device.label, type: 'device', nodeId: device.nodeId, endpointId: device.endpointId },
+          settings,
         }),
       }).catch(() => { })
 
@@ -594,9 +775,35 @@ function Topology() {
     [screenToFlowPosition, type, setNodes],
   );
 
+  // Loads and sub consumer units are edited in place; the grid meter keeps its own
+  // modal. Other node types have nothing editable here.
   const onNodeDoubleClick = useCallback((_: React.MouseEvent, node: Node) => {
     if (node.id === 'meter') setGridModalOpen(true)
+    else if (EDITABLE_TYPES.includes(node.type ?? '')) setEditNode(node)
   }, [])
+
+  // Apply a saved edit (already persisted by the modal) to the canvas. A load that
+  // moved to a different endpoint drops its readings, which belong to the old one.
+  const handleNodeEdited = useCallback((id: string, settings: NodeSettings) => {
+    setEditNode(null)
+    setNodes(nds => nds.map(n => {
+      if (n.id !== id) return n
+      const nodeId = settings.nodeId as number | undefined
+      const endpointId = settings.endpointId as number | undefined
+      const deviceChanged = n.data.nodeId !== nodeId || n.data.endpointId !== endpointId
+      return {
+        ...n,
+        data: {
+          ...n.data,
+          ...(deviceChanged ? { power: undefined, batteryPercent: undefined, status: undefined } : {}),
+          label: (settings.name as string) || (settings.label as string) || n.id,
+          nodeId,
+          endpointId,
+          settings,
+        },
+      }
+    }))
+  }, [setNodes])
 
   const onNodeDragStop = useCallback((_: React.MouseEvent, node: Node) => {
     fetch(`/api/nodes/${node.id}`, {
@@ -647,24 +854,23 @@ function Topology() {
     const position = screenToFlowPosition({ x: screenX, y: screenY })
     const label = 'Sub Consumer Unit'
     const circuits = 4
+    const settings = { label, type: 'subConsumerUnit', circuits }
 
-    setNodes(prev => [...prev, { id, type: 'subConsumerUnit', position, draggable: true, data: { label, circuits } }])
+    setNodes(prev => [...prev, { id, type: 'subConsumerUnit', position, draggable: true, data: { label, circuits, settings } }])
     fetch(`/api/nodes/${id}`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ x: position.x, y: position.y, settings: { label, type: 'subConsumerUnit', circuits } }),
+      body: JSON.stringify({ x: position.x, y: position.y, settings }),
     }).catch(() => { })
 
     setPaneMenu(null)
   }, [screenToFlowPosition, setNodes])
 
-  // Right-clicking a sub consumer unit or a load offers a delete action. Loads are
-  // device/appliance nodes; the protected main CU / meter (deletable === false) get
-  // no menu. Other node types have none either. 'henley' is accepted for legacy
-  // graphs that predate the sub-CU.
+  // Right-clicking a sub consumer unit or a load offers edit and delete actions.
+  // Loads are device/appliance nodes; the protected main CU / meter
+  // (deletable === false) get no menu. Other node types have none either.
   const onNodeContextMenu = useCallback((event: React.MouseEvent, node: Node) => {
-    const MENU_TYPES = ['subConsumerUnit', 'henley', 'device', 'appliance']
-    if (!MENU_TYPES.includes(node.type ?? '')) return
+    if (!EDITABLE_TYPES.includes(node.type ?? '')) return
     if (node.deletable === false) return
     event.preventDefault()
     setNodeMenu({ node, x: event.clientX, y: event.clientY })
@@ -714,13 +920,14 @@ function Topology() {
     const id = `node_${++nodeIdCounter.current}`
     const position = screenToFlowPosition({ x: pos.x, y: pos.y })
     const label = device.name || device.label
+    const settings = { label: device.label, name: device.name, type: 'device', nodeId: device.nodeId, endpointId: device.endpointId }
 
     setNodes(prev => [...prev, {
       id,
       type: 'device',
       position,
       draggable: true,
-      data: { label, nodeId: device.nodeId, endpointId: device.endpointId },
+      data: { label, nodeId: device.nodeId, endpointId: device.endpointId, settings },
     }])
     fetch(`/api/nodes/${id}`, {
       method: 'PUT',
@@ -728,7 +935,7 @@ function Topology() {
       body: JSON.stringify({
         x: position.x,
         y: position.y,
-        settings: { label: device.label, name: device.name, type: 'device', nodeId: device.nodeId, endpointId: device.endpointId },
+        settings,
       }),
     }).catch(() => { })
   }, [pendingLoadPos, screenToFlowPosition, setNodes])
@@ -785,9 +992,24 @@ function Topology() {
               ...(batteryPercent !== undefined ? { batteryPercent } : {}),
               ...(standbyW !== undefined ? { standbyW } : {}),
               ...(status ? { status } : {}),
+              settings: n.settings ?? {},
             },
           }
         })
+
+        // The Unallocated node is fixed: create it above the consumer unit the
+        // first time, and persist it so it keeps wherever the user drags it.
+        const cu = data.nodes.find(n => n.id === 'consumer_unit')
+        if (!restoredNodes.some(n => n.id === UNALLOCATED_ID)) {
+          const position = { x: cu?.x ?? 0, y: (cu?.y ?? 0) - 140 }
+          const settings = { label: 'Unallocated', type: 'unallocated', deletable: false }
+          restoredNodes.push({ id: UNALLOCATED_ID, type: 'unallocated', position, draggable: true, deletable: false, data: { label: settings.label, settings } })
+          fetch(`/api/nodes/${UNALLOCATED_ID}`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ x: position.x, y: position.y, settings }),
+          }).catch(() => { })
+        }
 
         for (const n of restoredNodes) {
           const m = n.id.match(/^node_(\d+)$/)
@@ -796,8 +1018,15 @@ function Topology() {
 
         setNodes(restoredNodes)
 
-        if (data.edges?.length) {
-          setEdges(data.edges.map(e => {
+        // Its feed is derived, so the edge lives only on the canvas: the firmware
+        // and the Power tab read roles off the consumer unit's saved edges.
+        const unallocatedEdge: Edge = {
+          id: UNALLOCATED_EDGE_ID, source: 'consumer_unit', sourceHandle: 'unallocated', target: UNALLOCATED_ID, targetHandle: 'power-in',
+          type: 'powerFlow', deletable: false, selectable: false, data: { kw: 0 },
+        }
+        {
+          const savedEdges = (data.edges ?? []).filter(e => e.id !== UNALLOCATED_EDGE_ID)
+          setEdges(withDerivedFlows([...savedEdges.map((e): Edge => {
             // The metered node may be at either end: a meter feeds into the CU
             // (it is the source), an appliance hangs off the CU (it is the target).
             if (isTariffEdge(e)) {
@@ -807,6 +1036,7 @@ function Topology() {
             const power = powerByNode.get(meteredId)
             const standbyW = standbyMap.get(meteredId)
             const status = standbyW !== undefined ? loadStatus(power?.power, standbyW) : undefined
+            const kw = power?.power !== undefined ? edgeKw(e, meteredId, power.power) : 0
             return {
               id: e.id,
               source: e.source,
@@ -815,14 +1045,14 @@ function Topology() {
               targetHandle: e.targetHandle,
               type: 'powerFlow',
               data: {
-                kw: power?.power !== undefined ? edgeKw(e, meteredId, power.power) : 0,
+                kw,
+                meteredKw: kw,
                 idle: status !== undefined && status !== 'running',
               },
             }
-          }))
+          }), unallocatedEdge], subCuIdsOf(restoredNodes)))
         }
 
-        const cu = data.nodes.find(n => n.id === 'consumer_unit')
         instance.setCenter((cu?.x ?? 0) + 75, (cu?.y ?? 0) + 18, { zoom: readStoredZoom() ?? 1 })
       })
       .catch(() => console.log('Failed to load nodes from API'))
@@ -867,11 +1097,27 @@ function Topology() {
         />
       )}
 
+      {editNode && (
+        <EditNodeModal
+          nodeId={editNode.id}
+          settings={editSettings(editNode)}
+          hasDevice={editNode.type === 'device' || editNode.type === 'appliance'}
+          onSave={settings => handleNodeEdited(editNode.id, settings)}
+          onCancel={() => setEditNode(null)}
+        />
+      )}
+
       {nodeMenu && (
         <>
           {/* Backdrop closes the menu on any outside click. */}
           <div onClick={() => setNodeMenu(null)} style={{ position: 'fixed', inset: 0, zIndex: 99 }} />
           <div style={{ position: 'fixed', top: nodeMenu.y, left: nodeMenu.x, zIndex: 100, background: '#fff', border: '1px solid #e2e8f0', borderRadius: 8, boxShadow: '0 4px 16px rgba(0,0,0,.14)', padding: 4, minWidth: 180 }}>
+            <button
+              onClick={() => { setEditNode(nodeMenu.node); setNodeMenu(null) }}
+              style={{ display: 'block', width: '100%', textAlign: 'left', padding: '8px 12px', border: 'none', background: 'none', cursor: 'pointer', fontSize: 13, color: '#1e293b', borderRadius: 6 }}
+            >
+              ✎ Edit
+            </button>
             {nodeMenu.node.type === 'subConsumerUnit' || nodeMenu.node.type === 'henley' ? (
               <button
                 onClick={() => deleteSubConsumerUnit(nodeMenu.node.id)}

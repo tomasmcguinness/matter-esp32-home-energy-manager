@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 
 type SimpleDevice = { nodeId: number; endpointId: number; label: string; name?: string; hasElectricalSensor: boolean; hasSolarPower: boolean; excludeFromScheduling?: boolean }
 
@@ -385,10 +385,16 @@ function SolarInverterModal({ initialSelected, onSave, onClose }: { initialSelec
   )
 }
 
-function EditApplianceModal({ slotLabel, topologyNodeId, position, sourceHandle, edgeId, initialSelected, onSave, onClose }: {
+function EditApplianceModal({ slotLabel, topologyNodeId, nodeType, position, wire, sourceHandle, edgeId, initialSelected, onSave, onClose }: {
   slotLabel: string
   topologyNodeId: string
+  // Kept as-is for a load that already exists on the canvas ('device' or 'appliance').
+  nodeType: string
   position: { x: number; y: number }
+  // Only a load created here is wired to the consumer unit. One that already
+  // exists keeps whatever wiring it was given on the Topology canvas (it may
+  // hang off a sub consumer unit, or not be wired yet).
+  wire: boolean
   sourceHandle: string
   edgeId: string
   initialSelected: SimpleDevice | null
@@ -447,17 +453,18 @@ function EditApplianceModal({ slotLabel, topologyNodeId, position, sourceHandle,
         x: position.x,
         y: position.y,
         // The backend replaces the whole settings object (no merge), so send every field.
-        settings: { label: selected.label, name: resolvedName, type: 'appliance', nodeId: selected.nodeId, endpointId: selected.endpointId, excludeFromScheduling },
+        settings: { label: selected.label, name: resolvedName, type: nodeType, nodeId: selected.nodeId, endpointId: selected.endpointId, excludeFromScheduling },
       }),
     })
       .then(r => r.ok ? r.json() : Promise.reject(`HTTP ${r.status}`))
-      // Wire the appliance to the Consumer Unit so the power-flow topology is complete.
-      .then(() => fetch('/api/edges', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ id: edgeId, source: 'consumer_unit', sourceHandle, target: topologyNodeId, targetHandle: 'power-in' }),
-      }))
-      .then(r => r.ok ? r.json() : Promise.reject(`HTTP ${r.status}`))
+      // Wire a new appliance to the Consumer Unit so the power-flow topology is complete.
+      .then(() => wire
+        ? fetch('/api/edges', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ id: edgeId, source: 'consumer_unit', sourceHandle, target: topologyNodeId, targetHandle: 'power-in' }),
+          }).then(r => r.ok ? r.json() : Promise.reject(`HTTP ${r.status}`))
+        : undefined)
       .then(() => onSave({ ...selected, name: resolvedName, excludeFromScheduling }))
       .catch((e: unknown) => {
         setError(e instanceof Error ? e.message : String(e))
@@ -576,14 +583,62 @@ function FlowArrow() {
 // Must match CU_CIRCUITS in Topology.tsx: each slot hangs off its own circuit handle.
 const APPLIANCE_SLOTS = Array.from({ length: 10 }, (_, i) => `Appliance ${i + 1}`)
 const SLOTS_PER_ROW = 5
+// Loads added on the Topology canvas can run past the fixed slots.
+const slotLabel = (slot: number) => APPLIANCE_SLOTS[slot] ?? `Appliance ${slot + 1}`
 
 // Stable topology identifiers for each appliance slot (index 0 => "appliance_1", ...).
 // Each appliance hangs off its own Consumer Unit circuit handle.
 const applianceNodeId = (slot: number) => `appliance_${slot + 1}`
 const applianceCircuitHandle = (slot: number) => `circuit_${slot + 1}`
-const applianceEdgeId = (slot: number) => `consumer_unit-${applianceCircuitHandle(slot)}-${applianceNodeId(slot)}-power-in`
 
 type SavedNode = { id: string; x?: number; y?: number; settings?: { label?: string; name?: string; type?: string; nodeId?: number; endpointId?: number; excludeFromScheduling?: boolean } }
+type SavedEdge = { id: string; source: string; target: string; sourceHandle?: string; targetHandle?: string }
+
+// A load shown in an appliance slot, with the topology node behind it.
+type ApplianceSlot = { graphId: string; type: string; x?: number; y?: number; device: SimpleDevice }
+
+const CU_ID = 'consumer_unit'
+const LOAD_TYPES = ['device', 'appliance']
+// Consumer unit handles that carry a supply, not a load (as in the firmware's
+// appliance enumeration): a meter on one of these is not an appliance.
+const isSupplyHandle = (handle?: string) => !!handle && /^(grid|solar|battery)/.test(handle)
+
+// Lay the graph's loads out across the appliance slots. A load is any metered
+// device/appliance node, however it was created: here (ids appliance_N, which
+// keep slot N) or with "Add load" on the Topology canvas (ids node_N, which take
+// the remaining empty slots in creation order, then extend past the last one).
+function applianceSlots(nodes: SavedNode[], edges: SavedEdge[]): (ApplianceSlot | null)[] {
+  const supplyIds = new Set<string>(['grid_meter'])
+  for (const e of edges) {
+    if (e.target === CU_ID && isSupplyHandle(e.targetHandle)) supplyIds.add(e.source)
+    if (e.source === CU_ID && isSupplyHandle(e.sourceHandle)) supplyIds.add(e.target)
+  }
+
+  const slots: (ApplianceSlot | null)[] = APPLIANCE_SLOTS.map(() => null)
+  const others: ApplianceSlot[] = []
+  for (const n of nodes) {
+    const s = n.settings
+    if (!s || !LOAD_TYPES.includes(s.type ?? '') || supplyIds.has(n.id)) continue
+    if (s.nodeId === undefined || s.endpointId === undefined || !s.label) continue
+    const slot: ApplianceSlot = {
+      graphId: n.id, type: s.type!, x: n.x, y: n.y,
+      device: { nodeId: s.nodeId, endpointId: s.endpointId, label: s.label, name: s.name, hasElectricalSensor: true, hasSolarPower: false, excludeFromScheduling: s.excludeFromScheduling === true },
+    }
+    const own = n.id.match(/^appliance_(\d+)$/)
+    const index = own ? parseInt(own[1]) - 1 : -1
+    if (index >= 0 && index < slots.length) slots[index] = slot
+    else others.push(slot)
+  }
+
+  const order = (id: string) => parseInt(id.match(/(\d+)$/)?.[1] ?? '0')
+  others.sort((a, b) => order(a.graphId) - order(b.graphId))
+  for (const o of others) {
+    const free = slots.indexOf(null)
+    if (free >= 0 && free < APPLIANCE_SLOTS.length) slots[free] = o
+    else slots.push(o)
+  }
+  return slots
+}
 
 function Home() {
   const [gridModalOpen, setGridModalOpen] = useState(false)
@@ -592,15 +647,16 @@ function Home() {
   const [solarInverter, setSolarInverter] = useState<SimpleDevice | null>(null)
   const [tariffModalOpen, setTariffModalOpen] = useState(false)
   const [tariff, setTariff] = useState<SimpleDevice | null>(null)
-  const [appliances, setAppliances] = useState<(SimpleDevice | null)[]>(() => APPLIANCE_SLOTS.map(() => null))
+  const [appliances, setAppliances] = useState<(ApplianceSlot | null)[]>(() => APPLIANCE_SLOTS.map(() => null))
+  const [edges, setEdges] = useState<SavedEdge[]>([])
   const [applianceModalSlot, setApplianceModalSlot] = useState<number | null>(null)
   // Consumer Unit position, used to place newly created appliance nodes on the canvas.
   const [cuPos, setCuPos] = useState<{ x: number; y: number }>({ x: 0, y: 0 })
 
-  useEffect(() => {
+  const loadTopology = useCallback(() => {
     fetch('/api/nodes')
       .then(r => r.ok ? r.json() : Promise.reject())
-      .then((data: { nodes: SavedNode[] }) => {
+      .then((data: { nodes: SavedNode[]; edges?: SavedEdge[] }) => {
         const gm = data.nodes.find(n => n.id === 'grid_meter')
         if (gm?.settings?.nodeId !== undefined && gm.settings.endpointId !== undefined && gm.settings.label) {
           setGridSensor({ nodeId: gm.settings.nodeId as number, endpointId: gm.settings.endpointId as number, label: gm.settings.label as string, hasElectricalSensor: true, hasSolarPower: false })
@@ -617,16 +673,13 @@ function Home() {
         if (cu?.x !== undefined && cu.y !== undefined) {
           setCuPos({ x: cu.x, y: cu.y })
         }
-        setAppliances(APPLIANCE_SLOTS.map((_, slot) => {
-          const a = data.nodes.find(n => n.id === applianceNodeId(slot))
-          if (a?.settings?.nodeId !== undefined && a.settings.endpointId !== undefined && a.settings.label) {
-            return { nodeId: a.settings.nodeId as number, endpointId: a.settings.endpointId as number, label: a.settings.label as string, name: a.settings.name as string | undefined, hasElectricalSensor: true, hasSolarPower: false, excludeFromScheduling: a.settings.excludeFromScheduling === true }
-          }
-          return null
-        }))
+        setEdges(data.edges ?? [])
+        setAppliances(applianceSlots(data.nodes, data.edges ?? []))
       })
       .catch(() => { })
   }, [])
+
+  useEffect(() => { loadTopology() }, [loadTopology])
 
   function handleGridSave(device: SimpleDevice) {
     setGridSensor(device)
@@ -638,16 +691,31 @@ function Home() {
     setSolarModalOpen(false)
   }
 
-  function handleApplianceSave(slot: number, device: SimpleDevice) {
-    setAppliances(prev => prev.map((a, i) => (i === slot ? device : a)))
+  // Slots are derived from the graph, so re-read it after any change.
+  function handleApplianceSave() {
     setApplianceModalSlot(null)
+    loadTopology()
   }
 
   function handleApplianceDelete(slot: number) {
-    fetch(`/api/edges/${applianceEdgeId(slot)}`, { method: 'DELETE' })
-      .then(() => fetch(`/api/nodes/${applianceNodeId(slot)}`, { method: 'DELETE' }))
-      .then(() => setAppliances(prev => prev.map((a, i) => (i === slot ? null : a))))
+    const graphId = appliances[slot]?.graphId
+    if (!graphId) return
+    // The load may be wired anywhere (a CU circuit, a sub consumer unit), so drop
+    // every edge touching it rather than assuming the slot's own circuit.
+    const touching = edges.filter(e => e.source === graphId || e.target === graphId)
+    Promise.all(touching.map(e => fetch(`/api/edges/${e.id}`, { method: 'DELETE' })))
+      .then(() => fetch(`/api/nodes/${graphId}`, { method: 'DELETE' }))
+      .then(loadTopology)
       .catch(() => { })
+  }
+
+  // The consumer unit circuit a new appliance in this slot is wired to: the
+  // slot's own if it is free, otherwise the first circuit nothing hangs off.
+  function freeCircuitHandle(slot: number): string {
+    const used = new Set(edges.filter(e => e.source === CU_ID).map(e => e.sourceHandle))
+    const own = applianceCircuitHandle(slot)
+    if (!used.has(own)) return own
+    return APPLIANCE_SLOTS.map((_, i) => applianceCircuitHandle(i)).find(h => !used.has(h)) ?? own
   }
 
   function handleGridDelete() {
@@ -699,21 +767,32 @@ function Home() {
           onClose={() => setTariffModalOpen(false)}
         />
       )}
-      {applianceModalSlot !== null && (
-        <EditApplianceModal
-          slotLabel={APPLIANCE_SLOTS[applianceModalSlot]}
-          topologyNodeId={applianceNodeId(applianceModalSlot)}
-          position={{
-            x: cuPos.x + ((applianceModalSlot % SLOTS_PER_ROW) - 2) * 170,
-            y: cuPos.y + 200 + Math.floor(applianceModalSlot / SLOTS_PER_ROW) * 150,
-          }}
-          sourceHandle={applianceCircuitHandle(applianceModalSlot)}
-          edgeId={applianceEdgeId(applianceModalSlot)}
-          initialSelected={appliances[applianceModalSlot]}
-          onSave={device => handleApplianceSave(applianceModalSlot, device)}
-          onClose={() => setApplianceModalSlot(null)}
-        />
-      )}
+      {applianceModalSlot !== null && (() => {
+        const slot = applianceModalSlot
+        const existing = appliances[slot]
+        const graphId = existing?.graphId ?? applianceNodeId(slot)
+        const handle = freeCircuitHandle(slot)
+        return (
+          <EditApplianceModal
+            slotLabel={slotLabel(slot)}
+            topologyNodeId={graphId}
+            nodeType={existing?.type ?? 'appliance'}
+            // An existing load stays where it is on the canvas.
+            position={existing?.x !== undefined && existing.y !== undefined
+              ? { x: existing.x, y: existing.y }
+              : {
+                x: cuPos.x + ((slot % SLOTS_PER_ROW) - 2) * 170,
+                y: cuPos.y + 200 + Math.floor(slot / SLOTS_PER_ROW) * 150,
+              }}
+            wire={!existing}
+            sourceHandle={handle}
+            edgeId={`consumer_unit-${handle}-${graphId}-power-in`}
+            initialSelected={existing?.device ?? null}
+            onSave={handleApplianceSave}
+            onClose={() => setApplianceModalSlot(null)}
+          />
+        )
+      })()}
 
       {/* Inputs */}
       <section>
@@ -773,8 +852,9 @@ function Home() {
       <section>
         <SectionLabel>Loads</SectionLabel>
         <div style={{ display: 'grid', gridTemplateColumns: `repeat(${SLOTS_PER_ROW}, minmax(0, 1fr))`, gap: 12 }}>
-          {APPLIANCE_SLOTS.map((name, slot) => {
-            const device = appliances[slot]
+          {appliances.map((appliance, slot) => {
+            const name = slotLabel(slot)
+            const device = appliance?.device
             return device ? (
               <ConfiguredSlot
                 key={name}
