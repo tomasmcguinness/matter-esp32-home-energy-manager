@@ -3,6 +3,7 @@ import './App.css'
 import Home from './Home.tsx'
 import Topology from './Topology.tsx'
 import Devices from './Devices.tsx'
+import CommissioningWindow from './CommissioningWindow.tsx'
 import Power from './Power.tsx'
 import Forecast from './Forecast.tsx'
 import Schedule from './Schedule.tsx'
@@ -62,6 +63,7 @@ function App() {
         <Route path="/forecast" element={<div className="container"><Forecast /></div>} />
         <Route path="/schedule" element={<div className="container"><Schedule /></div>} />
         <Route path="/devices" element={<div className="container"><Devices /></div>} />
+        <Route path="/devices/:nodeId/commissioning" element={<div className="container"><CommissioningWindow /></div>} />
         <Route path="/settings" element={<div className="container"><Settings /></div>} />
         <Route path="/test" element={<div className="container"><Test /></div>} />
       </Routes>

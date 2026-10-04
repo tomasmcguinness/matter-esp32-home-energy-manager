@@ -27,6 +27,7 @@
 #include "scheduler.h"
 #include "sd_card.h"
 #include "matter_controller.h"
+#include "commands/commissioning_window_command.h"
 #include "ws_server.h"
 #include "companion_api.h"
 
@@ -683,6 +684,57 @@ static esp_err_t device_interrogate_post_handler(httpd_req_t *req)
     httpd_resp_set_type(req, "application/json");
     httpd_resp_sendstr(req, "{}");
     return ESP_OK;
+}
+
+// Opens the device to a second controller (multi-admin). Parks the httpd task
+// until the device answers, so the UI gets the setup code or a real error rather
+// than a code for a window that never opened.
+static esp_err_t device_commissioning_window_post_handler(httpd_req_t *req)
+{
+    uint64_t node_id = 0;
+    if (sscanf(req->uri, "/api/devices/%" SCNu64 "/commissioning-window", &node_id) != 1)
+    {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid URI");
+        return ESP_FAIL;
+    }
+
+    commissioning_window_result_t result;
+    char chip_error[64];
+    esp_err_t err = commissioning_window_open(node_id, &result, chip_error, sizeof(chip_error));
+
+    if (err != ESP_OK)
+    {
+        char message[128];
+        if (err == ESP_ERR_INVALID_STATE)
+        {
+            httpd_resp_set_status(req, "409 Conflict");
+            snprintf(message, sizeof(message), "A commissioning window request is already in progress");
+        }
+        else if (err == ESP_ERR_TIMEOUT)
+        {
+            httpd_resp_set_status(req, "504 Gateway Timeout");
+            snprintf(message, sizeof(message), "The device didn't respond in time");
+        }
+        else if (chip_error[0])
+        {
+            httpd_resp_set_status(req, "502 Bad Gateway");
+            snprintf(message, sizeof(message), "Failed to open commissioning window: %s", chip_error);
+        }
+        else
+        {
+            httpd_resp_set_status(req, "500 Internal Server Error");
+            snprintf(message, sizeof(message), "Failed to open commissioning window: %s", esp_err_to_name(err));
+        }
+        httpd_resp_set_type(req, "text/plain");
+        httpd_resp_sendstr(req, message);
+        return ESP_OK;
+    }
+
+    cJSON *root = cJSON_CreateObject();
+    cJSON_AddStringToObject(root, "manualCode", result.manual_code);
+    cJSON_AddStringToObject(root, "qrCode", result.qr_code);
+    cJSON_AddNumberToObject(root, "timeout", result.timeout_s);
+    return send_json(req, root, 200);
 }
 
 static esp_err_t factory_reset_post_handler(httpd_req_t *req)
@@ -2426,6 +2478,7 @@ esp_err_t web_server_start(void)
     const httpd_uri_t unpair_post = {.uri = "/controller/unpair", .method = HTTP_POST, .handler = controller_unpair_post_handler};
     const httpd_uri_t debug_mdns = {.uri = "/debug/mdns", .method = HTTP_GET, .handler = debug_mdns_get_handler};
     const httpd_uri_t device_interrogate = {.uri = "/api/devices/*/interrogate", .method = HTTP_POST, .handler = device_interrogate_post_handler};
+    const httpd_uri_t device_commissioning_window = {.uri = "/api/devices/*/commissioning-window", .method = HTTP_POST, .handler = device_commissioning_window_post_handler};
     const httpd_uri_t factory_reset = {.uri = "/api/factory-reset", .method = HTTP_POST, .handler = factory_reset_post_handler};
     const httpd_uri_t nodes_get = {.uri = "/api/nodes", .method = HTTP_GET, .handler = nodes_get_handler};
     const httpd_uri_t node_settings_put = {.uri = "/api/nodes/*/settings", .method = HTTP_PUT, .handler = node_settings_put_handler};
@@ -2471,6 +2524,7 @@ esp_err_t web_server_start(void)
     httpd_register_uri_handler(server, &unpair_post);
     httpd_register_uri_handler(server, &debug_mdns);
     httpd_register_uri_handler(server, &device_interrogate);
+    httpd_register_uri_handler(server, &device_commissioning_window);
     httpd_register_uri_handler(server, &factory_reset);
     httpd_register_uri_handler(server, &nodes_get);
     httpd_register_uri_handler(server, &node_settings_put);

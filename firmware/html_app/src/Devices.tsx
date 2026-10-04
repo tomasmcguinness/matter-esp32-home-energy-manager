@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import { useNavigate } from 'react-router'
 import { deviceTypeName } from './deviceTypeName'
 
 export type Endpoint = {
@@ -135,6 +136,8 @@ function Devices() {
   const [error, setError] = useState<string | null>(null)
   const [editingNodeId, setEditingNodeId] = useState<number | null>(null)
   const [draftName, setDraftName] = useState('')
+  const [openingWindowFor, setOpeningWindowFor] = useState<number | null>(null)
+  const navigate = useNavigate()
 
   useEffect(() => {
     Promise.all([
@@ -153,6 +156,28 @@ function Devices() {
   function handleReinterrogate(nodeId: number) {
     fetch(`/api/devices/${nodeId}/interrogate`, { method: 'POST' })
       .then((r) => { if (!r.ok) throw new Error(`HTTP ${r.status}`) })
+  }
+
+  // Opens the device to a second controller (multi-admin). The request waits until
+  // the device answers, so the response carries a code for a window that is open.
+  async function handleOpenCommissioningWindow(nodeId: number) {
+    setOpeningWindowFor(nodeId)
+    setError(null)
+    try {
+      const r = await fetch(`/api/devices/${nodeId}/commissioning-window`, { method: 'POST' })
+      if (!r.ok) {
+        setError(await r.text() || `Request failed (${r.status})`)
+        return
+      }
+      // The code travels in history state, so reloading the new page shows it
+      // again rather than opening a second window.
+      const result = await r.json()
+      navigate(`/devices/${nodeId}/commissioning`, { state: { ...result, openedAt: Date.now() } })
+    } catch (e) {
+      setError(`Request failed: ${e}`)
+    } finally {
+      setOpeningWindowFor(null)
+    }
   }
 
   function startEdit(dev: Device) {
@@ -275,6 +300,14 @@ function Devices() {
                 <div style={{ padding: '8px 12px', borderTop: '1px solid #dee2e6' }} className="d-flex gap-2">
                   <button className="btn btn-primary btn-sm" onClick={() => handleReinterrogate(dev.nodeId)}>
                     Interview
+                  </button>
+                  <button
+                    className="btn btn-outline-primary btn-sm"
+                    onClick={() => handleOpenCommissioningWindow(dev.nodeId)}
+                    disabled={openingWindowFor !== null}
+                    title="Let another Matter controller (e.g. Apple Home, Google Home) add this device for 15 minutes"
+                  >
+                    {openingWindowFor === dev.nodeId ? 'Opening…' : 'Open commissioning window'}
                   </button>
                 </div>
               </div>
