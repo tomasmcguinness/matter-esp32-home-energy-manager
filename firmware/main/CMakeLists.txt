@@ -2,6 +2,7 @@ idf_component_register(SRCS
         "main.cpp"
         "web_server.c"
         "companion_api.c"
+        "mcp_server.c"
         "ws_server.c"
         "matter_controller.cpp"
         "managers/device_manager.cpp"

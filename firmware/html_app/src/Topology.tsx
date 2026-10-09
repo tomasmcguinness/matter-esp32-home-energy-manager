@@ -190,16 +190,45 @@ function PvStringNode({ data }: { data: DeviceNodeData }) {
   )
 }
 
+// Where the energy held in the battery came from, per the firmware's ledger
+// (GET /api/battery/source). Percentages sum to 100; absent when unknown.
+type BatterySource = { known: boolean; solar_pct?: number; grid_pct?: number }
+
+const SOLAR_SOURCE_COLOR = '#f59e0b'
+const GRID_SOURCE_COLOR = '#64748b'
+
+// The battery's solar/grid mix, refreshed every minute (the ledger advances with
+// each logged minute). null until loaded or when the origin is unknown.
+function useBatterySource(): { solarPct: number; gridPct: number } | null {
+  const [source, setSource] = useState<BatterySource | null>(null)
+
+  useEffect(() => {
+    const load = () => {
+      fetch('/api/battery/source')
+        .then(r => r.ok ? r.json() : Promise.reject())
+        .then((d: BatterySource) => setSource(d))
+        .catch(() => { })
+    }
+    load()
+    const timer = setInterval(load, 60 * 1000)
+    return () => clearInterval(timer)
+  }, [])
+
+  if (!source?.known || source.solar_pct === undefined || source.grid_pct === undefined) return null
+  return { solarPct: source.solar_pct, gridPct: source.grid_pct }
+}
+
 // The home battery, hanging off the inverter. Renders charge/discharge power and
 // direction from the sign of ActivePower. Matter convention: positive = power
 // into the battery (charging), negative = power out of it (discharging).
 function BatteryNode({ data }: { data: DeviceNodeData }) {
   const w = data.power?.power
+  const source = useBatterySource()
+  const discharging = w !== undefined && w < 0
   let label = 'Idle'
   let color = '#94a3b8'
   let bg = '#f1f5f9'
   if (w !== undefined && w !== 0) {
-    const discharging = w < 0
     label = discharging ? `Discharging ${fmt(Math.abs(w), 'W')}` : `Charging ${fmt(Math.abs(w), 'W')}`
     color = discharging ? '#a32d2d' : '#3b6d11'
     bg = discharging ? '#fcebeb' : '#eaf3de'
@@ -222,8 +251,27 @@ function BatteryNode({ data }: { data: DeviceNodeData }) {
           </div>
         </div>
       )}
+      {/* Origin of the stored energy: self-generated vs drawn from the grid. */}
+      {source && (
+        <div style={{ padding: '6px 10px 0' }} title="Where the energy held in the battery came from">
+          <div style={{ display: 'flex', height: 8, borderRadius: 4, background: '#e2e8f0', overflow: 'hidden' }}>
+            <div style={{ width: `${source.solarPct}%`, background: SOLAR_SOURCE_COLOR, transition: 'width .4s ease' }} />
+            <div style={{ width: `${source.gridPct}%`, background: GRID_SOURCE_COLOR, transition: 'width .4s ease' }} />
+          </div>
+          <div style={{ marginTop: 3, display: 'flex', justifyContent: 'space-between', gap: 8, fontSize: 10, fontWeight: 600, whiteSpace: 'nowrap' }}>
+            <span style={{ color: '#b45309' }}>{Math.round(source.solarPct)}% solar</span>
+            <span style={{ color: GRID_SOURCE_COLOR }}>{100 - Math.round(source.solarPct)}% grid</span>
+          </div>
+        </div>
+      )}
       <div style={{ minWidth: '120px', padding: '6px 10px', fontSize: 12, fontWeight: 600, color, background: bg, borderRadius: 4, margin: 6, textAlign: 'center' }}>
         {label}
+        {/* The discharge feeding the house, split by where that energy came from. */}
+        {discharging && source && (
+          <div style={{ marginTop: 2, fontSize: 10, fontWeight: 500, whiteSpace: 'nowrap' }}>
+            {fmt(-w * source.solarPct / 100, 'W')} solar · {fmt(-w * source.gridPct / 100, 'W')} grid
+          </div>
+        )}
       </div>
     </>
   )

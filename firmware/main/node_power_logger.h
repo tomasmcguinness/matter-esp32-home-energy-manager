@@ -2,6 +2,7 @@
 
 #include <stdint.h>
 #include <stddef.h>
+#include <stdbool.h>
 #include "esp_err.h"
 
 // Power logger for every topology node wired to the consumer unit. An
@@ -40,6 +41,34 @@ char      *node_power_logger_hourly_json(const char *node_id, const char *date_s
 // energy split by source, with battery discharge attributed by where the stored
 // energy came from. Caller must free.
 char      *node_power_logger_daily_energy_json(int days);
+
+// Where the energy currently held in the battery came from, per the ledger that
+// drives the solar/grid split: {"known":true,"solar_pct":n,"grid_pct":n}. The
+// percentages sum to 100 and cover the usable charge above the 10% reserve.
+// {"known":false} when the origin is not tracked (no battery, no grid data today,
+// or the battery is down to its reserve). Caller must free.
+char      *node_power_logger_battery_source_json(void);
+
+// Hour-by-hour trace of that ledger for one day (today or earlier): the starting
+// ledger, then its state at the end of each local hour, with `held` in the unit
+// named by "held_unit". NULL for a malformed or future date. Caller must free.
+char      *node_power_logger_battery_mix_trace_json(const char *date_str);
+
+// One stream's power for a local day as an array indexed from midnight:
+// {"step_minutes":1|60,"power_w":[n|null,...]}, null where nothing was recorded,
+// truncated after the last reading. Hourly values are averages of the minute
+// records, so today works before the nightly rollup. Raw Matter sign. NULL for
+// a malformed id or date. Caller must free.
+char      *node_power_logger_series_json(const char *node_id, const char *date_str, bool hourly);
+
+// Per-stream freshness: age of the last Matter report, and how complete today's
+// minute file is. Caller must free.
+char      *node_power_logger_stream_health_json(void);
+
+// Drop the cached cost and solar/grid split for every day from date_str up to
+// yesterday and rebuild them in order from the minute files. Returns the number
+// of days rebuilt, or -1 for a malformed date or one more than 60 days back.
+int        node_power_logger_recompute_from(const char *date_str);
 
 #ifdef __cplusplus
 }

@@ -11,6 +11,7 @@
 #include <time.h>
 #include <math.h>
 #include <dirent.h>
+#include <unistd.h>
 #include <string>
 #include <vector>
 #include <utility>
@@ -31,6 +32,9 @@
 // ids used in matter_controller.cpp and the web UI.
 static constexpr uint32_t EPM_CLUSTER_ID         = 0x0090;
 static constexpr uint32_t EPM_ACTIVE_POWER_ATTR  = 0x0008;
+// Power Source cluster / BatPercentRemaining (half-percent units, 0..200).
+static constexpr uint32_t PS_CLUSTER_ID          = 0x002F;
+static constexpr uint32_t PS_BAT_PERCENT_ATTR    = 0x000C;
 
 static const char *CONSUMER_UNIT_ID = "consumer_unit";
 static const char *GRID_NODE_ID     = "grid_meter";
@@ -46,6 +50,7 @@ struct stream_t {
     int64_t     sum_mw      = 0;
     uint32_t    count       = 0;
     uint32_t    unix_minute = 0; // start of the minute being accumulated
+    int32_t     soc_half_pct = -1; // battery only: latest state of charge, -1 = none seen
 };
 
 static SemaphoreHandle_t     s_mutex;
@@ -220,17 +225,26 @@ static void on_sample_timer(void *arg)
             s.count++;
             break;
         }
+        // The battery's state of charge anchors the solar/grid ledger.
+        if (strcmp(s.role, "battery") != 0) continue;
+        for (const auto &v : snap) {
+            if (!v.valid) continue;
+            if (v.node_id != s.node_id || v.endpoint_id != s.endpoint_id) continue;
+            if (v.cluster_id != PS_CLUSTER_ID || v.attribute_id != PS_BAT_PERCENT_ATTR) continue;
+            if (v.value >= 0 && v.value <= 200) s.soc_half_pct = (int32_t)v.value;
+            break;
+        }
     }
     xSemaphoreGive(s_mutex);
 }
 
-static void write_record(const char *graph_id, const power_record_t *rec)
+static void write_record(const char *prefix, const char *graph_id, const power_record_t *rec)
 {
     char date[16];
     date_from_unix(rec->unix_minute, date, sizeof(date));
 
     char path[96];
-    snprintf(path, sizeof(path), "%s/node-%s-%s", SD_BASE, graph_id, date);
+    snprintf(path, sizeof(path), "%s/%s-%s-%s", SD_BASE, prefix, graph_id, date);
 
     FILE *f = fopen(path, "ab");
     if (!f) {
@@ -244,17 +258,18 @@ static void write_record(const char *graph_id, const power_record_t *rec)
 static void on_flush_timer(void *arg)
 {
     // Drain the completed accumulators under the lock, write outside it.
-    struct pending_t { std::string graph_id; power_record_t rec; bool is_grid; };
+    struct pending_t { std::string graph_id; power_record_t rec; bool is_grid; int32_t soc_half_pct; };
     std::vector<pending_t> pending;
 
     xSemaphoreTake(s_mutex, portMAX_DELAY);
     for (auto &s : s_streams) {
         if (s.count == 0) continue;
         power_record_t rec = { s.unix_minute, (int32_t)(s.sum_mw / s.count) };
-        pending.push_back({ s.graph_id, rec, s.is_grid });
+        pending.push_back({ s.graph_id, rec, s.is_grid, s.soc_half_pct });
         s.sum_mw = 0;
         s.count = 0;
         s.unix_minute = 0;
+        s.soc_half_pct = -1;
     }
     xSemaphoreGive(s_mutex);
 
@@ -262,7 +277,11 @@ static void on_flush_timer(void *arg)
         if (p.is_grid)
             power_logger_write_grid_minute(p.rec.unix_minute, p.rec.power_mw);
         else
-            write_record(p.graph_id.c_str(), &p.rec);
+            write_record("node", p.graph_id.c_str(), &p.rec);
+        if (p.soc_half_pct >= 0) {
+            power_record_t soc = { p.rec.unix_minute, p.soc_half_pct };
+            write_record("soc", p.graph_id.c_str(), &soc);
+        }
     }
 
     // Pick up topology edits for the next minute.
@@ -548,12 +567,12 @@ static std::vector<stream_info_t> snapshot_streams(void)
 static constexpr int kMaxDayMinutes = 1500;
 
 // Load a minute file into per-minute-of-day mW, indexed from day_start. Returns
-// false if the file is absent. Minutes with no record stay at 0.
-static bool load_minutes(const char *path, time_t day_start, std::vector<int32_t> &mw)
+// false if the file is absent. Minutes with no record stay at `fill`.
+static bool load_minutes(const char *path, time_t day_start, std::vector<int32_t> &mw, int32_t fill = 0)
 {
     FILE *f = fopen(path, "rb");
     if (!f) return false;
-    mw.assign(kMaxDayMinutes, 0);
+    mw.assign(kMaxDayMinutes, fill);
     power_record_t rec;
     while (fread(&rec, sizeof(rec), 1, f) == 1) {
         long idx = ((long)rec.unix_minute - (long)day_start) / 60;
@@ -729,13 +748,17 @@ static void cost_day_cached(const char *date, bool allow_cache_write)
 // The inverter AC output is assumed to net battery flow (DC-coupled hybrid
 // inverter), so a negative output while charging is power pulled from the grid.
 
-// Energy held in the battery (Wh, as charged) and the fraction of it that came
-// from solar. Unknown origin (cold start, or drained) counts as grid, so the
-// split never overstates self-consumption.
+// Energy held in the battery and the fraction of it that came from solar.
+// Unknown origin (cold start, or drained) counts as grid, so the split never
+// overstates self-consumption. On days with a state-of-charge log the energy is
+// the usable charge above the reserve, in half-percent units (`soc`), so it
+// cannot drift from what the battery really holds; on older days it is Wh
+// integrated from the battery's power.
 struct battery_ledger_t {
     double e_wh  = 0.0;
     double f     = 0.0;
     bool   known = false;
+    bool   soc   = false; // e_wh is usable state of charge, not Wh
 };
 
 struct day_split_t {
@@ -745,6 +768,8 @@ struct day_split_t {
 };
 
 static constexpr double kBatteryRoundTrip = 0.9;
+// The inverter never discharges below this, so charge under it is not counted.
+static constexpr int32_t kBatteryReserveHalfPct = 20; // 10 %
 
 // Local midnight for a YYYY-MM-DD date.
 static bool local_day_start(const char *date, time_t *out)
@@ -759,13 +784,15 @@ static bool local_day_start(const char *date, time_t *out)
 }
 
 static bool compute_day_split(const char *date, const std::vector<stream_info_t> &streams,
-                              const battery_ledger_t &start, day_split_t &out)
+                              const battery_ledger_t &start, day_split_t &out,
+                              std::vector<battery_ledger_t> *hourly = nullptr)
 {
     time_t day_start;
     if (!local_day_start(date, &day_start)) return false;
 
     char path[96];
-    std::vector<int32_t> grid, inv(kMaxDayMinutes, 0), bat(kMaxDayMinutes, 0), tmp;
+    std::vector<int32_t> grid, inv(kMaxDayMinutes, 0), bat(kMaxDayMinutes, 0), soc, tmp;
+    bool have_soc = false;
     snprintf(path, sizeof(path), "%s/grid-%s", SD_BASE, date);
     if (!load_minutes(path, day_start, grid)) return false;
 
@@ -778,6 +805,8 @@ static bool compute_day_split(const char *date, const std::vector<stream_info_t>
             for (int i = 0; i < kMaxDayMinutes; i++) inv[i] += supplied_mw(tmp[i]);
         } else if (strcmp(s.role, "battery") == 0) {
             for (int i = 0; i < kMaxDayMinutes; i++) bat[i] += supplied_mw(tmp[i]);
+            snprintf(path, sizeof(path), "%s/soc-%s-%s", SD_BASE, s.graph_id.c_str(), date);
+            if (!have_soc) have_soc = load_minutes(path, day_start, soc, -1);
         } else {
             loads.emplace_back(s.graph_id, tmp);
         }
@@ -786,6 +815,11 @@ static bool compute_day_split(const char *date, const std::vector<stream_info_t>
     std::vector<double> load_solar(loads.size(), 0.0), load_grid(loads.size(), 0.0);
     double un_solar = 0.0, un_grid = 0.0;
     battery_ledger_t L = start;
+    // A ledger in Wh is re-based onto the first state-of-charge reading, keeping
+    // its mix. The reverse has no conversion, so the history is dropped.
+    bool rebase = have_soc && !L.soc;
+    if (!have_soc && L.soc) L = battery_ledger_t{};
+    double pend_s = 0.0, pend_g = 0.0; // charge since the last state-of-charge step
 
     for (int i = 0; i < kMaxDayMinutes; i++) {
         double grid_w = grid[i] / 1000.0;
@@ -822,7 +856,38 @@ static bool compute_day_split(const char *date, const std::vector<stream_info_t>
         }
 
         // Update the battery ledger with this minute's flow.
-        if (bat_w < 0) {
+        if (have_soc) {
+            if (bat_w < 0) {
+                double c  = -bat_w;
+                double cg = inv_w < 0 ? (-inv_w < c ? -inv_w : c) : 0.0; // pulled from the AC side
+                pend_s += c - cg;
+                pend_g += cg;
+            }
+            if (soc[i] >= 0) { // else no reading this minute
+                double u    = soc[i] > kBatteryReserveHalfPct ? soc[i] - kBatteryReserveHalfPct : 0.0;
+                double held = L.known ? L.e_wh : 0.0;
+                if (u <= 0) {
+                    L = battery_ledger_t{}; // down to the reserve: nothing usable left
+                    pend_s = pend_g = 0.0;  // charge below the reserve is not counted
+                } else if (rebase && L.known) {
+                    L.e_wh = u;
+                    pend_s = pend_g = 0.0;
+                } else if (u > held) {
+                    // The rise takes the mix of the charge that produced it; a rise
+                    // with no charge recorded keeps the current mix (grid if unknown).
+                    double pend = pend_s + pend_g;
+                    double r = pend > 0 ? pend_s / pend : (L.known ? L.f : 0.0);
+                    L.f     = (L.f * held + r * (u - held)) / u;
+                    L.e_wh  = u;
+                    L.known = true;
+                    pend_s = pend_g = 0.0;
+                } else if (u < held) {
+                    L.e_wh = u;
+                    pend_s = pend_g = 0.0;
+                }
+                rebase = false;
+            }
+        } else if (bat_w < 0) {
             double c  = -bat_w;
             double cg = inv_w < 0 ? (-inv_w < c ? -inv_w : c) : 0.0; // pulled from the AC side
             double cs = c - cg;
@@ -834,6 +899,11 @@ static bool compute_day_split(const char *date, const std::vector<stream_info_t>
             L.e_wh -= bat_w / 60.0 / kBatteryRoundTrip;
             if (L.e_wh <= 0) L = battery_ledger_t{};
         }
+
+        if (hourly && i % 60 == 59) {
+            hourly->push_back(L);
+            hourly->back().soc = have_soc;
+        }
     }
 
     out.wh.clear();
@@ -841,6 +911,7 @@ static bool compute_day_split(const char *date, const std::vector<stream_info_t>
         out.wh.push_back({ loads[k].first, { load_solar[k], load_grid[k] } });
     out.wh.push_back({ UNMONITORED_KEY, { un_solar, un_grid } });
     out.end = L;
+    out.end.soc = have_soc;
     return true;
 }
 
@@ -882,6 +953,7 @@ static bool read_split_cache(const char *date, day_split_t &out)
         cJSON *fr = cJSON_GetObjectItemCaseSensitive(ledger, "f");
         cJSON *kn = cJSON_GetObjectItemCaseSensitive(ledger, "known");
         out.end = battery_ledger_t{};
+        out.end.soc = cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(ledger, "soc"));
         if (cJSON_IsTrue(kn) && cJSON_IsNumber(e) && cJSON_IsNumber(fr)) {
             out.end.e_wh  = e->valuedouble;
             out.end.f     = fr->valuedouble;
@@ -905,6 +977,7 @@ static void write_split_cache(const char *date, const day_split_t &ds)
     cJSON_AddNumberToObject(ledger, "e_wh", ds.end.e_wh);
     cJSON_AddNumberToObject(ledger, "f", ds.end.f);
     cJSON_AddBoolToObject(ledger, "known", ds.end.known);
+    cJSON_AddBoolToObject(ledger, "soc", ds.end.soc);
     char *json = cJSON_PrintUnformatted(root);
     cJSON_Delete(root);
     if (!json) return;
@@ -929,9 +1002,11 @@ static bool day_split(const char *date, bool is_today, const std::vector<stream_
     return true;
 }
 
-// The battery ledger at the end of the day before `date`, from its cached split,
-// or an unknown ledger if that day was never split.
-static battery_ledger_t ledger_before(const char *date)
+// The battery ledger at the end of the day before `date`, from its cached split.
+// A day that was never split (the HEM was off at midnight) is split now, chaining
+// back up to `depth` days, so the answer does not depend on what ran first.
+// Unknown when there is no data to chain from.
+static battery_ledger_t ledger_before(const char *date, int depth = 7)
 {
     time_t t;
     if (!local_day_start(date, &t)) return battery_ledger_t{};
@@ -943,13 +1018,45 @@ static battery_ledger_t ledger_before(const char *date)
     char prev[11];
     strftime(prev, sizeof(prev), "%Y-%m-%d", &d);
     day_split_t ds;
-    return read_split_cache(prev, ds) ? ds.end : battery_ledger_t{};
+    if (read_split_cache(prev, ds)) return ds.end;
+
+    char path[96];
+    snprintf(path, sizeof(path), "%s/grid-%s", SD_BASE, prev);
+    if (depth <= 0 || access(path, F_OK) != 0) return battery_ledger_t{};
+    battery_ledger_t before = ledger_before(prev, depth - 1);
+    return day_split(prev, false, snapshot_streams(), before, ds) ? ds.end : battery_ledger_t{};
 }
 
 static void split_day_cached(const char *date)
 {
     day_split_t ds;
     day_split(date, false, snapshot_streams(), ledger_before(date), ds);
+}
+
+char *node_power_logger_battery_source_json(void)
+{
+    time_t now = time(NULL);
+    struct tm today;
+    localtime_r(&now, &today);
+    char date[11];
+    strftime(date, sizeof(date), "%Y-%m-%d", &today);
+
+    // Today's split, run from yesterday's closing ledger, leaves the ledger as it stands now.
+    day_split_t ds;
+    bool ok = compute_day_split(date, snapshot_streams(), ledger_before(date), ds);
+
+    cJSON *root = cJSON_CreateObject();
+    bool known = ok && ds.end.known && ds.end.e_wh > 0;
+    cJSON_AddBoolToObject(root, "known", known);
+    if (known) {
+        double f = ds.end.f < 0.0 ? 0.0 : (ds.end.f > 1.0 ? 1.0 : ds.end.f);
+        cJSON_AddNumberToObject(root, "solar_pct", f * 100.0);
+        cJSON_AddNumberToObject(root, "grid_pct", (1.0 - f) * 100.0);
+    }
+
+    char *json = cJSON_PrintUnformatted(root);
+    cJSON_Delete(root);
+    return json; // caller must free
 }
 
 char *node_power_logger_daily_energy_json(int days)
@@ -1038,4 +1145,245 @@ char *node_power_logger_daily_energy_json(int days)
     char *json = cJSON_PrintUnformatted(root);
     cJSON_Delete(root);
     return json; // caller must free
+}
+
+
+// ---- Diagnostics (served by the MCP endpoint) -------------------------------
+
+// Today as YYYY-MM-DD in local time.
+static void today_str(char *buf, size_t len)
+{
+    time_t now = time(NULL);
+    struct tm tm_now;
+    localtime_r(&now, &tm_now);
+    strftime(buf, len, "%Y-%m-%d", &tm_now);
+}
+
+// The local date `offset` days from `date`.
+static bool date_add(const char *date, int offset, char *buf, size_t len)
+{
+    time_t t;
+    if (!local_day_start(date, &t)) return false;
+    struct tm d;
+    localtime_r(&t, &d);
+    d.tm_hour = 12; // midday avoids DST edge cases when normalising
+    d.tm_mday += offset;
+    mktime(&d);
+    strftime(buf, len, "%Y-%m-%d", &d);
+    return true;
+}
+
+static void add_ledger(cJSON *obj, const battery_ledger_t &l)
+{
+    bool known = l.known && l.e_wh > 0;
+    cJSON_AddBoolToObject(obj, "known", known);
+    if (!known) return;
+    double f = l.f < 0.0 ? 0.0 : (l.f > 1.0 ? 1.0 : l.f);
+    cJSON_AddNumberToObject(obj, "solar_pct", round(f * 1000.0) / 10.0);
+    cJSON_AddNumberToObject(obj, "grid_pct", round((1.0 - f) * 1000.0) / 10.0);
+    // State-of-charge days hold usable charge in half-percent; older days hold Wh.
+    cJSON_AddNumberToObject(obj, "held", round(l.soc ? l.e_wh * 5.0 : l.e_wh * 10.0) / 10.0);
+}
+
+char *node_power_logger_battery_mix_trace_json(const char *date_str)
+{
+    char date[16], today[11];
+    today_str(today, sizeof(today));
+    time_t day_start;
+    if (!sanitize_token(date_str, date, sizeof(date)) || strlen(date) != 10 ||
+        !local_day_start(date, &day_start) || strcmp(date, today) > 0)
+        return nullptr;
+
+    battery_ledger_t start = ledger_before(date);
+    day_split_t ds;
+    std::vector<battery_ledger_t> hourly;
+    bool ok = compute_day_split(date, snapshot_streams(), start, ds, &hourly);
+
+    cJSON *root = cJSON_CreateObject();
+    cJSON_AddStringToObject(root, "date", date);
+    cJSON_AddBoolToObject(root, "has_data", ok);
+    if (ok) {
+        bool anchored = ds.end.soc;
+        cJSON_AddBoolToObject(root, "anchored_to_soc", anchored);
+        cJSON_AddStringToObject(root, "held_unit", anchored ? "percent of capacity above the 10% reserve" : "Wh");
+        cJSON_AddStringToObject(root, "start_held_unit", start.soc ? "percent of capacity above the 10% reserve" : "Wh");
+        add_ledger(cJSON_AddObjectToObject(root, "start"), start);
+
+        // Hours still to come today would only repeat the latest ledger.
+        size_t hours = hourly.size();
+        if (strcmp(date, today) == 0) {
+            long elapsed = ((long)time(NULL) - (long)day_start) / 3600 + 1;
+            if (elapsed >= 0 && (size_t)elapsed < hours) hours = (size_t)elapsed;
+        }
+        cJSON *arr = cJSON_AddArrayToObject(root, "hours");
+        for (size_t h = 0; h < hours; h++) {
+            cJSON *o = cJSON_CreateObject();
+            cJSON_AddNumberToObject(o, "hour", (double)h);
+            add_ledger(o, hourly[h]);
+            cJSON_AddItemToArray(arr, o);
+        }
+    }
+
+    char *json = cJSON_PrintUnformatted(root);
+    cJSON_Delete(root);
+    return json; // caller must free
+}
+
+char *node_power_logger_series_json(const char *node_id, const char *date_str, bool hourly)
+{
+    char node[40], date[16];
+    time_t day_start;
+    if (!sanitize_token(node_id, node, sizeof(node)) ||
+        !sanitize_token(date_str, date, sizeof(date)) || strlen(date) != 10 ||
+        !local_day_start(date, &day_start))
+        return nullptr;
+
+    const char *role = nullptr;
+    for (const auto &st : snapshot_streams())
+        if (st.graph_id == node) { role = st.role; break; }
+
+    char path[96];
+    if (role && strcmp(role, "grid") == 0)
+        snprintf(path, sizeof(path), "%s/grid-%s", SD_BASE, date);
+    else
+        snprintf(path, sizeof(path), "%s/node-%s-%s", SD_BASE, node, date);
+
+    // INT32_MIN marks a minute with no record.
+    std::vector<int32_t> mw;
+    bool ok = load_minutes(path, day_start, mw, INT32_MIN);
+    int last = -1;
+    if (ok)
+        for (int i = 0; i < kMaxDayMinutes; i++) if (mw[i] != INT32_MIN) last = i;
+
+    cJSON *root = cJSON_CreateObject();
+    cJSON_AddStringToObject(root, "node_id", node);
+    cJSON_AddStringToObject(root, "date", date);
+    if (role) cJSON_AddStringToObject(root, "role", role);
+    cJSON_AddStringToObject(root, "resolution", hourly ? "hourly" : "minute");
+    cJSON_AddNumberToObject(root, "step_minutes", hourly ? 60 : 1);
+    cJSON_AddStringToObject(root, "first_sample", "00:00 local");
+    cJSON_AddStringToObject(root, "sign",
+        "raw meter reading: + = power into the node (grid import, load consumption, battery charging); "
+        "- = power out of it (grid export, inverter generating, battery discharging)");
+    cJSON *arr = cJSON_AddArrayToObject(root, "power_w"); // null = no reading
+    int step = hourly ? 60 : 1;
+    for (int i = 0; i <= last; i += step) {
+        int64_t sum = 0;
+        int n = 0;
+        for (int j = i; j < i + step && j <= last; j++)
+            if (mw[j] != INT32_MIN) { sum += mw[j]; n++; }
+        if (n == 0) cJSON_AddItemToArray(arr, cJSON_CreateNull());
+        else        cJSON_AddItemToArray(arr, cJSON_CreateNumber(round((double)sum / n / 100.0) / 10.0));
+    }
+
+    char *json = cJSON_PrintUnformatted(root);
+    cJSON_Delete(root);
+    return json; // caller must free
+}
+
+char *node_power_logger_stream_health_json(void)
+{
+    struct item_t { std::string graph_id; const char *role; bool is_grid; uint64_t node_id; uint16_t endpoint_id; };
+    std::vector<item_t> items;
+    xSemaphoreTake(s_mutex, portMAX_DELAY);
+    for (const auto &st : s_streams)
+        items.push_back({ st.graph_id, st.role, st.is_grid, st.node_id, st.endpoint_id });
+    xSemaphoreGive(s_mutex);
+
+    std::vector<ValueCacheEntry> snap = ValueCache::instance().snapshot();
+    char today[11];
+    today_str(today, sizeof(today));
+    time_t day_start = 0;
+    local_day_start(today, &day_start);
+    time_t now = time(NULL);
+    int elapsed = (int)((now - day_start) / 60); // complete minutes so far today
+    if (elapsed > kMaxDayMinutes) elapsed = kMaxDayMinutes;
+
+    cJSON *root = cJSON_CreateObject();
+    cJSON_AddStringToObject(root, "date", today);
+    cJSON_AddNumberToObject(root, "minutes_elapsed_today", elapsed);
+    cJSON *arr = cJSON_AddArrayToObject(root, "streams");
+    for (const auto &it : items) {
+        cJSON *o = cJSON_CreateObject();
+        cJSON_AddStringToObject(o, "id", it.graph_id.c_str());
+        cJSON_AddStringToObject(o, "role", it.role);
+
+        // Age of the last Matter report. The logger keeps recording the cached
+        // value, so a stale report means the minute data is frozen, not missing.
+        bool reported = false;
+        for (const auto &v : snap) {
+            if (!v.valid || v.node_id != it.node_id || v.endpoint_id != it.endpoint_id) continue;
+            if (v.cluster_id != EPM_CLUSTER_ID || v.attribute_id != EPM_ACTIVE_POWER_ATTR) continue;
+            cJSON_AddNumberToObject(o, "last_report_age_s", (double)((long)now - (long)v.last_update_unix));
+            cJSON_AddNumberToObject(o, "last_power_w", v.value / 1000.0);
+            reported = true;
+            break;
+        }
+        if (!reported) cJSON_AddNullToObject(o, "last_report_age_s");
+
+        char path[96];
+        if (it.is_grid) snprintf(path, sizeof(path), "%s/grid-%s", SD_BASE, today);
+        else            snprintf(path, sizeof(path), "%s/node-%s-%s", SD_BASE, it.graph_id.c_str(), today);
+        std::vector<int32_t> mw;
+        int records = 0, gap = 0, largest = 0;
+        if (load_minutes(path, day_start, mw, INT32_MIN)) {
+            for (int i = 0; i < elapsed; i++) {
+                if (mw[i] != INT32_MIN) { records++; gap = 0; }
+                else if (++gap > largest) largest = gap;
+            }
+        } else {
+            largest = elapsed;
+        }
+        cJSON_AddNumberToObject(o, "minutes_recorded_today", records);
+        cJSON_AddNumberToObject(o, "largest_gap_minutes", largest);
+        cJSON_AddItemToArray(arr, o);
+    }
+
+    char *json = cJSON_PrintUnformatted(root);
+    cJSON_Delete(root);
+    return json; // caller must free
+}
+
+int node_power_logger_recompute_from(const char *date_str)
+{
+    char date[16], today[11];
+    today_str(today, sizeof(today));
+    time_t t;
+    if (!sanitize_token(date_str, date, sizeof(date)) || strlen(date) != 10 || !local_day_start(date, &t))
+        return -1;
+
+    // Later days chain their battery ledger from earlier ones, so every cache
+    // from `date` up to yesterday is dropped before any is rebuilt.
+    std::vector<std::string> days;
+    char d[11];
+    snprintf(d, sizeof(d), "%s", date);
+    while (strcmp(d, today) < 0) {
+        if (days.size() >= 60) return -1;
+        days.push_back(d);
+        char path[64];
+        cost_path(d, path, sizeof(path));
+        unlink(path);
+        split_path(d, path, sizeof(path));
+        unlink(path);
+        char next[11];
+        if (!date_add(d, 1, next, sizeof(next))) return -1;
+        snprintf(d, sizeof(d), "%s", next);
+    }
+    if (days.empty()) return 0;
+
+    std::vector<stream_info_t> streams = snapshot_streams();
+    battery_ledger_t ledger = ledger_before(days[0].c_str());
+    int done = 0;
+    for (const auto &day : days) {
+        day_cost_t dc;
+        day_cost(day.c_str(), false, streams, dc, true);
+        day_split_t ds;
+        if (day_split(day.c_str(), false, streams, ledger, ds)) {
+            ledger = ds.end;
+            done++;
+        } else {
+            ledger = battery_ledger_t{}; // no grid data: the battery's history is lost
+        }
+    }
+    return done;
 }

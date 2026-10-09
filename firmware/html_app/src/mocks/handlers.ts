@@ -345,6 +345,11 @@ export const handlers = [
     return HttpResponse.json({ nodes: streams, days: result, ...currency })
   }),
 
+  // Origin of the energy held in the battery, from the firmware's ledger.
+  http.get('/api/battery/source', () => {
+    return HttpResponse.json({ known: true, solar_pct: 62, grid_pct: 38 })
+  }),
+
   http.get('/api/tariff', ({ request }) => {
     const url = new URL(request.url)
     const date = url.searchParams.get('date') ?? new Date().toISOString().slice(0, 10)

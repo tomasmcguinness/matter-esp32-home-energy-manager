@@ -30,6 +30,7 @@
 #include "commands/commissioning_window_command.h"
 #include "ws_server.h"
 #include "companion_api.h"
+#include "mcp_server.h"
 
 #include "mbedtls/base64.h"
 #include "mdns.h"
@@ -1029,6 +1030,20 @@ static esp_err_t data_daily_energy_get_handler(httpd_req_t *req)
     if (days > 60) days = 60;
 
     char *json = node_power_logger_daily_energy_json(days);
+    if (!json)
+    {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "OOM");
+        return ESP_FAIL;
+    }
+    httpd_resp_set_type(req, "application/json");
+    esp_err_t err = httpd_resp_sendstr(req, json);
+    free(json);
+    return err;
+}
+
+static esp_err_t battery_source_get_handler(httpd_req_t *req)
+{
+    char *json = node_power_logger_battery_source_json();
     if (!json)
     {
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "OOM");
@@ -2450,7 +2465,7 @@ esp_err_t web_server_start(void)
     config.lru_purge_enable = true;
     config.uri_match_fn = uri_match_segments;
     config.stack_size = 12288;
-    config.max_uri_handlers = 52;
+    config.max_uri_handlers = 64; // 54 in use: 46 here, 5 companion, 2 MCP, 1 websocket
     config.max_resp_headers = 20;
     // TCP keep-alive reaps clients that vanish without closing (sleeping tabs,
     // locked phones). Otherwise a dead WebSocket client's socket lingers and every
@@ -2487,6 +2502,7 @@ esp_err_t web_server_start(void)
     const httpd_uri_t data_grid_get = {.uri = "/api/data/grid", .method = HTTP_GET, .handler = data_grid_get_handler};
     const httpd_uri_t data_node_get = {.uri = "/api/data/node", .method = HTTP_GET, .handler = data_node_get_handler};
     const httpd_uri_t data_daily_energy_get = {.uri = "/api/data/daily-energy", .method = HTTP_GET, .handler = data_daily_energy_get_handler};
+    const httpd_uri_t battery_source_get = {.uri = "/api/battery/source", .method = HTTP_GET, .handler = battery_source_get_handler};
     const httpd_uri_t topology_grid_put = {.uri = "/api/topology/grid", .method = HTTP_PUT, .handler = topology_grid_put_handler};
     const httpd_uri_t topology_solar_put = {.uri = "/api/topology/solar", .method = HTTP_PUT, .handler = topology_solar_put_handler};
     const httpd_uri_t topology_tariff_put = {.uri = "/api/topology/tariff", .method = HTTP_PUT, .handler = topology_tariff_put_handler};
@@ -2533,6 +2549,7 @@ esp_err_t web_server_start(void)
     httpd_register_uri_handler(server, &data_grid_get);
     httpd_register_uri_handler(server, &data_node_get);
     httpd_register_uri_handler(server, &data_daily_energy_get);
+    httpd_register_uri_handler(server, &battery_source_get);
     httpd_register_uri_handler(server, &topology_grid_put);
     httpd_register_uri_handler(server, &topology_solar_put);
     httpd_register_uri_handler(server, &topology_tariff_put);
@@ -2559,13 +2576,20 @@ esp_err_t web_server_start(void)
     httpd_register_uri_handler(server, &debug_routes6);
     httpd_register_uri_handler(server, &debug_routes6_cache_delete);
 
-    // Both of these must come before the catch-all below, which would otherwise serve
-    // index.html for every companion GET and every websocket upgrade.
+    // These must come before the catch-all below, which would otherwise serve
+    // index.html for every companion or MCP GET and every websocket upgrade.
     companion_api_register(server);
+    mcp_server_register(server);
 
     ws_server_init(server);
 
-    httpd_register_uri_handler(server, &static_files);
+    // Registered last, so it is the one that fails when max_uri_handlers is too small.
+    err = httpd_register_uri_handler(server, &static_files);
+    if (err != ESP_OK)
+    {
+        ESP_LOGE(TAG, "Could not register the static file handler (0x%x); raise max_uri_handlers", err);
+        return err;
+    }
 
     ESP_LOGI(TAG, "Web server started on port 80");
     return ESP_OK;
