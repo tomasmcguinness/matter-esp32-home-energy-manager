@@ -243,12 +243,12 @@ function UsageSection() {
   }, [])
 
   const series = forecast ? usageSeries(forecast) : []
-  // Battery charging is drawn in the bars but kept out of the totals: the house
-  // uses that energy again later, where it is already counted.
-  const used = series.filter(s => s.key !== BATTERY_KEY)
-  const hasBattery = used.length < series.length
-  const totals = Array.from({ length: 24 }, (_, h) => used.reduce((sum, s) => sum + (s.power_w[h] ?? 0), 0))
-  const totalKwh = totals.reduce((a, b) => a + b, 0) / 1000
+  // Battery charging counts towards the peak hour, as it is real demand in that
+  // hour, but is kept out of the day's energy total: the house uses that energy
+  // again later, where it is already counted.
+  const hasBattery = series.some(s => s.key === BATTERY_KEY)
+  const totals = Array.from({ length: 24 }, (_, h) => series.reduce((sum, s) => sum + (s.power_w[h] ?? 0), 0))
+  const totalKwh = series.filter(s => s.key !== BATTERY_KEY).reduce((sum, s) => sum + s.kwh, 0)
   const peakHour = totals.indexOf(Math.max(...totals))
   const vtn = forecast?.vtn?.demand_w.length === 24 ? forecast.vtn : undefined
 
@@ -265,7 +265,7 @@ function UsageSection() {
           Expected usage for today by appliance, from each one's logged history.
           {forecast && forecast.days_used > 0 && <> {basis}</>}
           {forecast && hasBattery && (
-            <> Battery charging from the grid is the average of the last {forecast.battery_days_used ?? 0} days and is not in the totals.</>
+            <> Battery charging from the grid is the average of the last {forecast.battery_days_used ?? 0} days and is not in the daily total.</>
           )}
         </p>
       </div>
