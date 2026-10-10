@@ -67,7 +67,8 @@ char      *node_power_logger_series_json(const char *node_id, const char *date_s
 //  "appliances":[{"graph_id","name","power_w":[..]}],"other_w":[..]}.
 // Each value is the average of that stream's hourly history on the same weekday
 // over the last 4 weeks, or over the most recent days with data when there is no
-// same-weekday history. days_used is 0 (and every value 0) with no history at
+// same-weekday history. The remainder is grid + inverter output less the
+// appliances, floored at 0. days_used is 0 (and every value 0) with no history at
 // all. NULL for a malformed date. Caller must free.
 char      *node_power_logger_usage_forecast_json(const char *date_str);
 

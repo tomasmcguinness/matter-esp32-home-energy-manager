@@ -1475,14 +1475,15 @@ char *node_power_logger_usage_forecast_json(const char *date_str)
         snprintf(path, sizeof(path), "%s/grid-hourly-%s", SD_BASE, day.c_str());
         if (!load_hourly(path, grid, have)) continue;
 
-        // Solar generation and battery discharge add to what the house used.
+        // What the house used is grid plus inverter output. The battery sits
+        // behind the inverter, so its flow is already in the inverter's reading.
         int32_t supplied[24] = {0};
         std::fill(load_mw.begin(), load_mw.end(), 0);
         size_t k = 0;
         for (size_t i = 0; i < streams.size(); i++) {
             const auto &s = streams[i];
             bool is_load = strcmp(s.role, "load") == 0;
-            if (!s.is_grid) {
+            if (is_load || strcmp(s.role, "solar") == 0) {
                 int32_t v[24] = {0};
                 snprintf(path, sizeof(path), "%s/nodeh-%s-%s", SD_BASE, s.graph_id.c_str(), day.c_str());
                 if (load_hourly(path, v, nullptr)) {
