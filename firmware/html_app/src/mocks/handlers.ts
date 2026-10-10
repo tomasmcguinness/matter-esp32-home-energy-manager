@@ -632,6 +632,27 @@ export const handlers = [
     return HttpResponse.json({ date, slots })
   }),
 
+  http.get('/api/forecast/usage', ({ request }) => {
+    const url = new URL(request.url)
+    const date = url.searchParams.get('date') ?? new Date().toISOString().slice(0, 10)
+    const hours = Array.from({ length: 24 }, (_, h) => h)
+    const bump = (h: number, from: number, to: number, peak: number) =>
+      h >= from && h < to ? Math.round(peak * Math.sin(Math.PI * (h - from + 0.5) / (to - from))) : 0
+    const appliances = [
+      { graph_id: 'node_11', name: 'Oven', power_w: hours.map(h => 3 + bump(h, 17, 20, 1400)) },
+      { graph_id: 'node_12', name: 'Dishwasher', power_w: hours.map(h => 8 + bump(h, 20, 22, 900)) },
+      { graph_id: 'node_13', name: 'Kettle', power_w: hours.map(h => bump(h, 7, 9, 350) + bump(h, 15, 17, 200)) },
+    ]
+    const other_w = hours.map(h => 280 + bump(h, 6, 10, 500) + bump(h, 16, 23, 700))
+    // What OpenADR reports: usage net of solar, so it goes negative around midday.
+    const demand_w = hours.map(h =>
+      other_w[h] + appliances.reduce((sum, a) => sum + a.power_w[h], 0) - bump(h, 8, 17, 3000))
+    return HttpResponse.json({
+      date, method: 'same-weekday', days_used: 4, appliances, other_w,
+      vtn: { enabled: true, source: 'net', demand_w },
+    })
+  }),
+
   http.get('/api/forecast/consumption', ({ request }) => {
     const url = new URL(request.url)
     const date = url.searchParams.get('date') ?? new Date(Date.now() + 86400000).toISOString().slice(0, 10)

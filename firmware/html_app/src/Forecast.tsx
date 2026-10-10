@@ -16,6 +16,19 @@ type SurplusForecast = {
   mature_days?: number
 }
 
+// Expected usage per local hour (24 values from 00:00) for each appliance and
+// the unmonitored remainder, averaged from history. `vtn` is the demand forecast
+// OpenADR reports for the day; absent when no forecast is stored.
+type UsageAppliance = { graph_id: string; name: string; power_w: number[] }
+type UsageForecast = {
+  date: string
+  method: 'same-weekday' | 'recent-days'
+  days_used: number
+  appliances: UsageAppliance[]
+  other_w: number[]
+  vtn?: { enabled: boolean; source: string; demand_w: number[] }
+}
+
 function today() {
   const d = new Date()
   return d.toISOString().slice(0, 10)
@@ -110,6 +123,191 @@ function SurplusChart({ slots }: { slots: SurplusSlot[] }) {
 
       <line x1={PAD.left} y1={midY} x2={PAD.left + PLOT_W} y2={midY} stroke="#e2e8f0" strokeWidth={1} />
     </svg>
+  )
+}
+
+// --- Usage forecast ---------------------------------------------------------
+const USAGE_COLORS = ['#3b82f6', '#f59e0b', '#8b5cf6', '#ec4899', '#14b8a6', '#f97316', '#6366f1', '#84cc16']
+const OTHER_COLOR = '#cbd5e1'
+const VTN_COLOR = '#0f172a'
+
+const VTN_SOURCE_LABEL: Record<string, string> = {
+  net: 'net grid',
+  gross: 'gross',
+  gross_fallback: 'gross — no surplus forecast',
+}
+
+type UsageSeries = { key: string; name: string; color: string; power_w: number[]; kwh: number }
+
+function fmtKw(w: number) {
+  return `${Math.round(w / 100) / 10}kW`
+}
+
+// "Other" first (drawn at the bottom of each bar), then appliances, largest
+// daily total first so the big users keep the same colours day to day.
+function usageSeries(f: UsageForecast): UsageSeries[] {
+  const kwh = (p: number[]) => p.reduce((a, b) => a + b, 0) / 1000
+  const appliances = f.appliances
+    .map(a => ({ key: a.graph_id, name: a.name, power_w: a.power_w, kwh: kwh(a.power_w) }))
+    .sort((a, b) => b.kwh - a.kwh)
+    .map((a, i) => ({ ...a, color: USAGE_COLORS[i % USAGE_COLORS.length] }))
+  return [{ key: '__other', name: 'Other', color: OTHER_COLOR, power_w: f.other_w, kwh: kwh(f.other_w) }, ...appliances]
+}
+
+// Hourly stacked bars of expected usage, one colour per appliance, with the
+// demand forecast reported to the VTN drawn over them as a step line. That
+// figure is net of solar, so it can sit below the bars and below zero.
+function UsageChart({ series, vtn }: { series: UsageSeries[]; vtn?: number[] }) {
+  const hours = Array.from({ length: 24 }, (_, h) => h)
+  const totals = hours.map(h => series.reduce((sum, s) => sum + (s.power_w[h] ?? 0), 0))
+  const top = Math.max(...totals, ...(vtn ?? []), 1)
+  const bottom = Math.min(0, ...(vtn ?? []))
+  const range = top - bottom
+  const yOf = (w: number) => PAD.top + ((top - w) / range) * PLOT_H
+  const barW = PLOT_W / 24
+  const zeroY = yOf(0)
+
+  const vtnPath = vtn
+    ? vtn.map((w, h) => `${h === 0 ? 'M' : 'L'}${PAD.left + h * barW},${yOf(w)} H${PAD.left + (h + 1) * barW}`).join(' ')
+    : ''
+
+  return (
+    <svg viewBox={`0 0 ${SVG_W} ${SVG_H}`} style={{ width: '100%', fontFamily: 'inherit' }}>
+      <text x={PAD.left - 8} y={PAD.top + 4} textAnchor="end" fontSize={10} fill="#94a3b8">{fmtKw(top)}</text>
+      <text x={PAD.left - 8} y={zeroY + 4} textAnchor="end" fontSize={10} fill="#94a3b8">0</text>
+      {bottom < 0 && (
+        <text x={PAD.left - 8} y={PAD.top + PLOT_H} textAnchor="end" fontSize={10} fill="#94a3b8">{fmtKw(bottom)}</text>
+      )}
+
+      {hours.map(h => {
+        const x = PAD.left + h * barW
+        let stacked = 0
+        return (
+          <g key={h}>
+            {series.map(s => {
+              const w = Math.max(s.power_w[h] ?? 0, 0)
+              if (w <= 0) return null
+              const y = yOf(stacked + w)
+              const height = yOf(stacked) - y
+              stacked += w
+              return (
+                <rect key={s.key} x={x + 1} y={y} width={barW - 2} height={height} fill={s.color}>
+                  <title>{`${String(h).padStart(2, '0')}:00 ${s.name}: ${Math.round(w)} W`}</title>
+                </rect>
+              )
+            })}
+            {h % 3 === 0 && (
+              <text x={x + barW / 2} y={PAD.top + PLOT_H + 14} textAnchor="middle" fontSize={10} fill="#94a3b8">
+                {String(h).padStart(2, '0')}:00
+              </text>
+            )}
+          </g>
+        )
+      })}
+
+      <line x1={PAD.left} y1={zeroY} x2={PAD.left + PLOT_W} y2={zeroY} stroke="#e2e8f0" strokeWidth={1} />
+
+      {vtn && (
+        <>
+          <path d={vtnPath} fill="none" stroke={VTN_COLOR} strokeWidth={1.5} />
+          {vtn.map((w, h) => (
+            <circle key={h} cx={PAD.left + (h + 0.5) * barW} cy={yOf(w)} r={2.5} fill={VTN_COLOR}>
+              <title>{`${String(h).padStart(2, '0')}:00 OpenADR forecast: ${Math.round(w)} W`}</title>
+            </circle>
+          ))}
+        </>
+      )}
+    </svg>
+  )
+}
+
+function UsageSection() {
+  const [forecast, setForecast] = useState<UsageForecast | null>(null)
+  const [error, setError] = useState<string | null>(null)
+
+  useEffect(() => {
+    fetch(`/api/forecast/usage?date=${localDateString(new Date())}`)
+      .then(r => r.ok ? r.json() as Promise<UsageForecast> : Promise.reject(`HTTP ${r.status}`))
+      .then(setForecast)
+      .catch((e: unknown) => setError(e instanceof Error ? e.message : String(e)))
+  }, [])
+
+  const series = forecast ? usageSeries(forecast) : []
+  const totals = Array.from({ length: 24 }, (_, h) => series.reduce((sum, s) => sum + (s.power_w[h] ?? 0), 0))
+  const totalKwh = totals.reduce((a, b) => a + b, 0) / 1000
+  const peakHour = totals.indexOf(Math.max(...totals))
+  const vtn = forecast?.vtn?.demand_w.length === 24 ? forecast.vtn : undefined
+
+  const basis = !forecast ? ''
+    : forecast.method === 'same-weekday'
+      ? `Average of the last ${forecast.days_used} ${new Date(`${forecast.date}T12:00:00`).toLocaleDateString(undefined, { weekday: 'long' })}${forecast.days_used === 1 ? '' : 's'}.`
+      : `Average of the last ${forecast.days_used} day${forecast.days_used === 1 ? '' : 's'} with data (no same-weekday history yet).`
+
+  return (
+    <div style={{ marginTop: 40 }}>
+      <div style={{ marginBottom: 24 }}>
+        <h2 style={{ margin: 0, fontSize: 18, fontWeight: 700, color: '#1e293b' }}>Usage Forecast</h2>
+        <p style={{ margin: '4px 0 0', fontSize: 13, color: '#64748b' }}>
+          Expected usage for today by appliance, from each one's logged history.
+          {forecast && forecast.days_used > 0 && <> {basis}</>}
+        </p>
+      </div>
+
+      {error && (
+        <div style={{ marginBottom: 20, padding: '10px 14px', background: '#fef2f2', border: '1px solid #fca5a5', borderRadius: 8, fontSize: 13, color: '#b91c1c' }}>
+          {error}
+        </div>
+      )}
+
+      {forecast && forecast.days_used === 0 && (
+        <div style={{ padding: '48px 0', textAlign: 'center', color: '#94a3b8', fontSize: 13 }}>
+          Usage appears once at least one full day has been logged.
+        </div>
+      )}
+
+      {forecast && forecast.days_used > 0 && (
+        <>
+          <div style={{ display: 'flex', gap: 16, marginBottom: 24 }}>
+            <div style={{ flex: 1, background: '#eff6ff', border: '1px solid #bfdbfe', borderRadius: 10, padding: '16px 20px' }}>
+              <div style={{ fontSize: 11, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '.08em', color: '#1e40af', marginBottom: 4 }}>Expected Today</div>
+              <div style={{ fontSize: 22, fontWeight: 700, color: '#1e293b' }}>
+                {totalKwh.toFixed(1)} <span style={{ fontSize: 13, fontWeight: 400, color: '#64748b' }}>kWh</span>
+              </div>
+            </div>
+            <div style={{ flex: 1, background: '#eff6ff', border: '1px solid #bfdbfe', borderRadius: 10, padding: '16px 20px' }}>
+              <div style={{ fontSize: 11, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '.08em', color: '#1e40af', marginBottom: 4 }}>Peak Hour</div>
+              <div style={{ fontSize: 22, fontWeight: 700, color: '#1e293b' }}>
+                {Math.round(totals[peakHour])} <span style={{ fontSize: 13, fontWeight: 400, color: '#64748b' }}>W at {String(peakHour).padStart(2, '0')}:00</span>
+              </div>
+            </div>
+            <div style={{ flex: 1, background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: 10, padding: '16px 20px' }}>
+              <div style={{ fontSize: 11, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '.08em', color: '#475569', marginBottom: 4 }}>Date</div>
+              <div style={{ fontSize: 18, fontWeight: 700, color: '#1e293b' }}>{forecast.date}</div>
+            </div>
+          </div>
+
+          <div style={{ background: '#fff', border: '1px solid #e2e8f0', borderRadius: 10, padding: '16px 20px' }}>
+            <UsageChart series={series} vtn={vtn?.demand_w} />
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px 18px', marginTop: 8, fontSize: 12, color: '#475569' }}>
+              {[...series.slice(1), series[0]].map(s => (
+                <span key={s.key} style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+                  <span style={{ width: 10, height: 10, borderRadius: 2, background: s.color }} />
+                  {s.name} <span style={{ color: '#94a3b8' }}>{s.kwh.toFixed(1)} kWh</span>
+                </span>
+              ))}
+              {vtn && (
+                <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+                  <span style={{ width: 14, height: 2, background: VTN_COLOR }} />
+                  {vtn.enabled
+                    ? `Sent to VTN (${VTN_SOURCE_LABEL[vtn.source] ?? vtn.source})`
+                    : `OpenADR forecast (${VTN_SOURCE_LABEL[vtn.source] ?? vtn.source}, not enabled)`}
+                </span>
+              )}
+            </div>
+          </div>
+        </>
+      )}
+    </div>
   )
 }
 
@@ -387,6 +585,8 @@ function Forecast() {
           Surplus appears once both solar and consumption forecasts exist for this date.
         </div>
       )}
+
+      <UsageSection />
 
       <TariffSection />
     </div>
