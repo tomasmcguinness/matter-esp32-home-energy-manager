@@ -24,6 +24,7 @@
 #include "node_power_logger.h"
 #include "tariff.h"
 #include "commodity_price.h"
+#include "openadr_ven.h"
 
 #include "esp_netif_net_stack.h"
 
@@ -258,6 +259,9 @@ extern "C" void app_main(void)
     //mdns_service_add(NULL, "_http", "_tcp", 80, NULL, 0);
 
     ESP_ERROR_CHECK(web_server_start());
+
+    // After the web server, so its status pushes have a websocket to go to.
+    ESP_ERROR_CHECK(openadr_ven_start());
 
     ESP_ERROR_CHECK(matter_controller_start());
     ESP_ERROR_CHECK(matter_controller_subscribe());
