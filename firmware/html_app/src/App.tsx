@@ -10,6 +10,7 @@ import Schedule from './Schedule.tsx'
 import Settings from './Settings.tsx'
 import Test from './Test.tsx'
 import Appliances from './Appliances.tsx'
+import OpenAdr from './OpenAdr.tsx'
 
 import '@xyflow/react/dist/style.css';
 
@@ -46,6 +47,9 @@ function App() {
                 <NavLink className="nav-link" to="/devices">Devices</NavLink>
               </li>
               <li className="nav-item">
+                <NavLink className="nav-link" to="/openadr">OpenADR</NavLink>
+              </li>
+              <li className="nav-item">
                 <NavLink className="nav-link" to="/settings">Settings</NavLink>
               </li>
               <li className="nav-item">
@@ -64,6 +68,7 @@ function App() {
         <Route path="/schedule" element={<div className="container"><Schedule /></div>} />
         <Route path="/devices" element={<div className="container"><Devices /></div>} />
         <Route path="/devices/:nodeId/commissioning" element={<div className="container"><CommissioningWindow /></div>} />
+        <Route path="/openadr" element={<div className="container"><OpenAdr /></div>} />
         <Route path="/settings" element={<div className="container"><Settings /></div>} />
         <Route path="/test" element={<div className="container"><Test /></div>} />
       </Routes>
