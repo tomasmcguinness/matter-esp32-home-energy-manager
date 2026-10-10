@@ -31,6 +31,7 @@
 #include "ws_server.h"
 #include "companion_api.h"
 #include "mcp_server.h"
+#include "openadr_ven.h"
 
 #include "mbedtls/base64.h"
 #include "mdns.h"
@@ -1712,6 +1713,91 @@ static esp_err_t test_run_daily_job_handler(httpd_req_t *req)
     return httpd_resp_sendstr(req, "{}");
 }
 
+// ── OpenADR VEN ───────────────────────────────────────────────────────────────
+// These only read or write the VEN's config and status and hand work to its own
+// task; none of them waits on the VTN.
+
+static esp_err_t send_json_text(httpd_req_t *req, char *json)
+{
+    if (!json)
+    {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "OOM");
+        return ESP_FAIL;
+    }
+    httpd_resp_set_type(req, "application/json");
+    esp_err_t err = httpd_resp_sendstr(req, json);
+    free(json);
+    return err;
+}
+
+static esp_err_t openadr_config_get_handler(httpd_req_t *req)
+{
+    return send_json_text(req, openadr_ven_config_json());
+}
+
+static esp_err_t openadr_config_put_handler(httpd_req_t *req)
+{
+    if (req->content_len <= 0 || req->content_len > MAX_POST_BODY)
+    {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid body");
+        return ESP_FAIL;
+    }
+    char body[MAX_POST_BODY + 1];
+    int received = 0;
+    while (received < (int)req->content_len)
+    {
+        int r = httpd_req_recv(req, body + received, req->content_len - received);
+        if (r <= 0)
+        {
+            httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Recv failed");
+            return ESP_FAIL;
+        }
+        received += r;
+    }
+    body[received] = '\0';
+
+    cJSON *req_json = cJSON_Parse(body);
+    if (!req_json)
+    {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Bad JSON");
+        return ESP_FAIL;
+    }
+    esp_err_t err = openadr_ven_config_update(req_json);
+    cJSON_Delete(req_json);
+    if (err == ESP_ERR_INVALID_ARG)
+    {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid config");
+        return ESP_FAIL;
+    }
+    if (err != ESP_OK)
+    {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Save failed");
+        return ESP_FAIL;
+    }
+    return send_json_text(req, openadr_ven_config_json());
+}
+
+static esp_err_t openadr_status_get_handler(httpd_req_t *req)
+{
+    return send_json_text(req, openadr_ven_status_json());
+}
+
+static esp_err_t openadr_send_now_handler(httpd_req_t *req)
+{
+    openadr_ven_send_now();
+    httpd_resp_set_status(req, "202 Accepted");
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_sendstr(req, "{}");
+}
+
+static esp_err_t openadr_reset_handler(httpd_req_t *req)
+{
+    openadr_ven_reset();
+    httpd_resp_set_status(req, "202 Accepted");
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_sendstr(req, "{}");
+}
+
 static esp_err_t forecast_consumption_get_handler(httpd_req_t *req)
 {
     char date[16] = {0};
@@ -2465,7 +2551,7 @@ esp_err_t web_server_start(void)
     config.lru_purge_enable = true;
     config.uri_match_fn = uri_match_segments;
     config.stack_size = 12288;
-    config.max_uri_handlers = 64; // 54 in use: 46 here, 5 companion, 2 MCP, 1 websocket
+    config.max_uri_handlers = 64; // 59 in use: 51 here, 5 companion, 2 MCP, 1 websocket
     config.max_resp_headers = 20;
     // TCP keep-alive reaps clients that vanish without closing (sleeping tabs,
     // locked phones). Otherwise a dead WebSocket client's socket lingers and every
@@ -2515,6 +2601,11 @@ esp_err_t web_server_start(void)
     const httpd_uri_t forecast_surplus_get = {.uri = "/api/forecast/surplus", .method = HTTP_GET, .handler = forecast_surplus_get_handler};
     const httpd_uri_t forecast_surplus_model_get = {.uri = "/api/forecast/surplus/model", .method = HTTP_GET, .handler = forecast_surplus_model_get_handler};
     const httpd_uri_t test_surplus_model_train = {.uri = "/api/test/surplus-model/train", .method = HTTP_POST, .handler = test_surplus_model_train_handler};
+    const httpd_uri_t openadr_config_get = {.uri = "/api/openadr/config", .method = HTTP_GET, .handler = openadr_config_get_handler};
+    const httpd_uri_t openadr_config_put = {.uri = "/api/openadr/config", .method = HTTP_PUT, .handler = openadr_config_put_handler};
+    const httpd_uri_t openadr_status_get = {.uri = "/api/openadr/status", .method = HTTP_GET, .handler = openadr_status_get_handler};
+    const httpd_uri_t openadr_send_now = {.uri = "/api/openadr/send-now", .method = HTTP_POST, .handler = openadr_send_now_handler};
+    const httpd_uri_t openadr_reset = {.uri = "/api/openadr/reset", .method = HTTP_POST, .handler = openadr_reset_handler};
     const httpd_uri_t appliance_profile_get = {.uri = "/api/appliance/profile", .method = HTTP_GET, .handler = appliance_profile_get_handler};
     const httpd_uri_t appliance_profiles_get = {.uri = "/api/appliance/profiles", .method = HTTP_GET, .handler = appliance_profiles_get_handler};
     const httpd_uri_t schedule_get = {.uri = "/api/schedule", .method = HTTP_GET, .handler = schedule_get_handler};
@@ -2561,6 +2652,11 @@ esp_err_t web_server_start(void)
     httpd_register_uri_handler(server, &forecast_consumption_get);
     httpd_register_uri_handler(server, &forecast_surplus_get);
     httpd_register_uri_handler(server, &forecast_surplus_model_get);
+    httpd_register_uri_handler(server, &openadr_config_get);
+    httpd_register_uri_handler(server, &openadr_config_put);
+    httpd_register_uri_handler(server, &openadr_status_get);
+    httpd_register_uri_handler(server, &openadr_send_now);
+    httpd_register_uri_handler(server, &openadr_reset);
     httpd_register_uri_handler(server, &test_surplus_model_train);
     httpd_register_uri_handler(server, &appliance_profile_get);
     httpd_register_uri_handler(server, &appliance_profiles_get);
