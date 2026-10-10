@@ -30,6 +30,9 @@ export type OpenAdrStatus = {
   activity: OpenAdrActivity[]   // newest first
 }
 
+// How often to fetch the status while the websocket is not connected.
+const STATUS_POLL_MS = 5000
+
 type SaveState = 'idle' | 'saving' | 'saved' | 'error'
 
 const STATE_BADGE: Record<string, string> = {
@@ -195,14 +198,20 @@ function OpenAdr() {
   }, [])
   const wsState = useWebSocket(handleWsMessage)
 
-  // Fetch once the socket is open: on first load, and again after a reconnect to
-  // pick up anything pushed while it was down.
+  // Fetch on load and whenever the socket (re)opens, to pick up anything pushed
+  // while it was down. While the socket is not open, poll instead so the page
+  // still works without live updates.
   useEffect(() => {
-    if (wsState !== 'open') return
-    fetch('/api/openadr/status')
-      .then(r => (r.ok ? (r.json() as Promise<OpenAdrStatus>) : Promise.reject(new Error(`HTTP ${r.status}`))))
-      .then(setStatus)
-      .catch(() => { /* keep showing the last known status */ })
+    const load = () => {
+      fetch('/api/openadr/status')
+        .then(r => (r.ok ? (r.json() as Promise<OpenAdrStatus>) : Promise.reject(new Error(`HTTP ${r.status}`))))
+        .then(setStatus)
+        .catch(() => { /* keep showing the last known status */ })
+    }
+    load()
+    if (wsState === 'open') return
+    const timer = setInterval(load, STATUS_POLL_MS)
+    return () => clearInterval(timer)
   }, [wsState])
 
   function post(path: string) {
@@ -260,7 +269,7 @@ function OpenAdr() {
             Reset registration
           </button>
           {actionError && <span style={{ fontSize: '0.85rem', color: '#dc3545' }}>{actionError}</span>}
-          {wsState !== 'open' && <span style={{ fontSize: '0.85rem', color: '#6c757d' }}>Live updates reconnecting…</span>}
+          {wsState !== 'open' && <span style={{ fontSize: '0.85rem', color: '#6c757d' }}>Live updates reconnecting — refreshing every 5 s</span>}
         </div>
       </Card>
 
