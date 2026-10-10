@@ -64,11 +64,16 @@ char      *node_power_logger_series_json(const char *node_id, const char *date_s
 // Expected usage for a local day, per appliance and for the unmonitored
 // remainder, in watts per local hour (24 values from 00:00):
 // {"date","method":"same-weekday"|"recent-days","days_used":N,
-//  "appliances":[{"graph_id","name","power_w":[..]}],"other_w":[..]}.
+//  "appliances":[{"graph_id","name","power_w":[..]}],"other_w":[..],
+//  "battery_days_used":N,"battery_charge_w":[..]}.
 // Each value is the average of that stream's hourly history on the same weekday
 // over the last 4 weeks, or over the most recent days with data when there is no
 // same-weekday history. The remainder is grid + inverter output less the
-// appliances, floored at 0. days_used is 0 (and every value 0) with no history at
+// appliances, floored at 0. With a battery in the topology, battery_charge_w is
+// the power it is expected to take from the grid (the inverter's AC-side draw,
+// capped at the battery's charge rate), averaged over the last
+// battery_days_used days, up to 7; charging from solar is not in it and it is
+// not part of other_w. days_used is 0 (and every value 0) with no history at
 // all. NULL for a malformed date. Caller must free.
 char      *node_power_logger_usage_forecast_json(const char *date_str);
 

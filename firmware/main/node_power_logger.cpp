@@ -1509,6 +1509,42 @@ char *node_power_logger_usage_forecast_json(const char *date_str)
         }
     }
 
+    // Scheduled battery charging from the grid: what the inverter draws from the
+    // AC side, capped at what the battery takes in so the inverter's own standby
+    // draw is left out. A charge schedule follows the tariff rather than the
+    // weekday, so this is averaged over the most recent days instead.
+    bool have_battery = false;
+    for (const auto &s : streams)
+        if (strcmp(s.role, "battery") == 0) { have_battery = true; break; }
+
+    double charge_sum[24]   = {0};
+    int    charge_count[24] = {0};
+    int    charge_days      = 0;
+    for (int d = 1; have_battery && d <= kUsageRecentScanDays && charge_days < kUsageRecentMaxDays; d++) {
+        if (!date_add(date, -d, prior, sizeof(prior))) continue;
+        int32_t grid[24] = {0};
+        bool    have[24] = {false};
+        snprintf(path, sizeof(path), "%s/grid-hourly-%s", SD_BASE, prior);
+        if (!load_hourly(path, grid, have)) continue;
+        charge_days++;
+
+        int32_t inv_draw[24] = {0}, bat_charge[24] = {0}; // raw sign: + = into the device
+        for (const auto &s : streams) {
+            bool is_battery = strcmp(s.role, "battery") == 0;
+            if (!is_battery && strcmp(s.role, "solar") != 0) continue;
+            int32_t v[24] = {0};
+            snprintf(path, sizeof(path), "%s/nodeh-%s-%s", SD_BASE, s.graph_id.c_str(), prior);
+            if (!load_hourly(path, v, nullptr)) continue;
+            for (int h = 0; h < 24; h++) (is_battery ? bat_charge : inv_draw)[h] += v[h];
+        }
+        for (int h = 0; h < 24; h++) {
+            if (!have[h]) continue;
+            charge_count[h]++;
+            int32_t c = inv_draw[h] < bat_charge[h] ? inv_draw[h] : bat_charge[h];
+            if (c > 0) charge_sum[h] += c;
+        }
+    }
+
     // Display names come from the topology; fall back to the graph id.
     auto ids   = (char (*)[APPLIANCE_ID_MAX_LEN])calloc(kUsageMaxNames, APPLIANCE_ID_MAX_LEN);
     auto names = (char (*)[APPLIANCE_NAME_MAX_LEN])calloc(kUsageMaxNames, APPLIANCE_NAME_MAX_LEN);
@@ -1532,6 +1568,10 @@ char *node_power_logger_usage_forecast_json(const char *date_str)
         cJSON_AddItemToArray(arr, o);
     }
     cJSON_AddItemToObject(root, "other_w", hourly_average_array(other_sum, count));
+    if (have_battery) {
+        cJSON_AddNumberToObject(root, "battery_days_used", charge_days);
+        cJSON_AddItemToObject(root, "battery_charge_w", hourly_average_array(charge_sum, charge_count));
+    }
     free(ids);
     free(names);
 
