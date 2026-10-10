@@ -326,8 +326,8 @@ static const tool_t TOOLS[] = {
       "{\"type\":\"object\",\"properties\":{" DATE_PROP "}}",
       true, tool_get_schedule },
     { "get_appliance_profiles",
-      "Learned usage profiles (standby power, program power and length) for one appliance, or all of them "
-      "when node_id is omitted.",
+      "Learned usage profiles (standby power, program power and length, and the average runs and energy "
+      "per weekday, Monday first) for one appliance, or all of them when node_id is omitted.",
       "{\"type\":\"object\",\"properties\":{\"node_id\":{\"type\":\"string\"}}}",
       true, tool_get_appliance_profiles },
     { "get_tariff",

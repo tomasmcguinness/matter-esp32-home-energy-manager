@@ -9,7 +9,7 @@ extern "C" {
 #endif
 
 #define APPLIANCE_PROFILE_MAGIC   0x41505231u  // "APR1"
-#define APPLIANCE_PROFILE_VERSION 1
+#define APPLIANCE_PROFILE_VERSION 2
 
 // Learned per-appliance usage profile, derived nightly from a rolling window of
 // the appliance's per-minute power history (/sdcard/node-<graphId>-*). The
@@ -18,6 +18,8 @@ extern "C" {
 // "standby" is the idle draw when the appliance is plugged in but not running; a
 // "program" (run cycle) is a contiguous stretch where the draw rises above
 // standby. Program stats are the mean and stddev across all cycles in the window.
+// The dow_* arrays break the same cycles down by the weekday they ran on, indexed
+// by tm_wday (0 = Sunday), to show when in the week the appliance is used.
 // Persisted to /sdcard/profile-<graphId>.
 typedef struct {
     uint32_t magic;                // APPLIANCE_PROFILE_MAGIC
@@ -31,6 +33,9 @@ typedef struct {
     uint32_t std_program_len_min;  // stddev of cycle length (minutes)
     uint16_t program_count;        // cycles detected in the window
     uint16_t days_with_data;       // days that had any minute records
+    uint16_t dow_days[7];          // days of each weekday that had any minute records
+    uint16_t dow_runs[7];          // cycles detected on each weekday
+    uint32_t dow_energy_mwh[7];    // energy drawn by those cycles (mWh)
 } appliance_profile_t;
 
 // Analyse one appliance's last window_days of per-minute history, derive its
@@ -69,7 +74,10 @@ bool appliance_is_excluded(const char *graph_id);
 // Read back one appliance's persisted profile as JSON. Caller must free.
 // Shape: {"trained":bool,"graph_id":"..","standby_w":F,"avg_program_power_w":F,
 //   "std_program_power_w":F,"avg_program_len_min":N,"std_program_len_min":N,
-//   "program_count":N,"days_with_data":N,"trained_unix":N,"window_days":N}
+//   "program_count":N,"days_with_data":N,"trained_unix":N,"window_days":N,
+//   "weekdays":[{"days":N,"runs_per_day":F,"energy_wh_per_day":F}, ... x7]}
+// "weekdays" runs Monday to Sunday; "days" is how many of that weekday had data
+// and the two averages are over those days (0 when there were none).
 char *appliance_profile_json(const char *graph_id);
 
 // List every appliance's persisted profile as a JSON array. Caller must free.

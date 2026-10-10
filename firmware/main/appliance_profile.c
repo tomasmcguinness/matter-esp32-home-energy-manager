@@ -67,7 +67,9 @@ static const char *json_str(cJSON *obj, const char *key)
     return cJSON_IsString(j) ? j->valuestring : NULL;
 }
 
-static void date_for_offset(time_t now, int days_ago, char *date, size_t len)
+// Formats the local date days_ago days before now and returns its weekday
+// (tm_wday, 0 = Sunday).
+static int date_for_offset(time_t now, int days_ago, char *date, size_t len)
 {
     struct tm tm;
     localtime_r(&now, &tm);
@@ -77,18 +79,22 @@ static void date_for_offset(time_t now, int days_ago, char *date, size_t len)
     tm.tm_sec  = 0;
     mktime(&tm);
     strftime(date, len, "%Y-%m-%d", &tm);
+    return tm.tm_wday;
 }
 
 // ---------------------------------------------------------------------------
 // Cycle aggregation: running mean/stddev over the per-cycle mean power and the
-// per-cycle length, accumulated across every day in the window.
+// per-cycle length, accumulated across every day in the window. The dow_* arrays
+// split the cycle count and energy by weekday (tm_wday).
 typedef struct {
     uint32_t count;
     double   sum_pow, sumsq_pow; // per-cycle mean power (mW)
     double   sum_len, sumsq_len; // per-cycle length (minutes)
+    uint32_t dow_runs[7];
+    double   dow_energy_mwh[7];
 } cycle_stats_t;
 
-static void record_cycle(cycle_stats_t *st, int64_t cyc_sum_mw, uint32_t cyc_len)
+static void record_cycle(cycle_stats_t *st, int wday, int64_t cyc_sum_mw, uint32_t cyc_len)
 {
     if (cyc_len < MIN_CYCLE_MIN)
         return;
@@ -98,13 +104,16 @@ static void record_cycle(cycle_stats_t *st, int64_t cyc_sum_mw, uint32_t cyc_len
     st->sumsq_pow += mean_pow * mean_pow;
     st->sum_len   += cyc_len;
     st->sumsq_len += (double)cyc_len * (double)cyc_len;
+    st->dow_runs[wday]++;
+    st->dow_energy_mwh[wday] += (double)cyc_sum_mw / 60.0; // mW-minutes -> mWh
 }
 
 // Walk one day's per-minute file in time order and detect cycles. Records are
 // treated as consecutive minutes (missing minutes within a day are simply not
-// seen — acceptable at minute granularity). Returns true if the file existed
-// with at least one record.
-static bool scan_day(const char *graph_id, const char *date,
+// seen — acceptable at minute granularity). wday is the day's weekday, which its
+// cycles are counted under. Returns true if the file existed with at least one
+// record.
+static bool scan_day(const char *graph_id, const char *date, int wday,
                      int32_t on_threshold, int32_t off_threshold,
                      cycle_stats_t *st)
 {
@@ -145,7 +154,7 @@ static bool scan_day(const char *graph_id, const char *date,
         } else {
             gap++;
             if (gap > GAP_TOLERANCE_MIN) {
-                record_cycle(st, cyc_sum, cyc_len); // trailing gap discarded
+                record_cycle(st, wday, cyc_sum, cyc_len); // trailing gap discarded
                 in_cycle = false;
                 cyc_sum = 0; cyc_len = 0;
                 pend_sum = 0; pend_len = 0; gap = 0;
@@ -155,7 +164,7 @@ static bool scan_day(const char *graph_id, const char *date,
         }
     }
     if (in_cycle)
-        record_cycle(st, cyc_sum, cyc_len);
+        record_cycle(st, wday, cyc_sum, cyc_len);
 
     fclose(f);
     return have_data;
@@ -213,11 +222,14 @@ int appliance_profile_train(const char *graph_id, int window_days)
     // Pass 2: detect cycles day by day.
     cycle_stats_t st = {0};
     uint16_t days_with_data = 0;
+    uint16_t dow_days[7] = {0};
     for (int d = 1; d <= window_days; d++) {
         char date[11];
-        date_for_offset(now, d, date, sizeof(date));
-        if (scan_day(id, date, on_threshold, off_threshold, &st))
+        int wday = date_for_offset(now, d, date, sizeof(date));
+        if (scan_day(id, date, wday, on_threshold, off_threshold, &st)) {
             days_with_data++;
+            dow_days[wday]++;
+        }
     }
 
     appliance_profile_t prof;
@@ -229,6 +241,11 @@ int appliance_profile_train(const char *graph_id, int window_days)
     prof.standby_mw     = standby_mw;
     prof.program_count  = (uint16_t)st.count;
     prof.days_with_data = days_with_data;
+    for (int w = 0; w < 7; w++) {
+        prof.dow_days[w]       = dow_days[w];
+        prof.dow_runs[w]       = (uint16_t)st.dow_runs[w];
+        prof.dow_energy_mwh[w] = (uint32_t)llround(st.dow_energy_mwh[w]);
+    }
 
     if (st.count > 0) {
         double mean_pow = st.sum_pow / st.count;
@@ -478,6 +495,20 @@ static cJSON *profile_to_cjson(const char *id)
     cJSON_AddNumberToObject(o, "days_with_data",      prof.days_with_data);
     cJSON_AddNumberToObject(o, "trained_unix",        (double)prof.trained_unix);
     cJSON_AddNumberToObject(o, "window_days",         prof.window_days);
+
+    // Monday first; the profile stores the weekdays by tm_wday (0 = Sunday).
+    cJSON *weekdays = cJSON_AddArrayToObject(o, "weekdays");
+    for (int i = 0; i < 7; i++) {
+        int w = (i + 1) % 7;
+        uint16_t days = prof.dow_days[w];
+        cJSON *day = cJSON_CreateObject();
+        cJSON_AddNumberToObject(day, "days", days);
+        cJSON_AddNumberToObject(day, "runs_per_day",
+                                days ? (double)prof.dow_runs[w] / days : 0);
+        cJSON_AddNumberToObject(day, "energy_wh_per_day",
+                                days ? prof.dow_energy_mwh[w] / 1000.0 / days : 0);
+        cJSON_AddItemToArray(weekdays, day);
+    }
     return o;
 }
 
