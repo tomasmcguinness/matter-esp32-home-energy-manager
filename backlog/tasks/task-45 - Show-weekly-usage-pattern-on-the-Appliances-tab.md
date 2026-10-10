@@ -4,7 +4,7 @@ title: Show weekly usage pattern on the Appliances tab
 status: In Progress
 assignee: []
 created_date: '2026-10-10 13:16'
-updated_date: '2026-10-10 13:22'
+updated_date: '2026-10-10 15:13'
 labels:
   - firmware
   - web-ui
@@ -44,4 +44,6 @@ The figures come from the existing nightly appliance profile training (firmware/
 
 <!-- SECTION:NOTES:BEGIN -->
 Implemented and committed on open-adr-support: profile struct v2 with dow_days/dow_runs/dow_energy_mwh (indexed by tm_wday), weekdays array (Monday first) in the profile JSON, WeeklyPattern heat strip in Appliances.tsx, mock data, rebuilt app.js. idf.py build passes on ESP-IDF 5.5.5; tsc and vite build pass; eslint reports the same pre-existing errors as before the change. Not verified: the page has not been viewed in a browser (AC #2, #3) and nothing has been flashed (AC #1, #7). The profile version bump means existing /sdcard/profile-* files are ignored until the nightly train or Re-analyse now; until then cards show Learning and the scheduler skips those appliances.
+
+2026-10-10: at the user's request the tariff source is no longer enumerated as an appliance (appliance_profile.c handle_is_appliance now rejects the CU's `tariff` handle, as node_power_logger already did). This removes it from the Appliances tab, profile training and the scheduler. Firmware builds (56a7f61); not yet checked on the device.
 <!-- SECTION:NOTES:END -->
