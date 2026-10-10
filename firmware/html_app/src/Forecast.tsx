@@ -26,6 +26,10 @@ type UsageForecast = {
   days_used: number
   appliances: UsageAppliance[]
   other_w: number[]
+  // Expected grid charging of the battery, averaged over battery_days_used
+  // recent days. Present only when the topology has a battery.
+  battery_charge_w?: number[]
+  battery_days_used?: number
   vtn?: { enabled: boolean; source: string; demand_w: number[] }
 }
 
@@ -129,6 +133,8 @@ function SurplusChart({ slots }: { slots: SurplusSlot[] }) {
 // --- Usage forecast ---------------------------------------------------------
 const USAGE_COLORS = ['#3b82f6', '#f59e0b', '#8b5cf6', '#ec4899', '#14b8a6', '#f97316', '#6366f1', '#84cc16']
 const OTHER_COLOR = '#cbd5e1'
+const BATTERY_COLOR = '#059669'
+const BATTERY_KEY = '__battery'
 const VTN_COLOR = '#0f172a'
 
 const VTN_SOURCE_LABEL: Record<string, string> = {
@@ -143,15 +149,19 @@ function fmtKw(w: number) {
   return `${Math.round(w / 100) / 10}kW`
 }
 
-// "Other" first (drawn at the bottom of each bar), then appliances, largest
-// daily total first so the big users keep the same colours day to day.
+// "Other" first (drawn at the bottom of each bar), then battery charging, then
+// appliances, largest daily total first so the big users keep the same colours
+// day to day.
 function usageSeries(f: UsageForecast): UsageSeries[] {
   const kwh = (p: number[]) => p.reduce((a, b) => a + b, 0) / 1000
   const appliances = f.appliances
     .map(a => ({ key: a.graph_id, name: a.name, power_w: a.power_w, kwh: kwh(a.power_w) }))
     .sort((a, b) => b.kwh - a.kwh)
     .map((a, i) => ({ ...a, color: USAGE_COLORS[i % USAGE_COLORS.length] }))
-  return [{ key: '__other', name: 'Other', color: OTHER_COLOR, power_w: f.other_w, kwh: kwh(f.other_w) }, ...appliances]
+  const battery = f.battery_charge_w
+    ? [{ key: BATTERY_KEY, name: 'Battery charging', color: BATTERY_COLOR, power_w: f.battery_charge_w, kwh: kwh(f.battery_charge_w) }]
+    : []
+  return [{ key: '__other', name: 'Other', color: OTHER_COLOR, power_w: f.other_w, kwh: kwh(f.other_w) }, ...battery, ...appliances]
 }
 
 // Hourly stacked bars of expected usage, one colour per appliance, with the
@@ -233,7 +243,11 @@ function UsageSection() {
   }, [])
 
   const series = forecast ? usageSeries(forecast) : []
-  const totals = Array.from({ length: 24 }, (_, h) => series.reduce((sum, s) => sum + (s.power_w[h] ?? 0), 0))
+  // Battery charging is drawn in the bars but kept out of the totals: the house
+  // uses that energy again later, where it is already counted.
+  const used = series.filter(s => s.key !== BATTERY_KEY)
+  const hasBattery = used.length < series.length
+  const totals = Array.from({ length: 24 }, (_, h) => used.reduce((sum, s) => sum + (s.power_w[h] ?? 0), 0))
   const totalKwh = totals.reduce((a, b) => a + b, 0) / 1000
   const peakHour = totals.indexOf(Math.max(...totals))
   const vtn = forecast?.vtn?.demand_w.length === 24 ? forecast.vtn : undefined
@@ -250,6 +264,9 @@ function UsageSection() {
         <p style={{ margin: '4px 0 0', fontSize: 13, color: '#64748b' }}>
           Expected usage for today by appliance, from each one's logged history.
           {forecast && forecast.days_used > 0 && <> {basis}</>}
+          {forecast && hasBattery && (
+            <> Battery charging from the grid is the average of the last {forecast.battery_days_used ?? 0} days and is not in the totals.</>
+          )}
         </p>
       </div>
 

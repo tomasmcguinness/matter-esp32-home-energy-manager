@@ -644,11 +644,14 @@ export const handlers = [
       { graph_id: 'node_13', name: 'Kettle', power_w: hours.map(h => bump(h, 7, 9, 350) + bump(h, 15, 17, 200)) },
     ]
     const other_w = hours.map(h => 280 + bump(h, 6, 10, 500) + bump(h, 16, 23, 700))
-    // What OpenADR reports: usage net of solar, so it goes negative around midday.
+    // Fixed overnight charge window.
+    const battery_charge_w = hours.map(h => (h >= 2 && h < 5 ? 2600 : 0))
+    // What OpenADR reports: usage and charging net of solar, so it goes negative around midday.
     const demand_w = hours.map(h =>
-      other_w[h] + appliances.reduce((sum, a) => sum + a.power_w[h], 0) - bump(h, 8, 17, 3000))
+      other_w[h] + battery_charge_w[h] + appliances.reduce((sum, a) => sum + a.power_w[h], 0) - bump(h, 8, 17, 3000))
     return HttpResponse.json({
       date, method: 'same-weekday', days_used: 4, appliances, other_w,
+      battery_days_used: 7, battery_charge_w,
       vtn: { enabled: true, source: 'net', demand_w },
     })
   }),
