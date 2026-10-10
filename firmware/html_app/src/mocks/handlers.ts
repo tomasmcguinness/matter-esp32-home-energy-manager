@@ -1,5 +1,6 @@
 import { http, HttpResponse, ws } from 'msw'
 import type { Device } from '../Devices'
+import type { OpenAdrConfig, OpenAdrStatus } from '../OpenAdr'
 
 export type Settings = {
   name: string
@@ -99,7 +100,133 @@ let devices: Device[] = [
 
 const powerWs = ws.link('ws://*/ws')
 
+// --- OpenADR VEN mock --------------------------------------------------------
+// A small stand-in for the firmware's state machine: enabling it walks through
+// the states to RUNNING, and every change is pushed over the websocket as an
+// `openadr_status` frame, like the device does.
+const OPENADR_STARTUP = ['AUTHENTICATING', 'REGISTERING_VEN', 'CONNECTING_MQTT', 'DISCOVERING', 'RUNNING']
+
+let openAdrConfig: OpenAdrConfig = {
+  enabled: true,
+  vtn_base_url: 'http://192.168.1.10:5000',
+  client_id: 'hems-demo-1',
+  secret_set: true,
+  ven_name: 'hems-a1b2c3',
+  forecast_source: 'net',
+  mqtt_host_override: '',
+}
+
+const openAdrIdle: OpenAdrStatus = {
+  state: 'DISABLED',
+  last_error: '',
+  ven_id: '',
+  program_id: '',
+  program_name: '',
+  event_id: '',
+  event_found: false,
+  mqtt_connected: false,
+  last_report_ts: 0,
+  last_report_http: 0,
+  next_report_ts: 0,
+  retry_ts: 0,
+  forecast_source_used: '',
+  activity: [],
+}
+let openAdrStatus: OpenAdrStatus = { ...openAdrIdle }
+let openAdrTimer: ReturnType<typeof setTimeout> | null = null
+const openAdrClients = new Set<{ send: (data: string) => void }>()
+
+const nowSec = () => Math.floor(Date.now() / 1000)
+
+function openAdrPush() {
+  const frame = JSON.stringify({ type: 'openadr_status', data: openAdrStatus })
+  openAdrClients.forEach(c => c.send(frame))
+}
+
+function openAdrLog(kind: string, text: string) {
+  openAdrStatus = { ...openAdrStatus, activity: [{ ts: nowSec(), kind, text }, ...openAdrStatus.activity].slice(0, 20) }
+  openAdrPush()
+}
+
+function openAdrSendForecast() {
+  const used = openAdrConfig.forecast_source
+  openAdrStatus = { ...openAdrStatus, last_report_ts: nowSec(), last_report_http: 201, forecast_source_used: used }
+  openAdrLog('report', `Forecast, 24 intervals, ${used}: HTTP 201`)
+}
+
+function openAdrRestart(keepIds: boolean) {
+  if (openAdrTimer) clearTimeout(openAdrTimer)
+  openAdrStatus = {
+    ...openAdrIdle,
+    activity: openAdrStatus.activity,
+    ven_id: keepIds ? openAdrStatus.ven_id : '',
+    program_id: keepIds ? openAdrStatus.program_id : '',
+    event_id: keepIds ? openAdrStatus.event_id : '',
+    event_found: keepIds && openAdrStatus.event_found,
+  }
+  if (!openAdrConfig.enabled) {
+    openAdrLog('state', 'DISABLED')
+    return
+  }
+
+  let step = 0
+  const advance = () => {
+    const state = OPENADR_STARTUP[step++]
+    openAdrStatus = { ...openAdrStatus, state }
+    if (state === 'CONNECTING_MQTT') openAdrStatus.ven_id = 'ven-a7d498e6ae4a4de6'
+    if (state === 'DISCOVERING') openAdrStatus.mqtt_connected = true
+    if (state === 'RUNNING') {
+      const nextHour = Math.floor(nowSec() / 3600) * 3600 + 3600
+      openAdrStatus = {
+        ...openAdrStatus,
+        program_id: 'program-c9499a63b2d24295',
+        program_name: 'HomeForecast',
+        event_id: 'event-368de20708534772',
+        event_found: true,
+        next_report_ts: nextHour + 5,
+      }
+    }
+    openAdrLog('state', state)
+    if (state === 'RUNNING') openAdrSendForecast()
+    else openAdrTimer = setTimeout(advance, 700)
+  }
+  advance()
+}
+openAdrRestart(false)
+
 export const handlers = [
+  http.get('/api/openadr/config', () => {
+    return HttpResponse.json(openAdrConfig)
+  }),
+
+  http.put('/api/openadr/config', async ({ request }) => {
+    const { client_secret, ...fields } = (await request.json()) as Partial<OpenAdrConfig> & { client_secret?: string }
+    if (fields.vtn_base_url && !fields.vtn_base_url.startsWith('http://')) {
+      return new HttpResponse('Invalid config', { status: 400 })
+    }
+    // An empty secret keeps the stored one; the secret itself is never returned.
+    openAdrConfig = { ...openAdrConfig, ...fields, secret_set: openAdrConfig.secret_set || !!client_secret }
+    if (!openAdrConfig.ven_name) openAdrConfig.ven_name = 'hems-a1b2c3'
+    openAdrRestart(true)
+    return HttpResponse.json(openAdrConfig)
+  }),
+
+  http.get('/api/openadr/status', () => {
+    return HttpResponse.json(openAdrStatus)
+  }),
+
+  http.post('/api/openadr/send-now', () => {
+    if (openAdrStatus.state === 'RUNNING') openAdrSendForecast()
+    else openAdrLog('info', 'Forecast will be sent once the VEN is running')
+    return HttpResponse.json({}, { status: 202 })
+  }),
+
+  http.post('/api/openadr/reset', () => {
+    openAdrLog('info', 'Registration reset, cached IDs cleared')
+    openAdrRestart(false)
+    return HttpResponse.json({}, { status: 202 })
+  }),
+
   http.get('/api/settings', () => {
     return HttpResponse.json(settings)
   }),
@@ -596,6 +723,7 @@ export const handlers = [
 
   powerWs.addEventListener('connection', ({ client }) => {
     console.log('Connected!');
+    openAdrClients.add(client)
 
     // Push ElectricalPowerMeasurement ActivePower (cluster 144, attr 0x08) updates
     // in the firmware's `attribute_batch` shape — one coalesced frame per tick — so
@@ -629,6 +757,7 @@ export const handlers = [
 
     client.addEventListener('close', () => {
       console.log('Closing connection...')
+      openAdrClients.delete(client)
       clearInterval(interval)
       clearTimeout(commissionTimer)
     })
