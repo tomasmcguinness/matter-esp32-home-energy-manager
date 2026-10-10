@@ -4,7 +4,7 @@ title: 'OpenADR 3.1 VEN: send the hourly demand forecast to a VTN'
 status: In Progress
 assignee: []
 created_date: '2026-10-10 07:45'
-updated_date: '2026-10-10 09:57'
+updated_date: '2026-10-10 15:03'
 labels:
   - openadr
 dependencies: []
@@ -65,4 +65,6 @@ APPROVED 2026-10-10 with these user decisions after reading the contract (now at
 2026-10-10: All four subtasks implemented and committed on branch open-adr-support; idf.py build passes (ESP-IDF 5.5.4, app 0x247550 of 0x400000). NOT yet run on the device or against a VTN, so AC #2-#5 are unverified. Next step is to flash, configure from the OpenADR tab, and work through AC #2-#5 against the VTN; confirm `/` still loads (59 of 64 URI handlers).
 
 Deviations and choices worth knowing: (1) discovery (contract steps 2, 5, 6) runs on every start; the NVS-cached IDs are refreshed from it rather than used to skip it. (2) On a 404 from POST /reports the VEN re-registers and retries once immediately, then waits for the next tick if it 404s again. (3) Forecast values are read by local hour-of-day index from the stored 24-record forecasts, so on 25 Oct the repeated 01:00 slot sends record 1 twice and on 29 Mar record 1 is unused. (4) vtn_base_url must start with http://. (5) client_secret is stored in NVS in plaintext.
+
+2026-10-10: user reported the OpenADR page never loads (Status stuck on Loading, 'Live updates reconnecting'). Two changes: (1) CONFIG_LWIP_MAX_SOCKETS raised from 10 to 16 in sdkconfig.defaults — the web server alone can use 10 (7 clients + listener + 2 control), so the VEN's persistent MQTT socket left it unable to accept its 7th client, typically the websocket; this also matches curl and the hem MCP server getting ECONNRESET. Root cause is inferred from the code, not confirmed from the serial log (look for 'httpd_accept_conn: error in accept (23)'). (2) OpenAdr.tsx now fetches status on load and polls every 5 s while the websocket is down, instead of waiting for the socket to open. Builds pass; needs a reflash to confirm.
 <!-- SECTION:NOTES:END -->
