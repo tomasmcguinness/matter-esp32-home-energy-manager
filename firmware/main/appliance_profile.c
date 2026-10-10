@@ -277,7 +277,7 @@ int appliance_profile_train(const char *graph_id, int window_days)
 
 // ---------------------------------------------------------------------------
 // Topology enumeration: an appliance is any node wired to the consumer unit
-// whose CU handle is not the grid, solar or battery (and not the grid meter).
+// whose CU handle is not the grid, solar, battery or tariff (and not the grid meter).
 typedef void (*appliance_visit_fn)(const char *graph_id, const char *name, void *ctx);
 
 static bool handle_is_appliance(const char *handle)
@@ -286,6 +286,7 @@ static bool handle_is_appliance(const char *handle)
     if (strncmp(handle, "grid", 4) == 0)    return false;
     if (strncmp(handle, "solar", 5) == 0)   return false;
     if (strncmp(handle, "battery", 7) == 0) return false;
+    if (strcmp(handle, "tariff") == 0)      return false; // the tariff source meters nothing
     return true;
 }
 
