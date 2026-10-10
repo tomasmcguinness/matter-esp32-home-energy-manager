@@ -14,6 +14,10 @@ CONFIG_PARTITION_TABLE_OFFSET=0x8000
 CONFIG_ENABLE_ETHERNET_TELEMETRY=y
 
 CONFIG_LWIP_IPV6_AUTOCONFIG=y
+# The web server alone can hold 10 sockets (7 clients, 1 listener, 2 control),
+# which is the lwIP default. The OpenADR VEN's MQTT and HTTP connections and the
+# forecast fetches need room on top, or the server cannot accept its last clients.
+CONFIG_LWIP_MAX_SOCKETS=16
 CONFIG_LWIP_IPV6_NUM_ADDRESSES=12
 CONFIG_LWIP_MULTICAST_PING=y
 CONFIG_LWIP_IPV6_RDNSS_MAX_DNS_SERVERS=2
