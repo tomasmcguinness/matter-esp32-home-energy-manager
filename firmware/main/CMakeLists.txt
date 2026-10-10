@@ -18,6 +18,7 @@ idf_component_register(SRCS
         "consumption_forecast.c"
         "surplus_forecast.c"
         "surplus_model.c"
+        "openadr_slots.c"
         "appliance_profile.c"
         "scheduler.c"
         "commands/pairing_command.cpp"
