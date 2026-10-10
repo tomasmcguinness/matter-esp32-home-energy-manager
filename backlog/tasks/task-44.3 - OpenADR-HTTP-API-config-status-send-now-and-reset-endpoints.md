@@ -1,9 +1,10 @@
 ---
 id: TASK-44.3
 title: 'OpenADR HTTP API: config, status, send-now and reset endpoints'
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-10-10 07:45'
+updated_date: '2026-10-10 09:57'
 labels:
   - openadr
   - firmware
@@ -36,3 +37,9 @@ The HTTP server's max_uri_handlers is 64 with 54 in use; exceeding it makes the 
 - [ ] #6 POST /api/openadr/reset clears cached IDs and the VEN re-registers
 - [ ] #7 max_uri_handlers fits all handlers, the handler-count comment is accurate, and the web UI still loads
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Five handlers added to web_server.c; 59 of 64 URI handler slots in use (51 in web_server.c, 5 companion, 2 MCP, 1 websocket), so max_uri_handlers stays at 64 and the comment is updated. send-now and reset return 202 and only post to the VEN task's queue. Not yet exercised on the device; confirm `/` still loads after flashing.
+<!-- SECTION:NOTES:END -->

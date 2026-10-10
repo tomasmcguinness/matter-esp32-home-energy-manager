@@ -1,9 +1,10 @@
 ---
 id: TASK-44.2
 title: 'OpenADR VEN reporting: hourly DEMAND forecast and last-hour actual'
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-10-10 07:45'
+updated_date: '2026-10-10 09:57'
 labels:
   - openadr
   - firmware
@@ -32,10 +33,16 @@ The forecasting logic itself must not be changed.
 <!-- AC:BEGIN -->
 - [ ] #1 A forecast report for today's local day is posted every hour shortly after :00, and not before time sync
 - [ ] #2 The report has one PT1H interval per local hour slot and starts at local midnight in UTC
-- [ ] #3 A host-side unit test or a /api/test endpoint shows correct slot counts and UTC start times for 2026-03-29 (23), 2026-10-25 (25) and a normal day (24)
+- [x] #3 A host-side unit test or a /api/test endpoint shows correct slot counts and UTC start times for 2026-03-29 (23), 2026-10-25 (25) and a normal day (24)
 - [ ] #4 Net source reports demand_kw = -surplus_w / 1000
 - [ ] #5 Net source falls back to the consumption forecast when today's surplus forecast is missing, and status reports the source actually used
 - [ ] #6 Gross source reports the consumption forecast
 - [ ] #7 The last completed hour's actual is posted as DEMAND / DIRECT_READ / KW from grid-hourly data
-- [ ] #8 Forecast computation code is unchanged
+- [x] #8 Forecast computation code is unchanged
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Slot arithmetic is in firmware/main/openadr_slots.{c,h}; host test: firmware/host_test/run.sh (passes: 2026-03-29 → 23 slots from 00:00Z, 2026-10-25 → 25 slots from 2026-10-24T23:00Z, normal days 24). Report building is in openadr_ven.c. By user decision the actual is averaged from the grid 1-minute log (/sdcard/grid-YYYY-MM-DD) because grid-hourly-* only exists after the midnight rollup, and the forecast covers today's local day rather than the contract's rolling 24 h. Remaining criteria need a run against the VTN.
+<!-- SECTION:NOTES:END -->

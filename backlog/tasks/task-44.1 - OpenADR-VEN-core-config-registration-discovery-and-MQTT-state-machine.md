@@ -1,9 +1,10 @@
 ---
 id: TASK-44.1
 title: 'OpenADR VEN core: config, registration, discovery and MQTT state machine'
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-10-10 07:45'
+updated_date: '2026-10-10 09:57'
 labels:
   - openadr
   - firmware
@@ -42,3 +43,9 @@ MQTT notifications are only a nudge to resync; REST is the source of truth.
 - [ ] #10 The last 20 activity entries (state changes, reports with HTTP status, MQTT notifications, errors) are retained for the UI
 - [ ] #11 The Matter thread and HTTP server are never blocked by VEN network activity
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Implemented in firmware/main/openadr_ven.{c,h}; started from main.cpp after the web server. Builds cleanly. No acceptance criterion has been exercised on hardware or against a VTN yet, so none are checked. State order follows the contract (CONNECTING_MQTT before DISCOVERING), by user decision.
+<!-- SECTION:NOTES:END -->

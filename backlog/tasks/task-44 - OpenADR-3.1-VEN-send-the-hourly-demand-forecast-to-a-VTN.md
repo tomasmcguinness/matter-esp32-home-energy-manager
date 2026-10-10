@@ -4,7 +4,7 @@ title: 'OpenADR 3.1 VEN: send the hourly demand forecast to a VTN'
 status: In Progress
 assignee: []
 created_date: '2026-10-10 07:45'
-updated_date: '2026-10-10 09:47'
+updated_date: '2026-10-10 09:57'
 labels:
   - openadr
 dependencies: []
@@ -29,7 +29,7 @@ This is the parent task; the work is split into subtasks for the VEN core, repor
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 Firmware builds cleanly with idf.py
+- [x] #1 Firmware builds cleanly with idf.py
 - [ ] #2 Pointed at the VTN, the HEMS registers and the VTN dashboard shows today's forecast
 - [ ] #3 A new forecast version arrives at the VTN every hour and on 'Send forecast now'
 - [ ] #4 After the VTN is restarted with its state wiped, the HEMS recovers without intervention
@@ -58,3 +58,11 @@ APPROVED 2026-10-10 with these user decisions after reading the contract (now at
 - Last-hour actual: grid-hourly-* only exists after the midnight rollup, so the actual is the average of the grid's 1-minute records for the completed hour.
 - Program target is taken from the ven's own `targets` (the PROGRAM_NAME:* entry), not hardcoded.
 <!-- SECTION:PLAN:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+2026-10-10: All four subtasks implemented and committed on branch open-adr-support; idf.py build passes (ESP-IDF 5.5.4, app 0x247550 of 0x400000). NOT yet run on the device or against a VTN, so AC #2-#5 are unverified. Next step is to flash, configure from the OpenADR tab, and work through AC #2-#5 against the VTN; confirm `/` still loads (59 of 64 URI handlers).
+
+Deviations and choices worth knowing: (1) discovery (contract steps 2, 5, 6) runs on every start; the NVS-cached IDs are refreshed from it rather than used to skip it. (2) On a 404 from POST /reports the VEN re-registers and retries once immediately, then waits for the next tick if it 404s again. (3) Forecast values are read by local hour-of-day index from the stored 24-record forecasts, so on 25 Oct the repeated 01:00 slot sends record 1 twice and on 29 Mar record 1 is unused. (4) vtn_base_url must start with http://. (5) client_secret is stored in NVS in plaintext.
+<!-- SECTION:NOTES:END -->

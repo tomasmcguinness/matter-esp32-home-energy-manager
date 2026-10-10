@@ -1,9 +1,10 @@
 ---
 id: TASK-44.4
 title: 'OpenADR web UI: config, status and activity page'
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-10-10 07:45'
+updated_date: '2026-10-10 09:57'
 labels:
   - openadr
   - ui
@@ -35,5 +36,11 @@ Status updates live: reuse the existing websocket (useWebSocket.ts) if straightf
 - [ ] #5 The activity log lists entries newest first
 - [ ] #6 Status refreshes live without a page reload, and stops refreshing while the page is hidden if polling is used
 - [ ] #7 MSW mock handlers exist for every new endpoint so the page works with npm run dev
-- [ ] #8 The web app builds without type or lint errors
+- [x] #8 The web app builds without type or lint errors
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+OpenAdr.tsx, nav item and /openadr route added; MSW handlers for all five endpoints plus an `openadr_status` websocket push in mocks/handlers.ts. Live updates use the existing websocket (firmware broadcasts {type:"openadr_status"} on every state/activity change) with a GET on mount and after each reconnect, so there is no polling. tsc, eslint and vite build pass. The page has not been looked at in a browser yet. Mocks only load with `npm run dev-mock` (VITE_USE_MOCK=true), not plain `npm run dev`.
+<!-- SECTION:NOTES:END -->
