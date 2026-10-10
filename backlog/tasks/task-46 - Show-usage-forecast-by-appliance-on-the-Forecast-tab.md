@@ -4,7 +4,7 @@ title: Show usage forecast by appliance on the Forecast tab
 status: In Progress
 assignee: []
 created_date: '2026-10-10 13:35'
-updated_date: '2026-10-10 13:38'
+updated_date: '2026-10-10 14:18'
 labels:
   - firmware
   - web-ui
@@ -44,4 +44,6 @@ Agreed with the user:
 Implemented and committed on open-adr-support. Firmware: node_power_logger_usage_forecast_json() (on-demand, same-weekday average of nodeh-*/grid-hourly-* over 4 weeks, recent-days fallback, Other = max(grid + solar + battery supplied - appliances, 0)); openadr_ven_forecast_demand_w() shares forecast_demand_kw() with send_forecast(); GET /api/forecast/usage is route 60 of 64. UI: UsageSection/UsageChart in Forecast.tsx between Surplus Forecast and Tariff; mock added; app.js rebuilt. idf.py build passes on ESP-IDF 5.5.5; tsc and vite build pass; lint on the two changed files shows only the error that was already in Forecast.tsx. Not verified: the section has not been viewed in a browser (AC #3) and nothing has been flashed, so the endpoint's output on real SD-card history and the match against the VTN are untested (AC #1, #2, #7). The hem MCP server was unreachable, so the design was not checked against the files on the card.
 
 Observation, not changed: the OpenADR 'gross' source (consumption_forecast_json) is built from grid-hourly-*, so it is a net-at-the-grid figure averaged by weekday, not gross household consumption.
+
+Bug found from the user's screenshot and fixed (b8e7312): the remainder added the battery's flow on top of the inverter output, but the battery hangs off the inverter so it is already included (compute_day_split uses grid + inverter only). Effect was Other = 0 while the battery charged (overnight grid charging, midday solar) and roughly doubled while it discharged. Firmware rebuilt; not yet re-checked on the device (it was unreachable from this machine).
 <!-- SECTION:NOTES:END -->
