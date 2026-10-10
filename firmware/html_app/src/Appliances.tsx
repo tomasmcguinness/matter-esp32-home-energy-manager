@@ -2,6 +2,9 @@ import { useEffect, useState } from 'react'
 
 // The learned per-appliance profile served by GET /api/appliance/profiles. When
 // `trained` is false only graph_id + trained are present (no runs analysed yet).
+// One weekday's usage, averaged over the `days` of that weekday that had data.
+type WeekdayUsage = { days: number; runs_per_day: number; energy_wh_per_day: number }
+
 type ApplianceProfile = {
   graph_id: string
   trained: boolean
@@ -14,6 +17,7 @@ type ApplianceProfile = {
   days_with_data?: number
   trained_unix?: number
   window_days?: number
+  weekdays?: WeekdayUsage[]   // Monday first
 }
 type ProfilesResponse = { appliances: ApplianceProfile[] }
 
@@ -29,6 +33,12 @@ type Appliance = ApplianceProfile & { name: string; dem: boolean }
 
 function formatPower(w: number) {
   return w >= 1000 ? `${(w / 1000).toFixed(2)} kW` : `${Math.round(w)} W`
+}
+
+// Average runs per day: one decimal, but never rounding a real run down to 0.
+function formatRuns(n: number) {
+  if (n === 0) return '0'
+  return n < 0.1 ? '<0.1' : n.toFixed(1)
 }
 
 function formatLength(min: number) {
@@ -108,6 +118,50 @@ function CycleSketch({ a }: { a: Appliance }) {
   )
 }
 
+// --- Weekly pattern ---------------------------------------------------------
+// One tile per weekday, shaded by how often the appliance runs on that day
+// relative to its busiest weekday. The tile shows runs per day, with the energy
+// used per day underneath.
+const WEEKDAY_LABELS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
+
+function WeeklyPattern({ weekdays, windowDays }: { weekdays: WeekdayUsage[]; windowDays?: number }) {
+  const maxRuns = Math.max(...weekdays.map(d => d.runs_per_day), 0)
+  return (
+    <div>
+      <div style={{ fontSize: 11, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '.08em', color: '#475569', marginBottom: 12 }}>
+        Weekly pattern
+      </div>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(7, 1fr)', gap: 6, textAlign: 'center' }}>
+        {weekdays.slice(0, 7).map((d, i) => {
+          const hasData = d.days > 0
+          const share = maxRuns > 0 ? d.runs_per_day / maxRuns : 0
+          return (
+            <div key={WEEKDAY_LABELS[i]}
+              title={hasData ? `${d.days} ${WEEKDAY_LABELS[i]} day${d.days === 1 ? '' : 's'} with data` : 'No data'}>
+              <div style={{ fontSize: 10, color: '#94a3b8', marginBottom: 4 }}>{WEEKDAY_LABELS[i]}</div>
+              <div style={{
+                height: 40, borderRadius: 6, display: 'flex', alignItems: 'center', justifyContent: 'center',
+                fontSize: 14, fontWeight: 700, fontVariantNumeric: 'tabular-nums',
+                border: '1px solid #e2e8f0',
+                background: hasData ? `rgba(16, 185, 129, ${(share * 0.85).toFixed(2)})` : '#f8fafc',
+                color: !hasData ? '#cbd5e1' : share > 0.6 ? '#fff' : '#1e293b',
+              }}>
+                {hasData ? formatRuns(d.runs_per_day) : '–'}
+              </div>
+              <div style={{ fontSize: 11, color: '#64748b', marginTop: 4, fontVariantNumeric: 'tabular-nums' }}>
+                {hasData && d.runs_per_day > 0 ? (d.energy_wh_per_day / 1000).toFixed(1) : '–'}
+              </div>
+            </div>
+          )
+        })}
+      </div>
+      <div style={{ fontSize: 11, color: '#94a3b8', marginTop: 10, textAlign: 'center' }}>
+        runs · kWh per day{windowDays !== undefined ? `, last ${windowDays} days` : ''}
+      </div>
+    </div>
+  )
+}
+
 // --- Stat card --------------------------------------------------------------
 function Stat({ label, value, unit }: { label: string; value: string; unit?: string }) {
   return (
@@ -163,8 +217,15 @@ function ApplianceCard({ a }: { a: Appliance }) {
             <Stat label="Runs" value={String(a.program_count ?? 0)} />
           </div>
 
-          <div style={{ background: '#fff', border: '1px solid #e2e8f0', borderRadius: 10, padding: '12px 16px', marginBottom: 12 }}>
-            <CycleSketch a={a} />
+          <div style={{ display: 'flex', gap: 12, marginBottom: 12, flexWrap: 'wrap' }}>
+            <div style={{ flex: '1 1 320px', minWidth: 0, background: '#fff', border: '1px solid #e2e8f0', borderRadius: 10, padding: '12px 16px' }}>
+              <CycleSketch a={a} />
+            </div>
+            {a.weekdays && a.weekdays.length === 7 && (
+              <div style={{ flex: '1 1 320px', minWidth: 0, background: '#fff', border: '1px solid #e2e8f0', borderRadius: 10, padding: '12px 16px' }}>
+                <WeeklyPattern weekdays={a.weekdays} windowDays={a.window_days} />
+              </div>
+            )}
           </div>
 
           <div style={{ fontSize: 12, color: '#94a3b8' }}>

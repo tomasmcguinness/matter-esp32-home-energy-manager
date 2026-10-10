@@ -664,6 +664,13 @@ export const handlers = [
   }),
 
   http.get('/api/appliance/profiles', () => {
+    // Monday-first weekly pattern from [days with data, runs, Wh per run].
+    const weekdays = (rows: [number, number][], whPerRun: number) =>
+      rows.map(([days, runs]) => ({
+        days,
+        runs_per_day: days ? runs / days : 0,
+        energy_wh_per_day: days ? (runs * whPerRun) / days : 0,
+      }))
     // node_11 (Oven) and node_12 (Dishwasher, 7.5 W standby) have learned profiles;
     // node_13 (Kettle) idles at 0 W so its standby is 0; node_42 is still learning.
     return HttpResponse.json({
@@ -680,9 +687,11 @@ export const handlers = [
           days_with_data: 26,
           trained_unix: Math.floor(Date.now() / 1000) - 3600,
           window_days: 30,
+          // Mostly weekend cooking; no data at all for Tuesdays.
+          weekdays: weekdays([[4, 1], [0, 0], [4, 1], [4, 0], [4, 3], [5, 4], [5, 5]], 3400),
         },
-        { graph_id: 'node_12', trained: true, standby_w: 7.5, avg_program_power_w: 1150, std_program_power_w: 90, avg_program_len_min: 95, std_program_len_min: 12, program_count: 9, days_with_data: 26, trained_unix: Math.floor(Date.now() / 1000) - 3600, window_days: 30 },
-        { graph_id: 'node_13', trained: true, standby_w: 0, avg_program_power_w: 2900, std_program_power_w: 60, avg_program_len_min: 4, std_program_len_min: 1, program_count: 40, days_with_data: 26, trained_unix: Math.floor(Date.now() / 1000) - 3600, window_days: 30 },
+        { graph_id: 'node_12', trained: true, standby_w: 7.5, avg_program_power_w: 1150, std_program_power_w: 90, avg_program_len_min: 95, std_program_len_min: 12, program_count: 9, days_with_data: 26, trained_unix: Math.floor(Date.now() / 1000) - 3600, window_days: 30, weekdays: weekdays([[4, 2], [4, 0], [4, 2], [4, 0], [3, 1], [4, 2], [3, 2]], 1820) },
+        { graph_id: 'node_13', trained: true, standby_w: 0, avg_program_power_w: 2900, std_program_power_w: 60, avg_program_len_min: 4, std_program_len_min: 1, program_count: 40, days_with_data: 26, trained_unix: Math.floor(Date.now() / 1000) - 3600, window_days: 30, weekdays: weekdays([[4, 5], [4, 5], [4, 6], [4, 5], [3, 4], [4, 8], [3, 7]], 190) },
         {
           graph_id: 'node_42',
           trained: false,
