@@ -1399,6 +1399,7 @@ static constexpr int kUsageLookbackWeeks  = 4;
 static constexpr int kUsageRecentScanDays = 14; // how far back the fallback looks
 static constexpr int kUsageRecentMaxDays  = 7;  // stop after this many days with data
 static constexpr int kUsageMaxNames       = 32;
+static constexpr int32_t kUsageChargingMinMw = 50 * 1000; // battery intake that counts as charging
 
 // Read an hourly file into mw[] by local hour, marking the hours it covers in
 // have[] when given. Returns false if the file is absent.
@@ -1510,9 +1511,11 @@ char *node_power_logger_usage_forecast_json(const char *date_str)
     }
 
     // Scheduled battery charging from the grid: what the inverter draws from the
-    // AC side, capped at what the battery takes in so the inverter's own standby
-    // draw is left out. A charge schedule follows the tariff rather than the
-    // weekday, so this is averaged over the most recent days instead.
+    // AC side in hours when the battery is taking charge. That is the demand on
+    // the grid, conversion losses included; the battery's own reading only says
+    // whether it is charging, so the inverter's standby draw is left out. A
+    // charge schedule follows the tariff rather than the weekday, so this is
+    // averaged over the most recent days instead.
     bool have_battery = false;
     for (const auto &s : streams)
         if (strcmp(s.role, "battery") == 0) { have_battery = true; break; }
@@ -1540,8 +1543,8 @@ char *node_power_logger_usage_forecast_json(const char *date_str)
         for (int h = 0; h < 24; h++) {
             if (!have[h]) continue;
             charge_count[h]++;
-            int32_t c = inv_draw[h] < bat_charge[h] ? inv_draw[h] : bat_charge[h];
-            if (c > 0) charge_sum[h] += c;
+            if (bat_charge[h] >= kUsageChargingMinMw && inv_draw[h] > 0)
+                charge_sum[h] += inv_draw[h];
         }
     }
 
