@@ -4,7 +4,7 @@ title: Show usage forecast by appliance on the Forecast tab
 status: In Progress
 assignee: []
 created_date: '2026-10-10 13:35'
-updated_date: '2026-10-10 14:31'
+updated_date: '2026-10-10 14:41'
 labels:
   - firmware
   - web-ui
@@ -36,7 +36,7 @@ Agreed with the user:
 - [x] #5 Web app passes tsc and vite build with no new lint errors, and the compiled app is rebuilt
 - [x] #6 Firmware builds cleanly with idf.py and the max_uri_handlers count comment is updated
 - [ ] #7 On the device, / still loads, the endpoint returns today's appliances, and vtn.demand_w matches the forecast report received by the VTN
-- [ ] #8 With a battery in the topology, the chart shows a Battery charging segment at the scheduled grid-charge hours, learned from the last 7 days, and it is excluded from the Expected Today and Peak Hour figures
+- [ ] #8 With a battery in the topology, the chart shows a Battery charging segment at the scheduled grid-charge hours, learned from the last 7 days; it counts towards Peak Hour but not the Expected Today total
 <!-- AC:END -->
 
 ## Implementation Notes
@@ -49,4 +49,6 @@ Observation, not changed: the OpenADR 'gross' source (consumption_forecast_json)
 Bug found from the user's screenshot and fixed (b8e7312): the remainder added the battery's flow on top of the inverter output, but the battery hangs off the inverter so it is already included (compute_day_split uses grid + inverter only). Effect was Other = 0 while the battery charged (overnight grid charging, midday solar) and roughly doubled while it discharged. Firmware rebuilt; not yet re-checked on the device (it was unreachable from this machine).
 
 Added scheduled battery charging at the user's request (their charge window is fixed). battery_charge_w[h] = average over the last up-to-7 days with grid data of min(inverter AC-side draw, battery charge rate), from the hourly nodeh-* files; solar charging is excluded. Shown as its own green segment; kept out of the Expected Today / Peak Hour stats so the energy is not counted on the way in and again when the house uses it. Limitation: works from hourly averages and assumes the schedule is the same each night; a schedule that moves day to day would be smeared. Builds pass; not yet checked on the device.
+
+Peak Hour now includes battery charging (user reported the stat as wrong when it excluded it); Expected Today still excludes it. Web app rebuilt and committed (70b42e3).
 <!-- SECTION:NOTES:END -->
