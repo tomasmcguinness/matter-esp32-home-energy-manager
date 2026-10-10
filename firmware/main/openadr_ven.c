@@ -877,13 +877,14 @@ static bool hourly_from_json(char *json, const char *key, double out[HOURS_PER_D
     return ok;
 }
 
-// Today's forecast demand in kW per local hour (positive is import). Writes the
-// source actually used to `used`. False if no forecast is stored for the date.
-static bool forecast_demand_kw(const char *date, double kw[HOURS_PER_DAY], const char **used)
+// A day's forecast demand in kW per local hour (positive is import) for the
+// configured `source`. Writes the source actually used to `used`. False if no
+// forecast is stored for the date.
+static bool forecast_demand_kw(const char *source, const char *date, double kw[HOURS_PER_DAY], const char **used)
 {
     double w[HOURS_PER_DAY];
 
-    if (strcmp(s_run.forecast_source, "gross") != 0) {
+    if (strcmp(source, "gross") != 0) {
         if (hourly_from_json(surplus_forecast_json(date), "surplus_w", w)) {
             for (int h = 0; h < HOURS_PER_DAY; h++)
                 kw[h] = -w[h] / 1000.0;
@@ -899,6 +900,25 @@ static bool forecast_demand_kw(const char *date, double kw[HOURS_PER_DAY], const
         return false;
     for (int h = 0; h < HOURS_PER_DAY; h++)
         kw[h] = w[h] / 1000.0;
+    return true;
+}
+
+bool openadr_ven_forecast_demand_w(const char *date, double w[24], const char **source_used, bool *enabled)
+{
+    char source[sizeof(s_cfg.forecast_source)] = "net";
+    *enabled = false;
+    if (s_lock) {
+        xSemaphoreTake(s_lock, portMAX_DELAY);
+        strlcpy(source, s_cfg.forecast_source, sizeof(source));
+        *enabled = s_cfg.enabled;
+        xSemaphoreGive(s_lock);
+    }
+
+    double kw[HOURS_PER_DAY];
+    if (!forecast_demand_kw(source, date, kw, source_used))
+        return false;
+    for (int h = 0; h < HOURS_PER_DAY; h++)
+        w[h] = kw[h] * 1000.0;
     return true;
 }
 
@@ -1046,7 +1066,7 @@ static report_result_t send_forecast(time_t now)
 
     double kw[HOURS_PER_DAY];
     const char *used = "";
-    bool have = count > 0 && forecast_demand_kw(date, kw, &used);
+    bool have = count > 0 && forecast_demand_kw(s_run.forecast_source, date, kw, &used);
 
     xSemaphoreTake(s_lock, portMAX_DELAY);
     strlcpy(s_st.source_used, have ? used : "", sizeof(s_st.source_used));

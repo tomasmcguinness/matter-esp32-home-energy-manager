@@ -1923,6 +1923,48 @@ static esp_err_t forecast_surplus_get_handler(httpd_req_t *req)
     return send_err;
 }
 
+// Expected usage per appliance for a day (default today), with the demand
+// forecast the OpenADR VEN reports for that day alongside it.
+static esp_err_t forecast_usage_get_handler(httpd_req_t *req)
+{
+    char date[16] = {0};
+    size_t qlen = httpd_req_get_url_query_len(req);
+    if (qlen > 0 && qlen < 32) {
+        char query[32];
+        if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK)
+            httpd_query_key_value(query, "date", date, sizeof(date));
+    }
+    if (!date[0]) {
+        time_t now = time(NULL);
+        struct tm tm_info;
+        localtime_r(&now, &tm_info);
+        strftime(date, sizeof(date), "%Y-%m-%d", &tm_info);
+    }
+
+    char *json = node_power_logger_usage_forecast_json(date);
+    if (!json) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Bad date");
+        return ESP_FAIL;
+    }
+    cJSON *root = cJSON_Parse(json);
+    free(json);
+    if (!root) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "OOM");
+        return ESP_FAIL;
+    }
+
+    double demand_w[24];
+    const char *source = "";
+    bool enabled = false;
+    if (openadr_ven_forecast_demand_w(date, demand_w, &source, &enabled)) {
+        cJSON *vtn = cJSON_AddObjectToObject(root, "vtn");
+        cJSON_AddBoolToObject(vtn, "enabled", enabled);
+        cJSON_AddStringToObject(vtn, "source", source);
+        cJSON_AddItemToObject(vtn, "demand_w", cJSON_CreateDoubleArray(demand_w, 24));
+    }
+    return send_json(req, root, 200);
+}
+
 // Dump the trained surplus regression (slopes + per-weekday intercepts) for
 // inspection.
 static esp_err_t forecast_surplus_model_get_handler(httpd_req_t *req)
@@ -2551,7 +2593,7 @@ esp_err_t web_server_start(void)
     config.lru_purge_enable = true;
     config.uri_match_fn = uri_match_segments;
     config.stack_size = 12288;
-    config.max_uri_handlers = 64; // 59 in use: 51 here, 5 companion, 2 MCP, 1 websocket
+    config.max_uri_handlers = 64; // 60 in use: 52 here, 5 companion, 2 MCP, 1 websocket
     config.max_resp_headers = 20;
     // TCP keep-alive reaps clients that vanish without closing (sleeping tabs,
     // locked phones). Otherwise a dead WebSocket client's socket lingers and every
@@ -2599,6 +2641,7 @@ esp_err_t web_server_start(void)
     const httpd_uri_t forecast_solar_fetch = {.uri = "/api/forecast/solar/fetch", .method = HTTP_POST, .handler = forecast_solar_fetch_handler};
     const httpd_uri_t forecast_consumption_get = {.uri = "/api/forecast/consumption", .method = HTTP_GET, .handler = forecast_consumption_get_handler};
     const httpd_uri_t forecast_surplus_get = {.uri = "/api/forecast/surplus", .method = HTTP_GET, .handler = forecast_surplus_get_handler};
+    const httpd_uri_t forecast_usage_get = {.uri = "/api/forecast/usage", .method = HTTP_GET, .handler = forecast_usage_get_handler};
     const httpd_uri_t forecast_surplus_model_get = {.uri = "/api/forecast/surplus/model", .method = HTTP_GET, .handler = forecast_surplus_model_get_handler};
     const httpd_uri_t test_surplus_model_train = {.uri = "/api/test/surplus-model/train", .method = HTTP_POST, .handler = test_surplus_model_train_handler};
     const httpd_uri_t openadr_config_get = {.uri = "/api/openadr/config", .method = HTTP_GET, .handler = openadr_config_get_handler};
@@ -2652,6 +2695,7 @@ esp_err_t web_server_start(void)
     httpd_register_uri_handler(server, &forecast_consumption_get);
     httpd_register_uri_handler(server, &forecast_surplus_get);
     httpd_register_uri_handler(server, &forecast_surplus_model_get);
+    httpd_register_uri_handler(server, &forecast_usage_get);
     httpd_register_uri_handler(server, &openadr_config_get);
     httpd_register_uri_handler(server, &openadr_config_put);
     httpd_register_uri_handler(server, &openadr_status_get);

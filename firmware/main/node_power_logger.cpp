@@ -3,6 +3,7 @@
 #include "consumption_forecast.h"
 #include "value_cache.h"
 #include "tariff.h"
+#include "appliance_profile.h"   // appliance_enumerate (display names)
 #include "managers/node_manager.h"
 
 #include <stdio.h>
@@ -12,6 +13,7 @@
 #include <math.h>
 #include <dirent.h>
 #include <unistd.h>
+#include <algorithm>
 #include <string>
 #include <vector>
 #include <utility>
@@ -1386,4 +1388,153 @@ int node_power_logger_recompute_from(const char *date_str)
         }
     }
     return done;
+}
+
+// --- Usage forecast ---------------------------------------------------------
+// Expected usage for a day, per appliance and for the unmonitored remainder, as
+// the average of each stream's hourly history: the same weekday over the last
+// few weeks, or the most recent days when there is no same-weekday history yet
+// (the approach consumption_forecast takes for the grid).
+static constexpr int kUsageLookbackWeeks  = 4;
+static constexpr int kUsageRecentScanDays = 14; // how far back the fallback looks
+static constexpr int kUsageRecentMaxDays  = 7;  // stop after this many days with data
+static constexpr int kUsageMaxNames       = 32;
+
+// Read an hourly file into mw[] by local hour, marking the hours it covers in
+// have[] when given. Returns false if the file is absent.
+static bool load_hourly(const char *path, int32_t mw[24], bool have[24])
+{
+    FILE *f = fopen(path, "rb");
+    if (!f) return false;
+    power_record_t rec;
+    while (fread(&rec, sizeof(rec), 1, f) == 1) {
+        time_t t = (time_t)rec.unix_minute;
+        struct tm lt;
+        localtime_r(&t, &lt);
+        mw[lt.tm_hour] = rec.power_mw;
+        if (have) have[lt.tm_hour] = true;
+    }
+    fclose(f);
+    return true;
+}
+
+static bool has_grid_hourly(const char *date)
+{
+    char path[96];
+    snprintf(path, sizeof(path), "%s/grid-hourly-%s", SD_BASE, date);
+    return access(path, F_OK) == 0;
+}
+
+static cJSON *hourly_average_array(const double sum_mw[24], const int count[24])
+{
+    cJSON *arr = cJSON_CreateArray();
+    for (int h = 0; h < 24; h++) {
+        double w = count[h] ? sum_mw[h] / count[h] / 1000.0 : 0.0;
+        cJSON_AddItemToArray(arr, cJSON_CreateNumber(round(w * 10.0) / 10.0));
+    }
+    return arr;
+}
+
+char *node_power_logger_usage_forecast_json(const char *date_str)
+{
+    char date[16];
+    time_t day_start;
+    if (!sanitize_token(date_str, date, sizeof(date)) || strlen(date) != 10 ||
+        !local_day_start(date, &day_start))
+        return nullptr;
+
+    // History days to average: only days with grid data count, since the
+    // unmonitored remainder cannot be worked out without it.
+    std::vector<std::string> days;
+    const char *method = "same-weekday";
+    char prior[16];
+    for (int w = 1; w <= kUsageLookbackWeeks; w++)
+        if (date_add(date, -7 * w, prior, sizeof(prior)) && has_grid_hourly(prior))
+            days.emplace_back(prior);
+    if (days.empty()) {
+        method = "recent-days";
+        for (int d = 1; d <= kUsageRecentScanDays && (int)days.size() < kUsageRecentMaxDays; d++)
+            if (date_add(date, -d, prior, sizeof(prior)) && has_grid_hourly(prior))
+                days.emplace_back(prior);
+    }
+
+    const std::vector<stream_info_t> streams = snapshot_streams();
+    std::vector<size_t> loads; // indexes into streams
+    for (size_t i = 0; i < streams.size(); i++)
+        if (strcmp(streams[i].role, "load") == 0) loads.push_back(i);
+
+    std::vector<double> load_sum(loads.size() * 24, 0.0); // mW, [load * 24 + hour]
+    double other_sum[24] = {0};
+    int    count[24]     = {0};
+
+    char path[96];
+    std::vector<int32_t> load_mw(loads.size() * 24);
+    for (const auto &day : days) {
+        int32_t grid[24] = {0};
+        bool    have[24] = {false};
+        snprintf(path, sizeof(path), "%s/grid-hourly-%s", SD_BASE, day.c_str());
+        if (!load_hourly(path, grid, have)) continue;
+
+        // Solar generation and battery discharge add to what the house used.
+        int32_t supplied[24] = {0};
+        std::fill(load_mw.begin(), load_mw.end(), 0);
+        size_t k = 0;
+        for (size_t i = 0; i < streams.size(); i++) {
+            const auto &s = streams[i];
+            bool is_load = strcmp(s.role, "load") == 0;
+            if (!s.is_grid) {
+                int32_t v[24] = {0};
+                snprintf(path, sizeof(path), "%s/nodeh-%s-%s", SD_BASE, s.graph_id.c_str(), day.c_str());
+                if (load_hourly(path, v, nullptr)) {
+                    for (int h = 0; h < 24; h++) {
+                        if (is_load) load_mw[k * 24 + h] = v[h] > 0 ? v[h] : 0;
+                        else         supplied[h] += supplied_mw(v[h]);
+                    }
+                }
+            }
+            if (is_load) k++;
+        }
+
+        for (int h = 0; h < 24; h++) {
+            if (!have[h]) continue;
+            count[h]++;
+            double loads_total = 0.0;
+            for (size_t l = 0; l < loads.size(); l++) {
+                load_sum[l * 24 + h] += load_mw[l * 24 + h];
+                loads_total          += load_mw[l * 24 + h];
+            }
+            double house = (double)grid[h] + (double)supplied[h];
+            if (house > loads_total) other_sum[h] += house - loads_total; // never a negative remainder
+        }
+    }
+
+    // Display names come from the topology; fall back to the graph id.
+    auto ids   = (char (*)[APPLIANCE_ID_MAX_LEN])calloc(kUsageMaxNames, APPLIANCE_ID_MAX_LEN);
+    auto names = (char (*)[APPLIANCE_NAME_MAX_LEN])calloc(kUsageMaxNames, APPLIANCE_NAME_MAX_LEN);
+    size_t named = (ids && names) ? appliance_enumerate(ids, names, kUsageMaxNames) : 0;
+
+    cJSON *root = cJSON_CreateObject();
+    cJSON_AddStringToObject(root, "date", date);
+    cJSON_AddStringToObject(root, "method", method);
+    cJSON_AddNumberToObject(root, "days_used", (double)days.size());
+    cJSON *arr = cJSON_AddArrayToObject(root, "appliances");
+    for (size_t l = 0; l < loads.size(); l++) {
+        const std::string &gid = streams[loads[l]].graph_id;
+        const char *name = gid.c_str();
+        for (size_t i = 0; i < named; i++)
+            if (gid == ids[i]) { name = names[i]; break; }
+
+        cJSON *o = cJSON_CreateObject();
+        cJSON_AddStringToObject(o, "graph_id", gid.c_str());
+        cJSON_AddStringToObject(o, "name", name);
+        cJSON_AddItemToObject(o, "power_w", hourly_average_array(&load_sum[l * 24], count));
+        cJSON_AddItemToArray(arr, o);
+    }
+    cJSON_AddItemToObject(root, "other_w", hourly_average_array(other_sum, count));
+    free(ids);
+    free(names);
+
+    char *json = cJSON_PrintUnformatted(root);
+    cJSON_Delete(root);
+    return json; // caller must free
 }
