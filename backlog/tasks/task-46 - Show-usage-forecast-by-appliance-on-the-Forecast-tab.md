@@ -4,7 +4,7 @@ title: Show usage forecast by appliance on the Forecast tab
 status: In Progress
 assignee: []
 created_date: '2026-10-10 13:35'
-updated_date: '2026-10-10 14:41'
+updated_date: '2026-10-10 14:53'
 labels:
   - firmware
   - web-ui
@@ -51,4 +51,6 @@ Bug found from the user's screenshot and fixed (b8e7312): the remainder added th
 Added scheduled battery charging at the user's request (their charge window is fixed). battery_charge_w[h] = average over the last up-to-7 days with grid data of min(inverter AC-side draw, battery charge rate), from the hourly nodeh-* files; solar charging is excluded. Shown as its own green segment; kept out of the Expected Today / Peak Hour stats so the energy is not counted on the way in and again when the house uses it. Limitation: works from hourly averages and assumes the schedule is the same each night; a schedule that moves day to day would be smeared. Builds pass; not yet checked on the device.
 
 Peak Hour now includes battery charging (user reported the stat as wrong when it excluded it); Expected Today still excludes it. Web app rebuilt and committed (70b42e3).
+
+Battery charging now uses the inverter's AC-side draw in hours when the battery's own reading shows at least 50 W of intake (was: the smaller of the two readings), so conversion losses are included. Prompted by the user's device data: at 02:00 the bars totalled 3,273 W against a VTN figure of 3,960 W. Same data showed days_used = 1 (one Saturday of history) and Hob, Oven, Eddi and Zappi at exactly 0 in every hour. Firmware builds; not yet re-checked on the device.
 <!-- SECTION:NOTES:END -->
