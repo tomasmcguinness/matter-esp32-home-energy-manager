@@ -417,6 +417,10 @@ static int http_do(esp_http_client_method_t method, const char *path, const char
         .event_handler = http_event_handler,
         .user_data     = &buf,
         .timeout_ms    = HTTP_TIMEOUT_MS,
+        // Report a redirect instead of following it: the usual one is to
+        // https://, which this client cannot speak, and following it would
+        // hide the cause behind a failed TLS connection.
+        .disable_auto_redirect = true,
     };
     esp_http_client_handle_t client = esp_http_client_init(&cfg);
     if (!client) {
@@ -509,12 +513,19 @@ static int vtn_call(esp_http_client_method_t method, const char *path, const cha
     return http_do(method, path, "application/json", json_body, true, out);
 }
 
+static bool is_redirect(int status)
+{
+    return status == 301 || status == 302 || status == 303 || status == 307 || status == 308;
+}
+
 // Turn a failed VTN call into the right recovery: re-authenticate after a 401,
 // forget the cached IDs and register again after a 404, otherwise retry `resume`.
 static void fail_http(ven_state_t resume, const char *what, int status)
 {
     if (status == VTN_NO_RESPONSE) {
         fail(resume, "%s: no response from VTN", what);
+    } else if (is_redirect(status)) {
+        fail(resume, "%s: HTTP %d, the VTN is redirecting (to https?), which is not supported", what, status);
     } else if (status == VTN_NO_TOKEN) {
         fail(STATE_AUTHENTICATING, "%s: could not get a token from the VTN", what);
     } else if (status == 401) {
@@ -620,6 +631,8 @@ static TickType_t step_authenticate(void)
     if (status != 200) {
         if (status == -1)
             fail(STATE_AUTHENTICATING, "POST /auth/token: no response from VTN");
+        else if (is_redirect(status))
+            fail_http(STATE_AUTHENTICATING, "POST /auth/token", status);
         else
             fail(STATE_AUTHENTICATING, "POST /auth/token: HTTP %d", status);
         return 0;
