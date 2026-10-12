@@ -13,6 +13,7 @@
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 
+#include "esp_crt_bundle.h"
 #include "esp_heap_caps.h"
 #include "esp_http_client.h"
 #include "esp_log.h"
@@ -119,6 +120,7 @@ static volatile bool     s_resync_pending;   // a notification arrived
 static ven_config_t s_run;                   // config snapshot the state machine is running with
 static char        *s_token;
 static esp_mqtt_client_handle_t s_mqtt;
+static volatile bool s_mqtt_error_logged;     // set on the esp-mqtt task
 static time_t       s_mqtt_deadline;
 static uint32_t     s_sub_gen;               // connection generation the ven topics were subscribed on
 static uint32_t     s_program_sub_gen;       // ... and the program topic
@@ -389,8 +391,20 @@ static void url_encode(const char *in, char *out, size_t len)
     out[o] = '\0';
 }
 
-// One request to the VTN. Returns the HTTP status, or -1 if there was no
-// response. *out (if not NULL) receives the NUL-terminated body, allocated in
+// Why the last http_do() got no response, for the error shown to the user.
+static char s_http_err[72];
+
+static void http_err_set(esp_err_t err, int tls_flags)
+{
+    if (tls_flags)
+        snprintf(s_http_err, sizeof(s_http_err), "%s, certificate flags 0x%x", esp_err_to_name(err), (unsigned)tls_flags);
+    else
+        strlcpy(s_http_err, esp_err_to_name(err), sizeof(s_http_err));
+}
+
+// One request to the VTN, over TLS if the base URL is https://, with the server
+// checked against the built-in CA bundle. Returns the HTTP status, or -1 if
+// there was no response (s_http_err then says why). *out (if not NULL) receives the NUL-terminated body, allocated in
 // PSRAM; the caller frees it.
 static int http_do(esp_http_client_method_t method, const char *path, const char *content_type,
                    const char *body, bool auth, char **out)
@@ -408,8 +422,10 @@ static int http_do(esp_http_client_method_t method, const char *path, const char
         .data = heap_caps_malloc(RESP_INITIAL_CAP + 1, MALLOC_CAP_SPIRAM),
         .cap  = RESP_INITIAL_CAP,
     };
-    if (!buf.data)
+    if (!buf.data) {
+        http_err_set(ESP_ERR_NO_MEM, 0);
         return -1;
+    }
 
     esp_http_client_config_t cfg = {
         .url           = url,
@@ -417,14 +433,16 @@ static int http_do(esp_http_client_method_t method, const char *path, const char
         .event_handler = http_event_handler,
         .user_data     = &buf,
         .timeout_ms    = HTTP_TIMEOUT_MS,
-        // Report a redirect instead of following it: the usual one is to
-        // https://, which this client cannot speak, and following it would
-        // hide the cause behind a failed TLS connection.
+        .crt_bundle_attach = esp_crt_bundle_attach, // only used for https://
+        // Report a redirect instead of following it: the VEN should not send
+        // its credentials to wherever the redirect points, and the user needs
+        // to know the base URL is wrong.
         .disable_auto_redirect = true,
     };
     esp_http_client_handle_t client = esp_http_client_init(&cfg);
     if (!client) {
         free(buf.data);
+        http_err_set(ESP_ERR_NO_MEM, 0);
         return -1;
     }
 
@@ -438,11 +456,15 @@ static int http_do(esp_http_client_method_t method, const char *path, const char
 
     esp_err_t err = esp_http_client_perform(client);
     int status = esp_http_client_get_status_code(client);
+    int tls_flags = 0;
+    esp_err_t tls_err = esp_http_client_get_and_clear_last_tls_error(client, NULL, &tls_flags);
     esp_http_client_cleanup(client);
     free(bearer);
 
     if (err != ESP_OK) {
-        ESP_LOGW(TAG, "%s failed: %s", url, esp_err_to_name(err));
+        // The TLS layer's error says more than the client's "connect failed".
+        http_err_set(tls_err != ESP_OK && tls_err != ESP_FAIL ? tls_err : err, tls_flags);
+        ESP_LOGW(TAG, "%s failed: %s", url, s_http_err);
         free(buf.data);
         return -1;
     }
@@ -466,8 +488,10 @@ static int authenticate(void)
     url_encode(s_run.client_secret, secret, sizeof(secret));
 
     char *form = NULL;
-    if (asprintf(&form, "grant_type=client_credentials&client_id=%s&client_secret=%s", id, secret) < 0)
+    if (asprintf(&form, "grant_type=client_credentials&client_id=%s&client_secret=%s", id, secret) < 0) {
+        http_err_set(ESP_ERR_NO_MEM, 0);
         return -1;
+    }
 
     char *resp = NULL;
     int status = http_do(HTTP_METHOD_POST, "/auth/token", "application/x-www-form-urlencoded", form, false, &resp);
@@ -479,8 +503,10 @@ static int authenticate(void)
         if (cJSON_IsString(tok) && tok->valuestring[0])
             s_token = strdup(tok->valuestring);
         cJSON_Delete(json);
-        if (!s_token)
+        if (!s_token) {
+            http_err_set(ESP_ERR_INVALID_RESPONSE, 0);
             status = -1;
+        }
     }
     free(resp);
     return status;
@@ -523,9 +549,9 @@ static bool is_redirect(int status)
 static void fail_http(ven_state_t resume, const char *what, int status)
 {
     if (status == VTN_NO_RESPONSE) {
-        fail(resume, "%s: no response from VTN", what);
+        fail(resume, "%s: no response from VTN (%s)", what, s_http_err);
     } else if (is_redirect(status)) {
-        fail(resume, "%s: HTTP %d, the VTN is redirecting (to https?), which is not supported", what, status);
+        fail(resume, "%s: HTTP %d redirect; if the VTN now requires HTTPS, change its base URL to https://", what, status);
     } else if (status == VTN_NO_TOKEN) {
         fail(STATE_AUTHENTICATING, "%s: could not get a token from the VTN", what);
     } else if (status == 401) {
@@ -563,6 +589,7 @@ static void mqtt_event_handler(void *arg, esp_event_base_t base, int32_t event_i
 
     switch ((esp_mqtt_event_id_t)event_id) {
     case MQTT_EVENT_CONNECTED:
+        s_mqtt_error_logged = false;
         s_mqtt_connected = true;
         s_mqtt_conn_gen++;
         activity_add("mqtt", "Connected to broker");
@@ -573,6 +600,22 @@ static void mqtt_event_handler(void *arg, esp_event_base_t base, int32_t event_i
         if (s_mqtt_connected) {
             s_mqtt_connected = false;
             activity_add("mqtt", "Disconnected from broker");
+        }
+        break;
+    case MQTT_EVENT_ERROR:
+        // Repeats on every reconnect attempt; say why once per outage.
+        if (!s_mqtt_error_logged && event->error_handle) {
+            const esp_mqtt_error_codes_t *e = event->error_handle;
+            s_mqtt_error_logged = true;
+            if (e->error_type == MQTT_ERROR_TYPE_CONNECTION_REFUSED)
+                activity_add("mqtt", "Broker refused the connection (code %d)", (int)e->connect_return_code);
+            else if (e->esp_tls_cert_verify_flags)
+                activity_add("mqtt", "Broker connection failed: %s, certificate flags 0x%x",
+                             esp_err_to_name(e->esp_tls_last_esp_err), (unsigned)e->esp_tls_cert_verify_flags);
+            else if (e->esp_tls_last_esp_err != ESP_OK)
+                activity_add("mqtt", "Broker connection failed: %s", esp_err_to_name(e->esp_tls_last_esp_err));
+            else
+                activity_add("mqtt", "Broker connection failed (socket error %d)", e->esp_transport_sock_errno);
         }
         break;
     case MQTT_EVENT_DATA:
@@ -630,7 +673,7 @@ static TickType_t step_authenticate(void)
     int status = authenticate();
     if (status != 200) {
         if (status == -1)
-            fail(STATE_AUTHENTICATING, "POST /auth/token: no response from VTN");
+            fail(STATE_AUTHENTICATING, "POST /auth/token: no response from VTN (%s)", s_http_err);
         else if (is_redirect(status))
             fail_http(STATE_AUTHENTICATING, "POST /auth/token", status);
         else
@@ -734,10 +777,14 @@ static TickType_t step_connect_mqtt(void)
             }
         }
 
+        // mqtts:// is checked against the built-in CA bundle, as HTTPS is;
+        // the bundle is not used for mqtt://.
         esp_mqtt_client_config_t cfg = {
-            .broker.address.uri    = uri,
-            .credentials.client_id = s_run.ven_name,
+            .broker.address.uri                    = uri,
+            .broker.verification.crt_bundle_attach = esp_crt_bundle_attach,
+            .credentials.client_id                 = s_run.ven_name,
         };
+        s_mqtt_error_logged = false;
         s_mqtt = esp_mqtt_client_init(&cfg);
         if (!s_mqtt || esp_mqtt_client_register_event(s_mqtt, ESP_EVENT_ANY_ID, mqtt_event_handler, NULL) != ESP_OK ||
             esp_mqtt_client_start(s_mqtt) != ESP_OK) {
@@ -1376,8 +1423,8 @@ esp_err_t openadr_ven_config_update(const cJSON *body)
         default_ven_name(cfg.ven_name, sizeof(cfg.ven_name));
     if (strcmp(cfg.forecast_source, "net") != 0 && strcmp(cfg.forecast_source, "gross") != 0)
         return ESP_ERR_INVALID_ARG;
-    // The VTN is reached over plain HTTP; there is no TLS setup here.
-    if (cfg.vtn_base_url[0] && strncmp(cfg.vtn_base_url, "http://", 7) != 0)
+    if (cfg.vtn_base_url[0] && strncmp(cfg.vtn_base_url, "http://", 7) != 0 &&
+        strncmp(cfg.vtn_base_url, "https://", 8) != 0)
         return ESP_ERR_INVALID_ARG;
 
     esp_err_t err = config_save(&cfg);
