@@ -134,9 +134,9 @@ function ConfigCard() {
 
         <div className="mb-3">
           <label className="form-label" htmlFor="openadr-url">VTN base URL</label>
-          <input className="form-control" id="openadr-url" type="url" placeholder="http://192.168.1.10:5000"
+          <input className="form-control" id="openadr-url" type="url" placeholder="https://vtn.example.com"
             value={config.vtn_base_url} onChange={e => update('vtn_base_url', e.target.value)} />
-          <div className="form-text">Plain http:// only.</div>
+          <div className="form-text">http:// or https://. An HTTPS VTN needs a hostname with a publicly trusted certificate.</div>
         </div>
 
         <div className="row">
@@ -174,6 +174,7 @@ function ConfigCard() {
           <label className="form-label" htmlFor="openadr-mqtt-host">MQTT host override <span style={{ color: '#6c757d' }}>(optional)</span></label>
           <input className="form-control" id="openadr-mqtt-host" placeholder="Taken from the VTN when empty"
             value={config.mqtt_host_override} onChange={e => update('mqtt_host_override', e.target.value)} />
+          <div className="form-text">A host name, or a full mqtt:// or mqtts:// URI.</div>
         </div>
 
         <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
