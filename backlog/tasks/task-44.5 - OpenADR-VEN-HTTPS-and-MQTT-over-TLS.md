@@ -4,7 +4,7 @@ title: 'OpenADR VEN: HTTPS and MQTT over TLS'
 status: In Progress
 assignee: []
 created_date: '2026-10-12 18:37'
-updated_date: '2026-10-13 15:44'
+updated_date: '2026-10-13 15:48'
 labels:
   - openadr
 dependencies: []
@@ -31,6 +31,7 @@ This lifts the "plain HTTP, no TLS" assumption in TASK-44. An HTTPS VTN must be 
 - [ ] #5 An http:// URL for a VTN that redirects to https shows a message naming the redirect, not 'no response'
 - [ ] #6 A failed connection (for example an untrusted certificate) shows an error that names the underlying failure
 - [ ] #7 An http:// VTN base URL is still accepted
+- [ ] #8 After the bearer token expires, the VEN keeps reporting every hour with no manual reset (check over at least two token lifetimes)
 <!-- AC:END -->
 
 ## Implementation Notes
@@ -43,4 +44,6 @@ NOT run on the device: AC #3-#7 are unverified and need a flash plus the VTN's h
 2026-10-13: on the device with https://vtn.tomasmcguinness.com the VEN registered, connected MQTT and posted a report (HTTP 201 at 06:40 UTC+1), so AC #3 holds. It then stuck in BACKOFF with 'POST /reports: no response from VTN (ESP_ERR_NOT_SUPPORTED)'. Cause: the bearer token expired and the VTN returned 401; esp_http_client intercepts a 401 to answer with Basic/Digest auth and returns ESP_ERR_NOT_SUPPORTED when it cannot, so http_do() returned -1 instead of 401 and vtn_call()'s re-authentication never ran. Fixed by passing a 401 through. This bug predates HTTPS; the demo VTN never expired tokens. Builds; not yet flashed, so recovery after token expiry is unverified. AC #4 seen for whichever scheme /notifiers returned (MQTT connected); the scheme was not recorded.
 
 Correction: the last successful report was at 07:00:08 BST on 2026-10-13, not 06:40.
+
+2026-10-13: user requirement: the VEN must keep working without human intervention. Added on top of the 401 fix: (1) the token's expires_in is honoured and the token replaced 60 s before expiry (no lifetime given = wait for a 401); (2) after 3 consecutive fail() calls the token is dropped and the state machine resumes from AUTHENTICATING, which is what Reset/Save does short of clearing cached IDs (discovery refreshes those anyway); (3) the backoff and failure count now reset only on a successful report or a restart, not on reaching RUNNING, so a persistent report failure settles at one attempt per 300 s instead of looping quickly through re-registration. Builds (0x24a920); not flashed, unverified on the device.
 <!-- SECTION:NOTES:END -->
