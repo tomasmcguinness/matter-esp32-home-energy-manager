@@ -461,6 +461,12 @@ static int http_do(esp_http_client_method_t method, const char *path, const char
     esp_http_client_cleanup(client);
     free(bearer);
 
+    // The client treats a 401 as its own to answer with Basic or Digest
+    // credentials and fails when it cannot; here a 401 means the bearer token
+    // has expired, which vtn_call() handles.
+    if (err != ESP_OK && status == 401)
+        err = ESP_OK;
+
     if (err != ESP_OK) {
         // The TLS layer's error says more than the client's "connect failed".
         http_err_set(tls_err != ESP_OK && tls_err != ESP_FAIL ? tls_err : err, tls_flags);
