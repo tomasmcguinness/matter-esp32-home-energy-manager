@@ -41,4 +41,6 @@ This lifts the "plain HTTP, no TLS" assumption in TASK-44. An HTTPS VTN must be 
 NOT run on the device: AC #3-#7 are unverified and need a flash plus the VTN's hostname (https by bare IP fails the handshake). Also unchecked on hardware: VEN task stack headroom during a TLS handshake (VEN_TASK_STACK is 10240). Each REST call opens a new TLS session; no connection reuse.
 
 2026-10-13: on the device with https://vtn.tomasmcguinness.com the VEN registered, connected MQTT and posted a report (HTTP 201 at 06:40 UTC+1), so AC #3 holds. It then stuck in BACKOFF with 'POST /reports: no response from VTN (ESP_ERR_NOT_SUPPORTED)'. Cause: the bearer token expired and the VTN returned 401; esp_http_client intercepts a 401 to answer with Basic/Digest auth and returns ESP_ERR_NOT_SUPPORTED when it cannot, so http_do() returned -1 instead of 401 and vtn_call()'s re-authentication never ran. Fixed by passing a 401 through. This bug predates HTTPS; the demo VTN never expired tokens. Builds; not yet flashed, so recovery after token expiry is unverified. AC #4 seen for whichever scheme /notifiers returned (MQTT connected); the scheme was not recorded.
+
+Correction: the last successful report was at 07:00:08 BST on 2026-10-13, not 06:40.
 <!-- SECTION:NOTES:END -->
