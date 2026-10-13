@@ -45,6 +45,8 @@
 #define REPORT_DELAY_S         5     // post this long after the top of the hour
 #define BACKOFF_INITIAL_S      5
 #define BACKOFF_MAX_S          300
+#define FAILS_BEFORE_REAUTH    3     // consecutive failures before starting again from authentication
+#define TOKEN_EXPIRY_MARGIN_S  60    // refresh the token this long before it expires
 
 // vtn_call() results that are not HTTP statuses.
 #define VTN_NO_RESPONSE (-1)
@@ -119,6 +121,7 @@ static volatile bool     s_resync_pending;   // a notification arrived
 // Everything below is owned by the VEN task.
 static ven_config_t s_run;                   // config snapshot the state machine is running with
 static char        *s_token;
+static time_t       s_token_expiry;          // when to replace s_token; 0 if the VTN gave no lifetime
 static esp_mqtt_client_handle_t s_mqtt;
 static volatile bool s_mqtt_error_logged;     // set on the esp-mqtt task
 static time_t       s_mqtt_deadline;
@@ -128,6 +131,7 @@ static char         s_program_sub_id[64];
 static char         s_program_target[96];    // e.g. "PROGRAM_NAME:HomeForecast", from the ven's targets
 static ven_state_t  s_resume_state;
 static int          s_backoff_s = BACKOFF_INITIAL_S;
+static int          s_fail_count;            // consecutive fail() calls since the last success
 static time_t       s_forecast_hour;         // hour (UTC start) the forecast was last posted for
 static time_t       s_actual_hour;
 static bool         s_send_now;
@@ -234,6 +238,15 @@ static void fail(ven_state_t resume, const char *fmt, ...)
     vsnprintf(msg, sizeof(msg), fmt, ap);
     va_end(ap);
 
+    // Whatever keeps failing, starting again with a new token is what a manual
+    // reset would do, so do it without being asked.
+    if (++s_fail_count >= FAILS_BEFORE_REAUTH && resume != STATE_AUTHENTICATING) {
+        s_fail_count = 0;
+        free(s_token);
+        s_token = NULL;
+        resume = STATE_AUTHENTICATING;
+        activity_add("info", "Failed %d times in a row, starting again from authentication", FAILS_BEFORE_REAUTH);
+    }
     s_resume_state = resume;
 
     xSemaphoreTake(s_lock, portMAX_DELAY);
@@ -508,6 +521,9 @@ static int authenticate(void)
         const cJSON *tok = cJSON_GetObjectItem(json, "access_token");
         if (cJSON_IsString(tok) && tok->valuestring[0])
             s_token = strdup(tok->valuestring);
+        const cJSON *life = cJSON_GetObjectItem(json, "expires_in");
+        s_token_expiry = cJSON_IsNumber(life) && life->valuedouble > 2 * TOKEN_EXPIRY_MARGIN_S
+                             ? time(NULL) + (time_t)life->valuedouble - TOKEN_EXPIRY_MARGIN_S : 0;
         cJSON_Delete(json);
         if (!s_token) {
             http_err_set(ESP_ERR_INVALID_RESPONSE, 0);
@@ -519,12 +535,17 @@ static int authenticate(void)
 }
 
 // An authenticated call. Returns the HTTP status, VTN_NO_RESPONSE or
-// VTN_NO_TOKEN. On 401 the token is refreshed and the call retried once; a
-// second 401 is returned to the caller as a hard error.
+// VTN_NO_TOKEN. A token close to its stated expiry is replaced first. On 401
+// the token is refreshed and the call retried once; a second 401 is returned
+// to the caller as a hard error.
 static int vtn_call(esp_http_client_method_t method, const char *path, const char *json_body, char **out)
 {
     if (out)
         *out = NULL;
+    if (s_token && s_token_expiry && time(NULL) >= s_token_expiry) {
+        free(s_token);
+        s_token = NULL;
+    }
     if (!s_token) {
         int st = authenticate();
         if (st != 200)
@@ -910,7 +931,8 @@ static TickType_t step_discover(void)
     cached_id_set("event_id", s_st.event_id, sizeof(s_st.event_id), event_id);
     cJSON_Delete(json);
 
-    s_backoff_s = BACKOFF_INITIAL_S;
+    // The backoff is only relaxed by a report that gets through (or a restart),
+    // so a VTN that accepts everything but the report is not retried in a tight loop.
     set_last_error("");
     set_state(STATE_RUNNING);
     return 0;
@@ -1091,6 +1113,7 @@ static report_result_t report_post(cJSON *root, const char *label)
     if (status == 201 || status == 200) {
         s_retried_after_404 = false;
         s_backoff_s = BACKOFF_INITIAL_S;
+        s_fail_count = 0;
         set_last_error("");
         activity_add("report", "%s: HTTP %d", label, status);
         return REPORT_SENT;
@@ -1258,6 +1281,7 @@ static void restart(void)
     xSemaphoreGive(s_lock);
 
     s_backoff_s         = BACKOFF_INITIAL_S;
+    s_fail_count        = 0;
     s_forecast_hour     = 0; // post a forecast as soon as the VEN is running again
     s_send_now          = false;
     s_retried_after_404 = false;
