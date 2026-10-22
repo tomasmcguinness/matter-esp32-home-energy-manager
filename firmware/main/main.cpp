@@ -213,7 +213,9 @@ extern "C" void app_main(void)
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
 
-    ESP_ERROR_CHECK(sd_card_init());
+    esp_err_t sd_err = sd_card_init();
+    if (sd_err != ESP_OK)
+        ESP_LOGW(TAG, "Continuing without SD card: %s", esp_err_to_name(sd_err));
 
     ESP_ERROR_CHECK(node_manager_init());
     ESP_ERROR_CHECK(device_manager_init());
