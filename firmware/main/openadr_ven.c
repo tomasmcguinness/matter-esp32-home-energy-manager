@@ -774,7 +774,8 @@ static TickType_t step_register_ven(void)
 }
 
 // Contract steps 3 and 4: connect to the broker from GET /notifiers (client ID
-// = venName), then subscribe to the ven's own event and program topics.
+// = venName), then subscribe to the ven's own event and program topics. A VTN
+// that offers no broker sends no notifications, so this step is skipped.
 static TickType_t step_connect_mqtt(void)
 {
     if (!s_mqtt) {
@@ -799,7 +800,9 @@ static TickType_t step_connect_mqtt(void)
                 strlcpy(uri, first->valuestring, sizeof(uri));
             cJSON_Delete(json);
             if (!uri[0]) {
-                fail(STATE_CONNECTING_MQTT, "GET /notifiers: no MQTT broker offered");
+                // No broker means no notifications: carry on and just push reports.
+                activity_add("info", "VTN offers no MQTT broker, continuing without notifications");
+                set_state(STATE_DISCOVERING);
                 return 0;
             }
         }
@@ -895,8 +898,8 @@ static TickType_t step_discover(void)
     cached_id_set("program_id", s_st.program_id, sizeof(s_st.program_id), program_id);
     cJSON_Delete(json);
 
-    // Subscribe to the program's event topic once per connection.
-    if (s_program_sub_gen != s_sub_gen || strcmp(s_program_sub_id, s_st.program_id) != 0) {
+    // Subscribe to the program's event topic once per connection, if there is one.
+    if (s_mqtt && (s_program_sub_gen != s_sub_gen || strcmp(s_program_sub_id, s_st.program_id) != 0)) {
         snprintf(path, sizeof(path), "/notifiers/mqtt/topics/programs/%s/events", s_st.program_id);
         if (!subscribe_from(path))
             return 0;
