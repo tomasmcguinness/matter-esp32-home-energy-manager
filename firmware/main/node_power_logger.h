@@ -20,6 +20,10 @@
 //   node hourly file : /sdcard/nodeh-<graphId>-YYYY-MM-DD
 //   grid minute file : /sdcard/grid-YYYY-MM-DD
 //   grid hourly file : /sdcard/grid-hourly-YYYY-MM-DD
+//
+// The same flush appends the state of any appliance device linked to an appliance
+// node (operational state, program, phase) to /sdcard/state-<graphId>-YYYY-MM-DD;
+// see appliance_state.h.
 
 #ifdef __cplusplus
 extern "C" {

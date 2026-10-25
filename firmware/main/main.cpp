@@ -22,6 +22,7 @@
 #include "sd_card.h"
 #include "solar_forecast.h"
 #include "node_power_logger.h"
+#include "appliance_state.h"
 #include "tariff.h"
 #include "commodity_price.h"
 #include "openadr_ven.h"
@@ -218,6 +219,7 @@ extern "C" void app_main(void)
 
     ESP_ERROR_CHECK(node_manager_init());
     ESP_ERROR_CHECK(device_manager_init());
+    appliance_state_refresh_links(false);
     matter_controller_seed_value_cache();
     ESP_ERROR_CHECK(node_power_logger_init());
     ESP_ERROR_CHECK(tariff_init());

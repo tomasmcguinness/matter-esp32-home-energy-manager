@@ -64,6 +64,7 @@ Core principle: **the handle IS the role.** Roles are not stored as device metad
 - Per-day, per-stream files: `consumption-YYYY-MM-DD`, `solar-actual-*`, `solar-forecast-*`, `consumption-forecast-*`. Append-only, SD-card friendly. Compact binary preferred over CSV. Buffer in RAM and flush periodically to limit SD wear.
 - Log actuals at 1-min resolution; **predict at 15-min** and upsample for display/scheduling. 1-min prediction is dominated by unpredictable switching noise.
 - The CU's unmonitored remainder (sum of inputs − monitored circuits) is the baseload. Synthesize it as its own series; it is the most predictable input to the model.
+- An appliance node may also link a commissioned Matter appliance (`settings.device`: a Dishwasher 0x0075 or Laundry Washer 0x0073 endpoint, e.g. from matter-appliance-bridge). The meter in `settings.nodeId/endpointId` stays the power source. The HEM subscribes to the device's Operational State and Mode cluster and logs `state-<graphId>-YYYY-MM-DD` per minute (`appliance_state_record_t`: op state, program id, phase). Program ids come from a per-appliance catalogue keyed by mode **label** (`programs-<graphId>`), because bridges renumber modes. See `firmware/main/appliance_state.{cpp,h}`.
 
 ### Forecasting
 
@@ -78,12 +79,14 @@ Core principle: **the handle IS the role.** Roles are not stored as device metad
 - **Consumption baseline (fallback):** "same weekday, averaged over the last N weeks" — `consumption_forecast.c`. Feeds the cold-start `solar − consumption` fallback.
 - Next step if the linear model underperforms: gradient boosting (per time-of-day bucket) with lag + weather + calendar features. On-device inference, off-device training.
 - Realistic accuracy: 15–30% MAPE on hourly consumption. Daily totals predict far better than hourly shape.
+- **Per-program appliance profiles:** for an appliance linked to a Matter appliance, nightly profiling bounds cycles by Operational State (Running/Paused) on days with a state log, and tags each cycle with its program. It keeps per-program stats (runs, power, length, energy, weekday runs) beside the all-cycles stats (`appliance_profile.{c,h}`, profile version 3; version 2 still loads).
 
 ### Scheduler
 
 - Appliance profiles have **shape** (a power vector over the cycle), not flat power × time. Learn mean + stddev per appliance; optionally cluster by program (eco/intensive).
 - Optimise by sliding the appliance power profile across the predicted surplus curve, maximising self-consumption `Σ min(profile[i], surplus[t+i])` subject to earliest/latest-start constraints.
 - Output is a window ("run the dishwasher 13:00–15:00").
+- A linked appliance is sized from one program's profile: the program selected on the machine (today, not already running), else the program run most on that weekday, else all cycles. Each run reports `program` and `program_source` (`selected` / `weekday` / `all`). A program needs 3 learned runs before it is used.
 - For dishwasher/washer: **delay-start only** — never mid-cycle pause a machine full of water. The shim advertises these as deferrable-but-not-pausable in its DEM forecast.
 
 ### Build order

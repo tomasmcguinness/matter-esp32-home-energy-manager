@@ -21,6 +21,7 @@ idf_component_register(SRCS
         "openadr_slots.c"
         "openadr_ven.c"
         "appliance_profile.c"
+        "appliance_state.cpp"
         "scheduler.c"
         "commands/pairing_command.cpp"
         "commands/commissioning_window_command.cpp"

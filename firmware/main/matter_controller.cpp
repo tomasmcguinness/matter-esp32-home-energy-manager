@@ -21,6 +21,7 @@
 #include "ws_server.h"
 #include "value_cache.h"
 #include "tariff.h"
+#include "appliance_state.h"
 #include "commodity_price.h"
 #include "cJSON.h"
 
@@ -592,6 +593,10 @@ void matter_controller_attribute_data_cb(uint64_t node_id,
     }
     else if (path.mClusterId == CommodityPrice::Id) {
         commodity_price_on_attribute(node_id, path, data);
+    }
+    else if (path.mClusterId == OperationalState::Id || path.mClusterId == DishwasherMode::Id ||
+             path.mClusterId == LaundryWasherMode::Id || path.mClusterId == BridgedDeviceBasicInformation::Id) {
+        appliance_state_on_attribute(node_id, path, data);
     }
 
     return;

@@ -4,6 +4,7 @@
 #include "value_cache.h"
 #include "tariff.h"
 #include "appliance_profile.h"   // appliance_enumerate (display names)
+#include "appliance_state.h"     // per-minute state log of linked appliance devices
 #include "managers/node_manager.h"
 
 #include <stdio.h>
@@ -285,6 +286,9 @@ static void on_flush_timer(void *arg)
             write_record("soc", p.graph_id.c_str(), &soc);
         }
     }
+
+    // Linked appliance devices log their state alongside the minute's power.
+    appliance_state_log_minute();
 
     // Pick up topology edits for the next minute.
     refresh_streams();

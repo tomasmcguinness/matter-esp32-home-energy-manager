@@ -1,4 +1,6 @@
 import { useEffect, useState } from 'react'
+import { LinkedDeviceSelect } from './LinkedDeviceSelect'
+import { linkedDeviceFromSettings, type LinkedDevice } from './linkedDevice'
 
 const ELECTRICAL_SENSOR_DEVICE_TYPE_ID = 0x0510
 
@@ -24,7 +26,8 @@ type Props = {
 }
 
 // Edits an existing topology node in place: its name and, for a load, which
-// electrical-sensor endpoint meters it. The graph node id, position and edges are
+// electrical-sensor endpoint meters it and which Matter appliance (if any) is
+// linked to it. The graph node id, position and edges are
 // untouched, so learned data keyed by the node id survives a device swap.
 export function EditNodeModal({ nodeId, settings, hasDevice, onSave, onCancel }: Props) {
   const currentNodeId = typeof settings.nodeId === 'number' ? settings.nodeId : undefined
@@ -37,6 +40,7 @@ export function EditNodeModal({ nodeId, settings, hasDevice, onSave, onCancel }:
   const [sensors, setSensors] = useState<SensorOption[]>(current ? [current] : [])
   const [selectedKey, setSelectedKey] = useState(current ? sensorKey(current.nodeId, current.endpointId) : '')
   const [name, setName] = useState((typeof settings.name === 'string' && settings.name) || currentLabel)
+  const [linkedDevice, setLinkedDevice] = useState<LinkedDevice | null>(() => linkedDeviceFromSettings(settings))
   const [loading, setLoading] = useState(hasDevice)
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState(false)
@@ -71,6 +75,10 @@ export function EditNodeModal({ nodeId, settings, hasDevice, onSave, onCancel }:
     const next: NodeSettings = hasDevice && selected
       ? { ...settings, name: trimmedName || selected.label, label: selected.label, nodeId: selected.nodeId, endpointId: selected.endpointId }
       : { ...settings, label: trimmedName }
+    if (hasDevice) {
+      if (linkedDevice) next.device = linkedDevice
+      else delete next.device
+    }
 
     setSaving(true)
     setError(false)
@@ -125,6 +133,13 @@ export function EditNodeModal({ nodeId, settings, hasDevice, onSave, onCancel }:
                       ))}
                     </select>
                   )}
+                </div>
+              )}
+              {hasDevice && (
+                <div className="mb-3">
+                  <label htmlFor="editNodeLinkedDevice" className="form-label">Linked Appliance (optional)</label>
+                  <LinkedDeviceSelect id="editNodeLinkedDevice" className="form-select" value={linkedDevice} onChange={setLinkedDevice} />
+                  <div className="form-text">A Matter dishwasher or washing machine. Its program and phase are learned alongside the power.</div>
                 </div>
               )}
               {error && <p className="text-danger small mb-0">Couldn't save the change. Try again.</p>}

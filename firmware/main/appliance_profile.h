@@ -9,7 +9,22 @@ extern "C" {
 #endif
 
 #define APPLIANCE_PROFILE_MAGIC   0x41505231u  // "APR1"
-#define APPLIANCE_PROFILE_VERSION 2
+#define APPLIANCE_PROFILE_VERSION 3            // 3 added the per-program stats; 2 still loads
+#define APPLIANCE_PROFILE_PROGRAMS 8           // per-program entries kept (most runs first)
+
+// Stats for one program of an appliance linked to a Matter appliance device.
+// program_id is the appliance's catalogue id (see appliance_state.h).
+typedef struct {
+    uint8_t  program_id;
+    uint8_t  reserved;
+    uint16_t runs;                 // cycles of this program in the window
+    int32_t  avg_power_mw;         // mean power while running
+    int32_t  std_power_mw;
+    uint32_t avg_len_min;          // mean cycle length (minutes)
+    uint32_t std_len_min;
+    uint32_t avg_energy_mwh;       // mean energy per cycle
+    uint16_t dow_runs[7];          // cycles on each weekday, by tm_wday (0 = Sunday)
+} appliance_program_profile_t;
 
 // Learned per-appliance usage profile, derived nightly from a rolling window of
 // the appliance's per-minute power history (/sdcard/node-<graphId>-*). The
@@ -20,6 +35,11 @@ extern "C" {
 // standby. Program stats are the mean and stddev across all cycles in the window.
 // The dow_* arrays break the same cycles down by the weekday they ran on, indexed
 // by tm_wday (0 = Sunday), to show when in the week the appliance is used.
+//
+// When the appliance is linked to a Matter appliance device, days with a state
+// log (/sdcard/state-<graphId>-*) bound each cycle by the device's Operational
+// State instead of the power thresholds, and tag it with the program it ran.
+// programs[] then holds the stats per program; program_entries is 0 otherwise.
 // Persisted to /sdcard/profile-<graphId>.
 typedef struct {
     uint32_t magic;                // APPLIANCE_PROFILE_MAGIC
@@ -36,6 +56,10 @@ typedef struct {
     uint16_t dow_days[7];          // days of each weekday that had any minute records
     uint16_t dow_runs[7];          // cycles detected on each weekday
     uint32_t dow_energy_mwh[7];    // energy drawn by those cycles (mWh)
+    // Version 3 onwards. Zeroed when a version 2 profile is loaded.
+    uint8_t  program_entries;      // valid entries in programs[]
+    uint8_t  reserved[3];
+    appliance_program_profile_t programs[APPLIANCE_PROFILE_PROGRAMS];
 } appliance_profile_t;
 
 // Analyse one appliance's last window_days of per-minute history, derive its
@@ -75,9 +99,16 @@ bool appliance_is_excluded(const char *graph_id);
 // Shape: {"trained":bool,"graph_id":"..","standby_w":F,"avg_program_power_w":F,
 //   "std_program_power_w":F,"avg_program_len_min":N,"std_program_len_min":N,
 //   "program_count":N,"days_with_data":N,"trained_unix":N,"window_days":N,
-//   "weekdays":[{"days":N,"runs_per_day":F,"energy_wh_per_day":F}, ... x7]}
-// "weekdays" runs Monday to Sunday; "days" is how many of that weekday had data
-// and the two averages are over those days (0 when there were none).
+//   "weekdays":[{"days":N,"runs_per_day":F,"energy_wh_per_day":F}, ... x7],
+//   "programs":[{"id":N,"name":"..","runs":N,"avg_program_power_w":F,"std_program_power_w":F,
+//     "avg_program_len_min":N,"std_program_len_min":N,"energy_wh":F,"weekday_runs":[N x7]}],
+//   "device":{"node_id":N,"endpoint_id":N,"device_type":N,"reachable":bool,
+//     "operational_state":N|null,"program_id":N|null,"program":"..","phase":"..",
+//     "countdown_s":N|null}}
+// "weekdays" and "weekday_runs" run Monday to Sunday; "days" is how many of that
+// weekday had data and the two averages are over those days (0 when there were
+// none). "programs" is empty and "device" absent for an appliance with no linked
+// device. "device" is present even before the first training.
 char *appliance_profile_json(const char *graph_id);
 
 // List every appliance's persisted profile as a JSON array. Caller must free.

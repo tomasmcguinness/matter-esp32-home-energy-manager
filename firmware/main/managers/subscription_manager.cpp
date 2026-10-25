@@ -2,6 +2,7 @@
 #include "device_manager.h"
 #include "matter_controller.h"
 #include "tariff.h"
+#include "appliance_state.h"
 
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
@@ -172,7 +173,8 @@ static void refresh_icd_flag(uint64_t node_id)
 // Which nodes the HEM needs, and what from them
 // ---------------------------------------------------------------------------
 
-// Nodes exposing an Electrical Sensor endpoint, plus the tariff source. Returns the count.
+// Nodes exposing an Electrical Sensor endpoint, the tariff source, and any node carrying an
+// appliance device linked to an appliance node. Returns the count.
 static size_t wanted_nodes(uint64_t *out, size_t max)
 {
     uint64_t node_ids[MAX_NODES];
@@ -188,6 +190,10 @@ static size_t wanted_nodes(uint64_t *out, size_t max)
 
     uint64_t tariff_node = 0;
     if (tariff_get_source(&tariff_node, nullptr)) add(tariff_node);
+
+    uint64_t linked[APPLIANCE_STATE_MAX_LINKS];
+    size_t linked_count = appliance_state_linked_nodes(linked, APPLIANCE_STATE_MAX_LINKS);
+    for (size_t i = 0; i < linked_count; i++) add(linked[i]);
     return n;
 }
 
@@ -389,8 +395,17 @@ static void send_subscription(intptr_t arg)
     uint16_t tariff_endpoint = 0;
     bool wants_tariff = tariff_get_source(&tariff_node, &tariff_endpoint) && tariff_node == node_id;
 
+    // Linked appliance devices (a bridged dishwasher, say) get their Operational State, their Mode
+    // cluster and the bridge's Reachable flag, on just their endpoints. Nodes with no link keep the
+    // four paths above, which matters to meters that accept only a few paths per subscription.
+    uint16_t appliance_eps[APPLIANCE_STATE_MAX_LINKS];
+    uint32_t appliance_modes[APPLIANCE_STATE_MAX_LINKS];
+    size_t appliance_count = appliance_state_linked_endpoints(node_id, appliance_eps, appliance_modes, APPLIANCE_STATE_MAX_LINKS);
+    size_t appliance_paths = 0;
+    for (size_t i = 0; i < appliance_count; i++) appliance_paths += appliance_modes[i] ? 3 : 2;
+
     ScopedMemoryBufferWithSize<AttributePathParams> attr_paths;
-    attr_paths.Alloc(4 + (wants_tariff ? 2 : 0));
+    attr_paths.Alloc(4 + (wants_tariff ? 2 : 0) + appliance_paths);
 
     if (!attr_paths.Get())
     {
@@ -419,6 +434,16 @@ static void send_subscription(intptr_t arg)
         attr_paths[path_index++] = AttributePathParams(tariff_endpoint, CommodityPrice::Id);
     }
 
+    for (size_t i = 0; i < appliance_count; i++)
+    {
+        attr_paths[path_index++] = AttributePathParams(appliance_eps[i], OperationalState::Id);
+        if (appliance_modes[i])
+        {
+            attr_paths[path_index++] = AttributePathParams(appliance_eps[i], appliance_modes[i]);
+        }
+        attr_paths[path_index++] = AttributePathParams(appliance_eps[i], BridgedDeviceBasicInformation::Id, BridgedDeviceBasicInformation::Attributes::Reachable::Id);
+    }
+
     // PriceChange events buffered by the device while we were away are replayed on resubscribe,
     // which fills gaps in the recorded price history.
     ScopedMemoryBufferWithSize<EventPathParams> event_paths;
@@ -435,8 +460,8 @@ static void send_subscription(intptr_t arg)
         event_paths[0] = EventPathParams(tariff_endpoint, CommodityPrice::Id, CommodityPrice::Events::PriceChange::Id);
     }
 
-    ESP_LOGI(TAG, "Subscribing to node 0x%016llX (%u path(s): electrical battery%s)", node_id,
-             (unsigned)path_index, wants_tariff ? " tariff price" : "");
+    ESP_LOGI(TAG, "Subscribing to node 0x%016llX (%u path(s): electrical battery%s%s)", node_id,
+             (unsigned)path_index, wants_tariff ? " tariff price" : "", appliance_count ? " appliance" : "");
 
     auto *cmd = Platform::New<esp_matter::controller::subscribe_command>(node_id,
                                                                          std::move(attr_paths),

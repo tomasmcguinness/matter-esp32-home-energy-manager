@@ -24,6 +24,7 @@
 #include "surplus_forecast.h"
 #include "surplus_model.h"
 #include "appliance_profile.h"
+#include "appliance_state.h"
 #include "scheduler.h"
 #include "sd_card.h"
 #include "matter_controller.h"
@@ -238,7 +239,10 @@ static esp_err_t devices_simple_get_handler(httpd_req_t *req)
 
 /// @brief Returns endpoints matching a given Matter device type, excluding those already assigned
 ///        to a topology node. Intended for use by UI dropdowns (e.g. "Select Grid Sensor").
-///        Query parameter: deviceTypeId=<decimal> (required).
+///        Query parameters: deviceTypeId=<decimal or 0x hex>[,<id>...] (required; an endpoint
+///        matching any of them is returned), and role=device to list endpoints for an appliance's
+///        linked device (settings.device) instead of a meter: those are excluded only when another
+///        node has already linked them, so one endpoint can be an appliance's meter and its device.
 ///        Handles bridged/nested devices by inheriting the label from the nearest ancestor
 ///        BridgedNode endpoint when the leaf endpoint's own label is empty.
 /// @param req
@@ -246,23 +250,38 @@ static esp_err_t devices_simple_get_handler(httpd_req_t *req)
 static esp_err_t devices_endpoints_get_handler(httpd_req_t *req)
 {
     // --- 1. Parse required deviceTypeId query param ---
-    char qbuf[32] = {0};
-    uint32_t filter_type = 0;
-    bool has_filter = false;
+#define MAX_FILTER_TYPES 4
+    char qbuf[96] = {0};
+    uint32_t filter_types[MAX_FILTER_TYPES];
+    int filter_count = 0;
+    bool device_role = false;
     size_t qlen = httpd_req_get_url_query_len(req);
     if (qlen > 0 && qlen < sizeof(qbuf))
     {
         if (httpd_req_get_url_query_str(req, qbuf, sizeof(qbuf)) == ESP_OK)
         {
-            char val[16] = {0};
+            char val[64] = {0};
             if (httpd_query_key_value(qbuf, "deviceTypeId", val, sizeof(val)) == ESP_OK)
             {
-                filter_type = (uint32_t)strtoul(val, NULL, 0); // accepts decimal or 0x... hex
-                has_filter = true;
+                char *p = val;
+                while (*p && filter_count < MAX_FILTER_TYPES)
+                {
+                    char *end = NULL;
+                    unsigned long t = strtoul(p, &end, 0); // accepts decimal or 0x... hex
+                    if (end == p) break;
+                    filter_types[filter_count++] = (uint32_t)t;
+                    if (*end != ',') break;
+                    p = end + 1;
+                }
+            }
+            char role[16] = {0};
+            if (httpd_query_key_value(qbuf, "role", role, sizeof(role)) == ESP_OK)
+            {
+                device_role = strcmp(role, "device") == 0;
             }
         }
     }
-    if (!has_filter)
+    if (filter_count == 0)
     {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Missing deviceTypeId");
         return ESP_FAIL;
@@ -272,6 +291,8 @@ static esp_err_t devices_endpoints_get_handler(httpd_req_t *req)
     // Any node carrying settings.nodeId + settings.endpointId has already claimed that
     // Matter endpoint (grid_meter, solar_inverter, appliance_N, ...). An endpoint may be
     // assigned to at most one topology node regardless of its role, so exclude all of them.
+    // Linked appliance devices (settings.device) are a separate claim: with role=device only
+    // those count.
 #define MAX_IN_USE 16
     uint64_t used_node_ids[MAX_IN_USE];
     uint16_t used_ep_ids[MAX_IN_USE];
@@ -290,8 +311,9 @@ static esp_err_t devices_endpoints_get_handler(httpd_req_t *req)
             {
                 cJSON *settings = cJSON_GetObjectItemCaseSensitive(n, "settings");
                 if (!cJSON_IsObject(settings)) continue;
-                cJSON *nid_j = cJSON_GetObjectItemCaseSensitive(settings, "nodeId");
-                cJSON *eid_j = cJSON_GetObjectItemCaseSensitive(settings, "endpointId");
+                cJSON *claim = device_role ? cJSON_GetObjectItemCaseSensitive(settings, "device") : settings;
+                cJSON *nid_j = cJSON_GetObjectItemCaseSensitive(claim, "nodeId");
+                cJSON *eid_j = cJSON_GetObjectItemCaseSensitive(claim, "endpointId");
                 if (!cJSON_IsNumber(nid_j) || !cJSON_IsNumber(eid_j)) continue;
                 if (used_count < MAX_IN_USE)
                 {
@@ -341,12 +363,17 @@ static esp_err_t devices_endpoints_get_handler(httpd_req_t *req)
         cJSON_ArrayForEach(ep, endpoints)
         {
             // --- device type filter ---
+            uint32_t matched_type = 0;
             bool type_match = false;
             cJSON *dtypes = cJSON_GetObjectItemCaseSensitive(ep, "deviceTypes");
             cJSON *dt;
             cJSON_ArrayForEach(dt, dtypes)
             {
-                if ((uint32_t)dt->valuedouble == filter_type) { type_match = true; break; }
+                for (int f = 0; f < filter_count && !type_match; f++)
+                {
+                    if ((uint32_t)dt->valuedouble == filter_types[f]) { type_match = true; matched_type = filter_types[f]; }
+                }
+                if (type_match) break;
             }
             if (!type_match) continue;
 
@@ -396,6 +423,7 @@ static esp_err_t devices_endpoints_get_handler(httpd_req_t *req)
             cJSON_AddNumberToObject(entry, "endpointId", (double)ep_id);
             cJSON_AddStringToObject(entry, "label",      label ? label : "");
             cJSON_AddStringToObject(entry, "deviceName", device_name ? device_name : "");
+            cJSON_AddNumberToObject(entry, "deviceType", (double)matched_type);
             cJSON_AddItemToArray(out_arr, entry);
         }
     }
@@ -884,10 +912,13 @@ static esp_err_t node_settings_put_handler(httpd_req_t *req)
     return httpd_resp_sendstr(req, "{}");
 }
 
-// Re-derive the tariff source after any graph edit and, if it changed, subscribe
+// Re-derive the appliance links and the tariff source after any graph edit and, if it changed, subscribe
 // to the newly assigned device so its prices arrive without a restart.
 static void on_topology_changed(void)
 {
+    // Appliance device links live in node settings; resubscribe any node whose links changed.
+    appliance_state_refresh_links(true);
+
     uint64_t before_node = 0, after_node = 0;
     uint16_t before_ep = 0, after_ep = 0;
     bool had = tariff_get_source(&before_node, &before_ep);

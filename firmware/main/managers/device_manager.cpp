@@ -286,6 +286,15 @@ esp_err_t device_manager_mark_unsubscribed(uint64_t node_id)
     return dev ? ESP_OK : ESP_ERR_NOT_FOUND;
 }
 
+bool device_manager_is_subscribed(uint64_t node_id)
+{
+    xSemaphoreTake(s_mutex, portMAX_DELAY);
+    auto *dev = find_device(node_id);
+    bool subscribed = dev && dev->has_subscription;
+    xSemaphoreGive(s_mutex);
+    return subscribed;
+}
+
 char *device_manager_get_all_json(void)
 {
     xSemaphoreTake(s_mutex, portMAX_DELAY);

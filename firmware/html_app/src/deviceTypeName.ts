@@ -5,6 +5,8 @@ const DEVICE_TYPE_NAMES: Record<number, string> = {
   0x0013: 'Bridged Node',
   0x0016: 'Root Node',
   0x0017: 'Solar Power',
+  0x0073: 'Laundry Washer',
+  0x0075: 'Dishwasher',
   0x0100: 'On/Off Light',
   0x0101: 'Dimmable Light',
   0x010a: 'On/Off Plug',

@@ -1,13 +1,42 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
+import { useWebSocket, type WsMessage } from './useWebSocket'
 
 // The learned per-appliance profile served by GET /api/appliance/profiles. When
 // `trained` is false only graph_id + trained are present (no runs analysed yet).
 // One weekday's usage, averaged over the `days` of that weekday that had data.
 type WeekdayUsage = { days: number; runs_per_day: number; energy_wh_per_day: number }
 
+// Learned stats for one program of an appliance linked to a Matter appliance device.
+type ProgramProfile = {
+  id: number
+  name: string
+  runs: number
+  avg_program_power_w: number
+  std_program_power_w: number
+  avg_program_len_min: number
+  std_program_len_min: number
+  energy_wh: number
+  weekday_runs: number[]   // Monday first
+}
+
+// Live state of the linked device. operational_state is the Matter
+// OperationalStateEnum (0 stopped, 1 running, 2 paused, 3 error).
+type LinkedDeviceState = {
+  node_id: number
+  endpoint_id: number
+  device_type: number
+  reachable: boolean
+  operational_state: number | null
+  program_id: number | null
+  program: string
+  phase: string
+  countdown_s: number | null
+}
+
 type ApplianceProfile = {
   graph_id: string
   trained: boolean
+  device?: LinkedDeviceState
   standby_w?: number
   avg_program_power_w?: number
   std_program_power_w?: number
@@ -18,6 +47,7 @@ type ApplianceProfile = {
   trained_unix?: number
   window_days?: number
   weekdays?: WeekdayUsage[]   // Monday first
+  programs?: ProgramProfile[]
 }
 type ProfilesResponse = { appliances: ApplianceProfile[] }
 
@@ -29,7 +59,7 @@ type NodesResponse = { nodes: NodeConfig[] }
 type SimpleDevice = { nodeId: number; hasDem?: boolean }
 type SimpleDevicesResponse = { devices: SimpleDevice[] }
 
-type Appliance = ApplianceProfile & { name: string; dem: boolean }
+type Appliance = ApplianceProfile & { name: string; dem: boolean; fetchedAt: number }
 
 function formatPower(w: number) {
   return w >= 1000 ? `${(w / 1000).toFixed(2)} kW` : `${Math.round(w)} W`
@@ -162,6 +192,91 @@ function WeeklyPattern({ weekdays, windowDays }: { weekdays: WeekdayUsage[]; win
   )
 }
 
+// --- Linked device ------------------------------------------------------------
+// Matter cluster ids whose reports change what the live status line shows.
+const OPERATIONAL_STATE_CLUSTER = 0x0060
+const LAUNDRY_WASHER_MODE_CLUSTER = 0x0051
+const DISHWASHER_MODE_CLUSTER = 0x0059
+const LIVE_CLUSTERS = new Set([OPERATIONAL_STATE_CLUSTER, LAUNDRY_WASHER_MODE_CLUSTER, DISHWASHER_MODE_CLUSTER])
+
+const OPERATIONAL_STATES = ['Stopped', 'Running', 'Paused', 'Error']
+
+function LiveStatus({ d, fetchedAt }: { d: LinkedDeviceState; fetchedAt: number }) {
+  // The countdown is as of the fetch; tick it down locally between reports.
+  const [now, setNow] = useState(() => Date.now())
+  useEffect(() => {
+    if (d.countdown_s === null) return
+    const t = setInterval(() => setNow(Date.now()), 30_000)
+    return () => clearInterval(t)
+  }, [d.countdown_s])
+
+  const parts: string[] = []
+  if (!d.reachable) {
+    parts.push('Offline')
+  } else {
+    const state = d.operational_state
+    parts.push(state === null ? 'Unknown' : OPERATIONAL_STATES[state] ?? `State ${state}`)
+    if (d.program) parts.push(d.program)
+    if (d.phase && (state === 1 || state === 2)) parts.push(d.phase)
+    if (d.countdown_s !== null && (state === 1 || state === 2)) {
+      const left = Math.max(0, Math.round((d.countdown_s - (now - fetchedAt) / 1000) / 60))
+      parts.push(`${formatLength(left)} left`)
+    }
+  }
+
+  const running = d.reachable && (d.operational_state === 1 || d.operational_state === 2)
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13, color: '#475569', marginBottom: 16 }}>
+      <span style={{
+        width: 8, height: 8, borderRadius: 999, flexShrink: 0,
+        background: !d.reachable ? '#cbd5e1' : running ? '#10b981' : d.operational_state === 3 ? '#ef4444' : '#94a3b8',
+      }} />
+      {parts.join(' · ')}
+    </div>
+  )
+}
+
+function ProgramTable({ programs }: { programs: ProgramProfile[] }) {
+  return (
+    <div style={{ background: '#fff', border: '1px solid #e2e8f0', borderRadius: 10, padding: '12px 16px', marginBottom: 12, overflowX: 'auto' }}>
+      <div style={{ fontSize: 11, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '.08em', color: '#475569', marginBottom: 8 }}>
+        By program
+      </div>
+      <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13, fontVariantNumeric: 'tabular-nums' }}>
+        <thead>
+          <tr style={{ color: '#94a3b8', fontSize: 11, textAlign: 'right' }}>
+            <th style={{ textAlign: 'left', fontWeight: 600, padding: '4px 8px 4px 0' }}>Program</th>
+            <th style={{ fontWeight: 600, padding: '4px 8px' }}>Runs</th>
+            <th style={{ fontWeight: 600, padding: '4px 8px' }}>Length</th>
+            <th style={{ fontWeight: 600, padding: '4px 8px' }}>Power</th>
+            <th style={{ fontWeight: 600, padding: '4px 8px' }}>kWh / run</th>
+            <th style={{ fontWeight: 600, padding: '4px 0 4px 8px' }}>Most often</th>
+          </tr>
+        </thead>
+        <tbody>
+          {programs.map(p => {
+            const busiest = Math.max(...p.weekday_runs)
+            const day = busiest > 0 ? WEEKDAY_LABELS[p.weekday_runs.indexOf(busiest)] : '–'
+            return (
+              <tr key={p.id} style={{ borderTop: '1px solid #f1f5f9', textAlign: 'right', color: '#1e293b' }}>
+                <td style={{ textAlign: 'left', fontWeight: 600, padding: '6px 8px 6px 0' }}>{p.name}</td>
+                <td style={{ padding: '6px 8px' }}>{p.runs}</td>
+                <td style={{ padding: '6px 8px' }}>
+                  {formatLength(p.avg_program_len_min)}
+                  {p.std_program_len_min > 0 && <span style={{ color: '#94a3b8' }}> ±{p.std_program_len_min}</span>}
+                </td>
+                <td style={{ padding: '6px 8px' }}>{formatPower(p.avg_program_power_w)}</td>
+                <td style={{ padding: '6px 8px' }}>{(p.energy_wh / 1000).toFixed(2)}</td>
+                <td style={{ padding: '6px 0 6px 8px' }}>{day}</td>
+              </tr>
+            )
+          })}
+        </tbody>
+      </table>
+    </div>
+  )
+}
+
 // --- Stat card --------------------------------------------------------------
 function Stat({ label, value, unit }: { label: string; value: string; unit?: string }) {
   return (
@@ -202,6 +317,8 @@ function ApplianceCard({ a }: { a: Appliance }) {
         </div>
       </div>
 
+      {a.device && <LiveStatus d={a.device} fetchedAt={a.fetchedAt} />}
+
       {!learned ? (
         <p style={{ margin: 0, fontSize: 13, color: '#94a3b8' }}>
           No complete runs observed yet
@@ -227,6 +344,8 @@ function ApplianceCard({ a }: { a: Appliance }) {
               </div>
             )}
           </div>
+
+          {a.programs && a.programs.length > 0 && <ProgramTable programs={a.programs} />}
 
           <div style={{ fontSize: 12, color: '#94a3b8' }}>
             ± {formatPower(a.std_program_power_w ?? 0)} power · ± {a.std_program_len_min ?? 0} min length
@@ -268,10 +387,12 @@ function Appliances() {
         for (const d of devices.devices) {
           if (d.hasDem) demByMatterId.set(d.nodeId, true)
         }
+        const fetchedAt = Date.now()
         setAppliances(profiles.appliances.map(p => ({
           ...p,
           name: names.get(p.graph_id) || p.graph_id,
           dem: demByMatterId.get(nodeMatterId.get(p.graph_id) ?? -1) ?? false,
+          fetchedAt,
         })))
         setLoading(false)
       })
@@ -281,6 +402,35 @@ function Appliances() {
   useEffect(() => {
     load()
   }, [])
+
+  // The firmware broadcasts its whole value cache every second. When a linked
+  // device's state, program or phase changes, re-read that appliance's profile,
+  // which carries the labels the raw attribute values don't.
+  const lastLive = useRef(new Map<string, number>())
+  const appliancesRef = useRef(appliances)
+  useEffect(() => { appliancesRef.current = appliances }, [appliances])
+  const refreshOne = useCallback((graphId: string) => {
+    fetch(`/api/appliance/profile?id=${encodeURIComponent(graphId)}`)
+      .then(r => r.ok ? (r.json() as Promise<ApplianceProfile>) : Promise.reject())
+      .then(p => setAppliances(prev => prev.map(a => a.graph_id === graphId ? { ...a, ...p, fetchedAt: Date.now() } : a)))
+      .catch(() => { })
+  }, [])
+  useWebSocket(useCallback((msg: WsMessage) => {
+    if (msg.type !== 'attribute_batch') return
+    type AttrEntry = { nodeId: number; endpointId: number; clusterId: number; attributeId: number; value: number }
+    const changed = new Set<string>()
+    for (const e of msg.data as AttrEntry[]) {
+      if (!LIVE_CLUSTERS.has(e.clusterId)) continue
+      const k = `${e.nodeId}:${e.endpointId}:${e.clusterId}:${e.attributeId}`
+      const before = lastLive.current.get(k)
+      lastLive.current.set(k, e.value)
+      if (before === undefined || before === e.value) continue
+      for (const a of appliancesRef.current) {
+        if (a.device?.node_id === e.nodeId && a.device.endpoint_id === e.endpointId) changed.add(a.graph_id)
+      }
+    }
+    changed.forEach(refreshOne)
+  }, [refreshOne]))
 
   function reanalyse() {
     setTraining(true)
@@ -310,7 +460,8 @@ function Appliances() {
       <hr />
       <p style={{ margin: '0 0 20px', fontSize: 13, color: '#64748b' }}>
         Usage profiles learned nightly from each appliance's power history — standby draw,
-        and the typical power and length of a run.
+        and the typical power and length of a run. Appliances linked to a Matter dishwasher or
+        washing machine are also learned per program.
       </p>
 
       {error && (

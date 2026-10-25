@@ -44,13 +44,24 @@ function ConsumerUnitNode({ data }: { data: { label: string } }) {
 }
 
 type PowerMeasurement = { voltage?: number, current?: number, power?: number }
-type DeviceNodeData = { label: string; nodeId?: number; endpointId?: number; power?: PowerMeasurement; batteryPercent?: number; standbyW?: number; status?: LoadStatus }
+type DeviceNodeData = { label: string; nodeId?: number; endpointId?: number; power?: PowerMeasurement; batteryPercent?: number; standbyW?: number; status?: LoadStatus; appliance?: string }
 
 // Running state of an appliance, derived from its live draw and learned standby.
 type LoadStatus = 'running' | 'standby' | 'off'
 
 // Learned profile fields served by GET /api/appliance/profiles (see Appliances.tsx).
-type ProfilesResponse = { appliances: { graph_id: string; trained: boolean; standby_w?: number }[] }
+// device is the live state of a linked Matter appliance (dishwasher, washer).
+type LinkedApplianceState = { reachable: boolean; operational_state: number | null; program: string }
+type ProfilesResponse = { appliances: { graph_id: string; trained: boolean; standby_w?: number; device?: LinkedApplianceState }[] }
+
+const OPERATIONAL_STATES = ['Stopped', 'Running', 'Paused', 'Error']
+
+// "Running · Eco 50°" for a load linked to a Matter appliance, as of the page load.
+function applianceSummary(d: LinkedApplianceState): string {
+  if (!d.reachable) return 'Offline'
+  const state = d.operational_state === null ? '' : OPERATIONAL_STATES[d.operational_state] ?? ''
+  return [state, d.program].filter(Boolean).join(' · ')
+}
 
 // The learned standby is the centre of a 5 W histogram band, so the threshold is
 // the top of that band to stop readings that wobble around the centre flickering.
@@ -150,6 +161,11 @@ function DeviceNode({ data }: { data: DeviceNodeData }) {
         <span style={{ color: '#94a3b8' }}>P</span><span style={{textAlign: 'right'}}>{fmt(data.power?.power, 'W')}</span>
         {isGrid && <ImportCost powerMw={data.power?.power} />}
       </div>
+      {data.appliance && (
+        <div style={{ padding: '3px 10px', borderTop: '1px solid #e2e8f0', fontSize: 11, color: '#475569', whiteSpace: 'nowrap' }}>
+          {data.appliance}
+        </div>
+      )}
       <Handle type="source" position={Position.Right} id="power-out" />
     </>
   )
@@ -1006,9 +1022,11 @@ function Topology() {
         // Untrained appliances count as standby 0. Profiles saved before the firmware
         // reported 0 for a 0-5 W idle carry the 2.5 W band centre; treat that as 0 too.
         const standbyMap = new Map<string, number>()
+        const applianceByNode = new Map<string, string>()
         for (const p of profileData.appliances ?? []) {
           const w = p.trained ? (p.standby_w ?? 0) : 0
           standbyMap.set(p.graph_id, w <= STANDBY_BAND_HALF_W ? 0 : w)
+          if (p.device) applianceByNode.set(p.graph_id, applianceSummary(p.device))
         }
         standbyByNodeId.current = standbyMap
 
@@ -1024,6 +1042,7 @@ function Topology() {
             (acc, v) => batteryPercentFromAttribute(v.clusterId, v.attributeId, v.value) ?? acc, undefined)
           const standbyW = standbyMap.get(n.id)
           const status = standbyW !== undefined ? loadStatus(power.power, standbyW) : undefined
+          const appliance = applianceByNode.get(n.id)
           return {
             id: n.id,
             type: typeof n.settings?.type === 'string' ? n.settings.type as string : undefined,
@@ -1040,6 +1059,7 @@ function Topology() {
               ...(batteryPercent !== undefined ? { batteryPercent } : {}),
               ...(standbyW !== undefined ? { standbyW } : {}),
               ...(status ? { status } : {}),
+              ...(appliance ? { appliance } : {}),
               settings: n.settings ?? {},
             },
           }

@@ -1,6 +1,9 @@
 import { useCallback, useEffect, useState } from 'react'
+import { LinkedDeviceSelect } from './LinkedDeviceSelect'
+import { linkedDeviceFromSettings, type LinkedDevice } from './linkedDevice'
+import { deviceTypeName } from './deviceTypeName'
 
-type SimpleDevice = { nodeId: number; endpointId: number; label: string; name?: string; hasElectricalSensor: boolean; hasSolarPower: boolean; excludeFromScheduling?: boolean }
+type SimpleDevice = { nodeId: number; endpointId: number; label: string; name?: string; hasElectricalSensor: boolean; hasSolarPower: boolean; excludeFromScheduling?: boolean; linkedDevice?: LinkedDevice | null }
 
 type SlotProps = {
   label: string
@@ -147,6 +150,11 @@ function ConfiguredSlot({ label, device, onReconfigure, onDelete }: { label: str
       <div style={{ fontSize: 12, color: '#64748b' }}>
         Node 0x{device.nodeId.toString(16).toUpperCase()} &middot; EP {device.endpointId}
       </div>
+      {device.linkedDevice && (
+        <div style={{ fontSize: 12, color: '#64748b' }}>
+          {deviceTypeName(device.linkedDevice.deviceType)}: {device.linkedDevice.label}
+        </div>
+      )}
       <div style={{ marginTop: 4, fontSize: 11, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '.06em', color: hovered ? '#3b82f6' : '#94a3b8', transition: 'color .15s' }}>
         ✎ Edit
       </div>
@@ -412,6 +420,8 @@ function EditApplianceModal({ slotLabel, topologyNodeId, nodeType, position, wir
   const [nameTouched, setNameTouched] = useState<boolean>(!!initialSelected?.name)
   // Non-deferrable appliances (hob, oven) the scheduler should ignore.
   const [excludeFromScheduling, setExcludeFromScheduling] = useState<boolean>(initialSelected?.excludeFromScheduling ?? false)
+  // Optional Matter appliance (dishwasher, washing machine) whose program and phase the HEM learns from.
+  const [linkedDevice, setLinkedDevice] = useState<LinkedDevice | null>(initialSelected?.linkedDevice ?? null)
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -453,7 +463,10 @@ function EditApplianceModal({ slotLabel, topologyNodeId, nodeType, position, wir
         x: position.x,
         y: position.y,
         // The backend replaces the whole settings object (no merge), so send every field.
-        settings: { label: selected.label, name: resolvedName, type: nodeType, nodeId: selected.nodeId, endpointId: selected.endpointId, excludeFromScheduling },
+        settings: {
+          label: selected.label, name: resolvedName, type: nodeType, nodeId: selected.nodeId, endpointId: selected.endpointId, excludeFromScheduling,
+          ...(linkedDevice ? { device: linkedDevice } : {}),
+        },
       }),
     })
       .then(r => r.ok ? r.json() : Promise.reject(`HTTP ${r.status}`))
@@ -465,7 +478,7 @@ function EditApplianceModal({ slotLabel, topologyNodeId, nodeType, position, wir
             body: JSON.stringify({ id: edgeId, source: 'consumer_unit', sourceHandle, target: topologyNodeId, targetHandle: 'power-in' }),
           }).then(r => r.ok ? r.json() : Promise.reject(`HTTP ${r.status}`))
         : undefined)
-      .then(() => onSave({ ...selected, name: resolvedName, excludeFromScheduling }))
+      .then(() => onSave({ ...selected, name: resolvedName, excludeFromScheduling, linkedDevice }))
       .catch((e: unknown) => {
         setError(e instanceof Error ? e.message : String(e))
         setSaving(false)
@@ -500,6 +513,15 @@ function EditApplianceModal({ slotLabel, topologyNodeId, nodeType, position, wir
             Exclude from scheduling
             <span style={{ display: 'block', fontSize: 12, color: '#64748b' }}>For appliances like a hob or oven that can't be deferred.</span>
           </span>
+        </label>
+        <label style={{ display: 'block', marginBottom: 16 }}>
+          <span style={{ display: 'block', fontSize: 12, fontWeight: 600, color: '#475569', marginBottom: 4 }}>Linked appliance (optional)</span>
+          <LinkedDeviceSelect
+            value={linkedDevice}
+            onChange={setLinkedDevice}
+            style={{ width: '100%', boxSizing: 'border-box', padding: '8px 12px', borderRadius: 6, border: '1px solid #e2e8f0', fontSize: 14, color: '#1e293b', background: '#fff' }}
+          />
+          <span style={{ display: 'block', fontSize: 12, color: '#64748b', marginTop: 4 }}>A Matter dishwasher or washing machine. Its program and phase are learned alongside the power.</span>
         </label>
         {error && <div style={{ marginBottom: 12, padding: '8px 12px', background: '#fef2f2', border: '1px solid #fca5a5', borderRadius: 6, fontSize: 13, color: '#b91c1c' }}>{error}</div>}
         {loading && <p style={{ fontSize: 13, color: '#94a3b8' }}>Loading devices…</p>}
@@ -591,7 +613,7 @@ const slotLabel = (slot: number) => APPLIANCE_SLOTS[slot] ?? `Appliance ${slot +
 const applianceNodeId = (slot: number) => `appliance_${slot + 1}`
 const applianceCircuitHandle = (slot: number) => `circuit_${slot + 1}`
 
-type SavedNode = { id: string; x?: number; y?: number; settings?: { label?: string; name?: string; type?: string; nodeId?: number; endpointId?: number; excludeFromScheduling?: boolean } }
+type SavedNode = { id: string; x?: number; y?: number; settings?: { label?: string; name?: string; type?: string; nodeId?: number; endpointId?: number; excludeFromScheduling?: boolean; device?: unknown } }
 type SavedEdge = { id: string; source: string; target: string; sourceHandle?: string; targetHandle?: string }
 
 // A load shown in an appliance slot, with the topology node behind it.
@@ -622,7 +644,10 @@ function applianceSlots(nodes: SavedNode[], edges: SavedEdge[]): (ApplianceSlot 
     if (s.nodeId === undefined || s.endpointId === undefined || !s.label) continue
     const slot: ApplianceSlot = {
       graphId: n.id, type: s.type!, x: n.x, y: n.y,
-      device: { nodeId: s.nodeId, endpointId: s.endpointId, label: s.label, name: s.name, hasElectricalSensor: true, hasSolarPower: false, excludeFromScheduling: s.excludeFromScheduling === true },
+      device: {
+        nodeId: s.nodeId, endpointId: s.endpointId, label: s.label, name: s.name, hasElectricalSensor: true, hasSolarPower: false,
+        excludeFromScheduling: s.excludeFromScheduling === true, linkedDevice: linkedDeviceFromSettings(s),
+      },
     }
     const own = n.id.match(/^appliance_(\d+)$/)
     const index = own ? parseInt(own[1]) - 1 : -1

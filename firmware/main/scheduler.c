@@ -3,14 +3,17 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #include "cJSON.h"
 
 #include "power_logger.h"      // power_record_t
 #include "appliance_profile.h" // appliance_enumerate, appliance_profile_load
+#include "appliance_state.h"   // live program of a linked appliance device
 
 #define SD_BASE     "/sdcard"
 #define SCHED_HOURS  24
+#define MIN_PROGRAM_RUNS 3 // a program needs this many learned runs before it sizes a run
 
 // Copy a date token only if filesystem-safe ([A-Za-z0-9_-], length 1..15);
 // "YYYY-MM-DD" passes. Guards the path we build under /sdcard.
@@ -49,6 +52,66 @@ static bool load_surplus(const char *date, float surplus_w[SCHED_HOURS])
     return n > 0;
 }
 
+// Weekday (tm_wday, 0 = Sunday) of a "YYYY-MM-DD" date, and whether it is
+// today. Returns -1 if the date doesn't parse.
+static int date_weekday(const char *date, bool *is_today)
+{
+    struct tm tm = {0};
+    if (sscanf(date, "%d-%d-%d", &tm.tm_year, &tm.tm_mon, &tm.tm_mday) != 3) return -1;
+    tm.tm_year -= 1900;
+    tm.tm_mon  -= 1;
+    tm.tm_hour  = 12;
+    tm.tm_isdst = -1;
+    if (mktime(&tm) == (time_t)-1) return -1;
+
+    time_t now = time(NULL);
+    struct tm today;
+    localtime_r(&now, &today);
+    *is_today = today.tm_year == tm.tm_year && today.tm_yday == tm.tm_yday;
+    return tm.tm_wday;
+}
+
+static const appliance_program_profile_t *find_program(const appliance_profile_t *prof, uint8_t id)
+{
+    for (int i = 0; i < prof->program_entries; i++)
+        if (prof->programs[i].program_id == id) return &prof->programs[i];
+    return NULL;
+}
+
+// The program profile to size an appliance's run with, or NULL for the profile
+// across all cycles. Sets *source to the rule that picked it.
+static const appliance_program_profile_t *pick_program(const appliance_profile_t *prof,
+                                                       const char *graph_id, int wday,
+                                                       bool is_today, const char **source)
+{
+    *source = "all";
+    if (prof->program_entries == 0) return NULL;
+
+    // What the user has selected on the machine, if it is waiting to be started.
+    appliance_live_t live;
+    if (is_today && appliance_state_get(graph_id, &live) && live.reachable &&
+        live.op_state != APPLIANCE_OP_RUNNING && live.op_state != APPLIANCE_OP_PAUSED &&
+        live.program_id != APPLIANCE_UNKNOWN) {
+        const appliance_program_profile_t *pp = find_program(prof, live.program_id);
+        if (pp && pp->runs >= MIN_PROGRAM_RUNS && pp->avg_power_mw > 0) {
+            *source = "selected";
+            return pp;
+        }
+    }
+
+    // Otherwise whatever usually runs on this weekday.
+    const appliance_program_profile_t *best = NULL;
+    if (wday >= 0) {
+        for (int i = 0; i < prof->program_entries; i++) {
+            const appliance_program_profile_t *pp = &prof->programs[i];
+            if (pp->runs < MIN_PROGRAM_RUNS || pp->avg_power_mw <= 0 || pp->dow_runs[wday] == 0) continue;
+            if (!best || pp->dow_runs[wday] > best->dow_runs[wday]) best = pp;
+        }
+    }
+    if (best) *source = "weekday";
+    return best;
+}
+
 int scheduler_compute(const char *date_str, scheduled_run_t *out, int max)
 {
     char date[16];
@@ -61,6 +124,9 @@ int scheduler_compute(const char *date_str, scheduled_run_t *out, int max)
     float remaining[SCHED_HOURS];
     for (int i = 0; i < SCHED_HOURS; i++)
         remaining[i] = surplus_w[i] > 0.0f ? surplus_w[i] : 0.0f;
+
+    bool is_today = false;
+    int  wday     = date_weekday(date, &is_today);
 
     char ids[SCHEDULER_MAX_RUNS][APPLIANCE_ID_MAX_LEN];
     char names[SCHEDULER_MAX_RUNS][APPLIANCE_NAME_MAX_LEN];
@@ -77,15 +143,28 @@ int scheduler_compute(const char *date_str, scheduled_run_t *out, int max)
         snprintf(r->graph_id, sizeof(r->graph_id), "%s", ids[a]);
         snprintf(r->name, sizeof(r->name), "%s", names[a]);
         r->start_hour = -1;
+        r->program_source = "all";
 
         appliance_profile_t prof;
         if (appliance_profile_load(ids[a], &prof) &&
             prof.program_count > 0 && prof.avg_program_power_mw > 0) {
-            int dur = (int)((prof.avg_program_len_min + 59) / 60); // ceil to hours
+            uint32_t len_min  = prof.avg_program_len_min;
+            int32_t  power_mw = prof.avg_program_power_mw;
+
+            const appliance_program_profile_t *pp =
+                pick_program(&prof, ids[a], wday, is_today, &r->program_source);
+            if (pp) {
+                len_min  = pp->avg_len_min;
+                power_mw = pp->avg_power_mw;
+                if (!appliance_state_program_name(ids[a], pp->program_id, r->program, sizeof(r->program)))
+                    snprintf(r->program, sizeof(r->program), "Program %u", pp->program_id);
+            }
+
+            int dur = (int)((len_min + 59) / 60); // ceil to hours
             if (dur < 1) dur = 1;
             if (dur > SCHED_HOURS) dur = SCHED_HOURS;
             r->duration_hours = dur;
-            r->avg_power_w    = prof.avg_program_power_mw / 1000.0f;
+            r->avg_power_w    = power_mw / 1000.0f;
             r->energy_wh      = r->avg_power_w * dur;
         }
         count++;
@@ -168,6 +247,8 @@ char *scheduler_json(const char *date_str)
         cJSON_AddNumberToObject(o, "avg_power_w", runs[i].avg_power_w);
         cJSON_AddNumberToObject(o, "energy_wh", runs[i].energy_wh);
         cJSON_AddNumberToObject(o, "self_consumption_wh", runs[i].self_consumption_wh);
+        cJSON_AddStringToObject(o, "program", runs[i].program);
+        cJSON_AddStringToObject(o, "program_source", runs[i].program_source ? runs[i].program_source : "all");
         cJSON_AddItemToArray(arr, o);
     }
 

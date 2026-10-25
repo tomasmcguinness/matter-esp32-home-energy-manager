@@ -12,6 +12,10 @@ type Run = {
   avg_power_w: number
   energy_wh: number
   self_consumption_wh: number
+  // For an appliance linked to a Matter appliance: the program whose profile sized
+  // the run, and why it was chosen. program is "" when all cycles were used.
+  program?: string
+  program_source?: 'selected' | 'weekday' | 'all'
 }
 type Schedule = { date: string; surplus_available: boolean; runs: Run[] }
 
@@ -218,7 +222,14 @@ function Schedule() {
                 const scheduled = r.start_hour >= 0
                 return (
                   <tr key={r.graph_id} style={{ color: '#1e293b' }}>
-                    <td style={{ padding: '10px 12px', borderBottom: '1px solid #f1f5f9', fontWeight: 600 }}>{r.name}</td>
+                    <td style={{ padding: '10px 12px', borderBottom: '1px solid #f1f5f9', fontWeight: 600 }}>
+                      {r.name}
+                      {r.program && (
+                        <div style={{ fontSize: 12, fontWeight: 400, color: '#64748b' }}>
+                          {r.program}{r.program_source === 'selected' ? ' (selected)' : r.program_source === 'weekday' ? ' (usual for this day)' : ''}
+                        </div>
+                      )}
+                    </td>
                     <td style={{ padding: '10px 12px', borderBottom: '1px solid #f1f5f9' }}>
                       {scheduled
                         ? `${hhmm(r.start_hour)}–${hhmm(r.start_hour + r.duration_hours)}`

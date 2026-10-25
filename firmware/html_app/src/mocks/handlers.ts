@@ -19,7 +19,9 @@ let nodeConfigs: NodeConfig[] = [
   { id: 'consumer_unit', x: 0, y: 0, settings: { label: 'Consumer Unit', type: 'consumerUnit', deletable: false } },
   { id: 'grid_meter', x: -220, y: 0, settings: { label: 'Grid Meter', type: 'device', nodeId: 30001, endpointId: 1 } },
   { id: 'node_11', x: 260, y: -40, settings: { name: 'Oven', label: 'Oven', type: 'appliance', nodeId: 20001, endpointId: 1, excludeFromScheduling: true } },
-  { id: 'node_12', x: 260, y: 80, settings: { name: 'Dishwasher', label: 'Dishwasher', type: 'appliance', nodeId: 20002, endpointId: 1 } },
+  // Metered by a plug, and linked to the bridged dishwasher for its program and phase.
+  { id: 'node_12', x: 260, y: 80, settings: { name: 'Dishwasher', label: 'Dishwasher', type: 'appliance', nodeId: 20002, endpointId: 1,
+    device: { nodeId: 50001, endpointId: 3, deviceType: 0x0075, label: 'Bosch Dishwasher' } } },
   { id: 'node_13', x: 260, y: 200, settings: { name: 'Kettle', label: 'Kettle', type: 'appliance', nodeId: 20003, endpointId: 1 } },
   { id: 'tariff', x: -220, y: 120, settings: { label: 'Energy Tariff', type: 'tariff', nodeId: 40001, endpointId: 1 } },
 ]
@@ -86,6 +88,20 @@ let devices: Device[] = [
     ],
   },
   {
+    // matter-esp32-appliance-bridge: bridged appliances with Operational State and
+    // a Mode cluster, but no power measurement.
+    nodeId: 50001,
+    vendorName: 'Tomas McGuinness',
+    productName: 'Appliance Bridge',
+    hasSubscription: true,
+    endpoints: [
+      { endpointId: 0, label: 'Root Node',        included: false, deviceTypes: [0x0016],         parts: [1, 3, 4] },
+      { endpointId: 1, label: 'Aggregator',       included: false, deviceTypes: [0x000e],         parts: [3, 4] },
+      { endpointId: 3, label: 'Bosch Dishwasher', included: false, deviceTypes: [0x0013, 0x0075], parts: [] },
+      { endpointId: 4, label: 'Samsung Washer',   included: false, deviceTypes: [0x0013, 0x0073], parts: [] },
+    ],
+  },
+  {
     nodeId: 30001,
     vendorName: 'Cold Bear',
     productName: 'Smart Meter',
@@ -97,6 +113,66 @@ let devices: Device[] = [
     ],
   },
 ]
+
+// The bridged dishwasher's live state: it cycles Stopped -> Running (with phases)
+// -> Stopped every few minutes so the Appliances tab has something to follow.
+const DISHWASHER_PHASES = ['Pre-wash', 'Main wash', 'Rinse', 'Drying']
+function dishwasherCycle() {
+  const t = Math.floor(Date.now() / 1000) % 240
+  return t < 60 ? { state: 0, phase: null } : { state: 1, phase: Math.min(3, Math.floor((t - 60) / 45)) }
+}
+function dishwasherState() {
+  const { state, phase } = dishwasherCycle()
+  return {
+    node_id: 50001, endpoint_id: 3, device_type: 0x0075, reachable: true,
+    operational_state: state, program_id: 0, program: 'Eco 50°',
+    phase: phase === null ? '' : DISHWASHER_PHASES[phase],
+    countdown_s: state === 1 ? (240 - (Math.floor(Date.now() / 1000) % 240)) * 45 : null,
+  }
+}
+
+function mockProfiles() {
+  // Monday-first weekly pattern from [days with data, runs, Wh per run].
+  const weekdays = (rows: [number, number][], whPerRun: number) =>
+    rows.map(([days, runs]) => ({
+      days,
+      runs_per_day: days ? runs / days : 0,
+      energy_wh_per_day: days ? (runs * whPerRun) / days : 0,
+    }))
+  // node_11 (Oven) and node_12 (Dishwasher, 7.5 W standby) have learned profiles;
+  // node_13 (Kettle) idles at 0 W so its standby is 0; node_42 is still learning.
+  return [
+    {
+      graph_id: 'node_11',
+      trained: true,
+      standby_w: 3,
+      avg_program_power_w: 1820,
+      std_program_power_w: 210,
+      avg_program_len_min: 112,
+      std_program_len_min: 9,
+      program_count: 14,
+      days_with_data: 26,
+      trained_unix: Math.floor(Date.now() / 1000) - 3600,
+      window_days: 30,
+      // Mostly weekend cooking; no data at all for Tuesdays.
+      weekdays: weekdays([[4, 1], [0, 0], [4, 1], [4, 0], [4, 3], [5, 4], [5, 5]], 3400),
+    },
+    {
+      graph_id: 'node_12', trained: true, standby_w: 7.5, avg_program_power_w: 1150, std_program_power_w: 90, avg_program_len_min: 95, std_program_len_min: 12, program_count: 9, days_with_data: 26, trained_unix: Math.floor(Date.now() / 1000) - 3600, window_days: 30, weekdays: weekdays([[4, 2], [4, 0], [4, 2], [4, 0], [3, 1], [4, 2], [3, 2]], 1820),
+      // Linked to the bridged dishwasher, so it is learned per program too.
+      device: dishwasherState(),
+      programs: [
+        { id: 0, name: 'Eco 50°',   runs: 6, avg_program_power_w: 980,  std_program_power_w: 60, avg_program_len_min: 180, std_program_len_min: 6, energy_wh: 1450, weekday_runs: [2, 0, 1, 0, 1, 1, 1] },
+        { id: 1, name: 'Quick 45°', runs: 3, avg_program_power_w: 1490, std_program_power_w: 80, avg_program_len_min: 35,  std_program_len_min: 3, energy_wh: 870,  weekday_runs: [0, 0, 1, 0, 0, 1, 1] },
+      ],
+    },
+    { graph_id: 'node_13', trained: true, standby_w: 0, avg_program_power_w: 2900, std_program_power_w: 60, avg_program_len_min: 4, std_program_len_min: 1, program_count: 40, days_with_data: 26, trained_unix: Math.floor(Date.now() / 1000) - 3600, window_days: 30, weekdays: weekdays([[4, 5], [4, 5], [4, 6], [4, 5], [3, 4], [4, 8], [3, 7]], 190) },
+    {
+      graph_id: 'node_42',
+      trained: false,
+    },
+  ]
+}
 
 const powerWs = ws.link('ws://*/ws')
 
@@ -264,18 +340,25 @@ export const handlers = [
 
   http.get('/api/devices/endpoints', ({ request }) => {
     const url = new URL(request.url)
-    const raw = url.searchParams.get('deviceTypeId') ?? '0'
-    const filterType = raw.startsWith('0x') ? parseInt(raw, 16) : parseInt(raw, 10)
+    const filterTypes = (url.searchParams.get('deviceTypeId') ?? '0').split(',')
+      .map(raw => raw.startsWith('0x') ? parseInt(raw, 16) : parseInt(raw, 10))
     // An endpoint may be assigned to at most one topology node regardless of role,
-    // so exclude any node that has already claimed a nodeId/endpointId.
+    // so exclude any node that has already claimed a nodeId/endpointId. Linked
+    // appliance devices (settings.device) are a separate claim, used with role=device.
+    const deviceRole = url.searchParams.get('role') === 'device'
+    const claim = (n: NodeConfig) => (deviceRole ? n.settings?.device : n.settings) as Record<string, unknown> | undefined
     const inUse = nodeConfigs
-      .filter(n => typeof n.settings?.nodeId === 'number' && typeof n.settings?.endpointId === 'number')
-      .map(n => ({ nodeId: n.settings.nodeId as number, endpointId: n.settings.endpointId as number }))
+      .map(claim)
+      .filter(c => typeof c?.nodeId === 'number' && typeof c?.endpointId === 'number')
+      .map(c => ({ nodeId: c!.nodeId as number, endpointId: c!.endpointId as number }))
     const endpoints = devices.flatMap(d =>
       d.endpoints
-        .filter(ep => ep.endpointId !== 0 && ep.deviceTypes?.includes(filterType))
+        .filter(ep => ep.endpointId !== 0 && ep.deviceTypes?.some(t => filterTypes.includes(t)))
         .filter(ep => !inUse.some(u => u.nodeId === d.nodeId && u.endpointId === ep.endpointId))
-        .map(ep => ({ nodeId: d.nodeId, endpointId: ep.endpointId, label: ep.label || `EP${ep.endpointId}`, deviceName: d.productName }))
+        .map(ep => ({
+          nodeId: d.nodeId, endpointId: ep.endpointId, label: ep.label || `EP${ep.endpointId}`, deviceName: d.productName,
+          deviceType: ep.deviceTypes!.find(t => filterTypes.includes(t)),
+        }))
     )
     return HttpResponse.json({ endpoints })
   }),
@@ -688,40 +771,12 @@ export const handlers = [
   }),
 
   http.get('/api/appliance/profiles', () => {
-    // Monday-first weekly pattern from [days with data, runs, Wh per run].
-    const weekdays = (rows: [number, number][], whPerRun: number) =>
-      rows.map(([days, runs]) => ({
-        days,
-        runs_per_day: days ? runs / days : 0,
-        energy_wh_per_day: days ? (runs * whPerRun) / days : 0,
-      }))
-    // node_11 (Oven) and node_12 (Dishwasher, 7.5 W standby) have learned profiles;
-    // node_13 (Kettle) idles at 0 W so its standby is 0; node_42 is still learning.
-    return HttpResponse.json({
-      appliances: [
-        {
-          graph_id: 'node_11',
-          trained: true,
-          standby_w: 3,
-          avg_program_power_w: 1820,
-          std_program_power_w: 210,
-          avg_program_len_min: 112,
-          std_program_len_min: 9,
-          program_count: 14,
-          days_with_data: 26,
-          trained_unix: Math.floor(Date.now() / 1000) - 3600,
-          window_days: 30,
-          // Mostly weekend cooking; no data at all for Tuesdays.
-          weekdays: weekdays([[4, 1], [0, 0], [4, 1], [4, 0], [4, 3], [5, 4], [5, 5]], 3400),
-        },
-        { graph_id: 'node_12', trained: true, standby_w: 7.5, avg_program_power_w: 1150, std_program_power_w: 90, avg_program_len_min: 95, std_program_len_min: 12, program_count: 9, days_with_data: 26, trained_unix: Math.floor(Date.now() / 1000) - 3600, window_days: 30, weekdays: weekdays([[4, 2], [4, 0], [4, 2], [4, 0], [3, 1], [4, 2], [3, 2]], 1820) },
-        { graph_id: 'node_13', trained: true, standby_w: 0, avg_program_power_w: 2900, std_program_power_w: 60, avg_program_len_min: 4, std_program_len_min: 1, program_count: 40, days_with_data: 26, trained_unix: Math.floor(Date.now() / 1000) - 3600, window_days: 30, weekdays: weekdays([[4, 5], [4, 5], [4, 6], [4, 5], [3, 4], [4, 8], [3, 7]], 190) },
-        {
-          graph_id: 'node_42',
-          trained: false,
-        },
-      ],
-    })
+    return HttpResponse.json({ appliances: mockProfiles() })
+  }),
+
+  http.get('/api/appliance/profile', ({ request }) => {
+    const id = new URL(request.url).searchParams.get('id')
+    return HttpResponse.json(mockProfiles().find(p => p.graph_id === id) ?? { graph_id: id, trained: false })
   }),
 
   http.post('/api/test/appliance-profiles/train', () => {
@@ -776,6 +831,9 @@ export const handlers = [
           entry(13484, Math.round(150 + 30 * Math.sin(tick / 5)), 0x2f, 0x0c),
           // Dishwasher alternates between a run and standby so the badge/flow toggle live.
           { nodeId: 20002, endpointId: 1, clusterId: 144, attributeId: 0x08, value: Math.floor(tick / 3) % 2 ? 1150000 : 6000 },
+          // The bridged dishwasher's Operational State (0x0060) and phase, as mirrored by the firmware.
+          { nodeId: 50001, endpointId: 3, clusterId: 0x60, attributeId: 0x04, value: dishwasherCycle().state },
+          { nodeId: 50001, endpointId: 3, clusterId: 0x60, attributeId: 0x01, value: dishwasherCycle().phase ?? 0 },
         ],
       }))
     }, 5000)

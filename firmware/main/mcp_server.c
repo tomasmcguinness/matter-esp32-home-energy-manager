@@ -322,12 +322,16 @@ static const tool_t TOOLS[] = {
       true, tool_get_forecast },
     { "get_schedule",
       "The suggested run window for each appliance on a day, from sliding its learned cycle across that "
-      "day's surplus forecast. Defaults to tomorrow.",
+      "day's surplus forecast. For an appliance linked to a Matter appliance device, program says which "
+      "program's profile was used and program_source why (selected on the machine, most run on that "
+      "weekday, or all cycles). Defaults to tomorrow.",
       "{\"type\":\"object\",\"properties\":{" DATE_PROP "}}",
       true, tool_get_schedule },
     { "get_appliance_profiles",
       "Learned usage profiles (standby power, program power and length, and the average runs and energy "
-      "per weekday, Monday first) for one appliance, or all of them when node_id is omitted.",
+      "per weekday, Monday first) for one appliance, or all of them when node_id is omitted. Appliances "
+      "linked to a Matter appliance device also carry per-program stats and the device's live state "
+      "(operational state, program, phase, countdown).",
       "{\"type\":\"object\",\"properties\":{\"node_id\":{\"type\":\"string\"}}}",
       true, tool_get_appliance_profiles },
     { "get_tariff",
@@ -345,7 +349,7 @@ static const tool_t TOOLS[] = {
       "today's minute file is. A large report age means the logged values are a frozen reading.",
       NO_ARGS, true, tool_get_stream_health },
     { "list_data_files",
-      "Files on the SD card with their sizes, filtered by name prefix (e.g. node-, soc-, grid-, split-, "
+      "Files on the SD card with their sizes, filtered by name prefix (e.g. node-, soc-, state-, grid-, split-, "
       "cost-, solar-forecast-) and/or by the date they end in. Returns at most 200.",
       "{\"type\":\"object\",\"properties\":{\"prefix\":{\"type\":\"string\"}," DATE_PROP "}}",
       true, tool_list_data_files },

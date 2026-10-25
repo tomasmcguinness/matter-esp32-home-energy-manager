@@ -21,6 +21,8 @@ typedef struct {
     float avg_power_w;          // mean draw while running
     float energy_wh;            // avg_power_w * duration_hours
     float self_consumption_wh;  // Σ min(power, surplus) over the chosen window
+    char  program[32];          // program whose profile was used; "" for all cycles
+    const char *program_source; // "selected" | "weekday" | "all"
 } scheduled_run_t;
 
 // Build a suggested appliance schedule for date_str ("YYYY-MM-DD") by sliding
@@ -29,12 +31,17 @@ typedef struct {
 // subtracting each placement from the remaining surplus. Fills out[] (up to
 // max) and returns the count, or -1 if the surplus forecast for that day is
 // missing.
+//
+// An appliance linked to a Matter appliance device is sized from one program's
+// profile: the program selected on the machine when date_str is today and it
+// isn't already running, otherwise the program run most on that weekday. With
+// neither (or no per-program history) the profile across all cycles is used.
 int scheduler_compute(const char *date_str, scheduled_run_t *out, int max);
 
 // Same computation rendered as JSON for the web API. Caller must free.
 // Shape: {"date":"..","surplus_available":bool,"runs":[{"graph_id","name",
 //   "schedulable":bool,"start_hour","duration_hours","avg_power_w",
-//   "energy_wh","self_consumption_wh"},...]}
+//   "energy_wh","self_consumption_wh","program","program_source"},...]}
 char *scheduler_json(const char *date_str);
 
 #ifdef __cplusplus
