@@ -7,6 +7,7 @@
 #include "appliance_state.h"     // per-minute state log of linked appliance devices
 #include "managers/node_manager.h"
 
+#include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
 #include <ctype.h>
@@ -1280,6 +1281,89 @@ char *node_power_logger_series_json(const char *node_id, const char *date_str, b
             if (mw[j] != INT32_MIN) { sum += mw[j]; n++; }
         if (n == 0) cJSON_AddItemToArray(arr, cJSON_CreateNull());
         else        cJSON_AddItemToArray(arr, cJSON_CreateNumber(round((double)sum / n / 100.0) / 10.0));
+    }
+
+    char *json = cJSON_PrintUnformatted(root);
+    cJSON_Delete(root);
+    return json; // caller must free
+}
+
+char *node_power_logger_heatmap_json(const char *node_id, int days)
+{
+    char node[40];
+    if (!sanitize_token(node_id, node, sizeof(node))) return nullptr;
+
+    const char *role = nullptr;
+    bool is_grid = false;
+    for (const auto &st : snapshot_streams())
+        if (st.graph_id == node) { role = st.role; is_grid = st.is_grid; break; }
+
+    cJSON *root = cJSON_CreateObject();
+    cJSON_AddStringToObject(root, "id", node);
+    if (role) cJSON_AddStringToObject(root, "role", role);
+    cJSON *arr = cJSON_AddArrayToObject(root, "days");
+
+    time_t now = time(NULL);
+    struct tm today;
+    localtime_r(&now, &today);
+
+    // Oldest first. Step the calendar day via mktime so DST changes are handled.
+    for (int back = days - 1; back >= 0; back--) {
+        struct tm d = today;
+        d.tm_hour = 12; // midday avoids DST edge cases when normalising
+        d.tm_mday -= back;
+        mktime(&d);
+        char date[11];
+        strftime(date, sizeof(date), "%Y-%m-%d", &d);
+
+        // Bucket by local hour. The minute file gives the mean and the peak; a day
+        // whose minute file is gone falls back to the hourly rollup (mean only).
+        int64_t sum[24] = {0};
+        int     count[24] = {0};
+        int32_t peak[24] = {0};
+        bool    have_peak = false;
+        char path[96];
+        if (is_grid) snprintf(path, sizeof(path), "%s/grid-%s", SD_BASE, date);
+        else         snprintf(path, sizeof(path), "%s/node-%s-%s", SD_BASE, node, date);
+        FILE *f = fopen(path, "rb");
+        if (f) {
+            have_peak = true;
+        } else {
+            if (is_grid) snprintf(path, sizeof(path), "%s/grid-hourly-%s", SD_BASE, date);
+            else         snprintf(path, sizeof(path), "%s/nodeh-%s-%s", SD_BASE, node, date);
+            f = fopen(path, "rb");
+        }
+        if (f) {
+            power_record_t rec;
+            while (fread(&rec, sizeof(rec), 1, f) == 1) {
+                time_t t = (time_t)rec.unix_minute;
+                struct tm lt;
+                localtime_r(&t, &lt);
+                int h = lt.tm_hour;
+                sum[h] += rec.power_mw;
+                // Peak keeps the sign of the largest-magnitude reading (raw meter sign).
+                if (count[h] == 0 || labs((long)rec.power_mw) > labs((long)peak[h])) peak[h] = rec.power_mw;
+                count[h]++;
+            }
+            fclose(f);
+        }
+
+        cJSON *day = cJSON_CreateObject();
+        cJSON_AddStringToObject(day, "date", date);
+        cJSON *wh = cJSON_AddArrayToObject(day, "wh");
+        cJSON *pk = cJSON_AddArrayToObject(day, "peak_w");
+        for (int h = 0; h < 24; h++) {
+            if (count[h] == 0) {
+                cJSON_AddItemToArray(wh, cJSON_CreateNull());
+                cJSON_AddItemToArray(pk, cJSON_CreateNull());
+                continue;
+            }
+            // The hour's mean power in W is its energy in Wh.
+            cJSON_AddItemToArray(wh, cJSON_CreateNumber(round((double)sum[h] / count[h] / 100.0) / 10.0));
+            if (have_peak) cJSON_AddItemToArray(pk, cJSON_CreateNumber(round(peak[h] / 100.0) / 10.0));
+            else           cJSON_AddItemToArray(pk, cJSON_CreateNull());
+        }
+        cJSON_AddItemToArray(arr, day);
     }
 
     char *json = cJSON_PrintUnformatted(root);

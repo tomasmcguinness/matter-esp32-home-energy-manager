@@ -454,6 +454,50 @@ export const handlers = [
   http.get('/api/data/node', ({ request }) => {
     const url = new URL(request.url)
     const id = url.searchParams.get('id') ?? ''
+
+    // ?days=N: the hourly heatmap, oldest day first. Grid imports morning and
+    // evening and exports around midday; the oven runs in its usual bursts with
+    // more cooking at weekends; any other stream idles at a small baseload.
+    const heatDays = url.searchParams.get('days')
+    if (heatDays) {
+      const n = Math.min(60, Math.max(1, Number(heatDays) || 14))
+      const isGrid = edgeConfigs.some(e => e.target === 'consumer_unit' && e.targetHandle === 'grid' && e.source === id)
+      const now = new Date()
+      const days = []
+      for (let back = n - 1; back >= 0; back--) {
+        const d = new Date(now.getFullYear(), now.getMonth(), now.getDate() - back)
+        const date = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+        const weekend = d.getDay() === 0 || d.getDay() === 6
+        const lastHour = back === 0 ? now.getHours() : 23
+        const wh: (number | null)[] = []
+        const peak: (number | null)[] = []
+        for (let h = 0; h < 24; h++) {
+          const jitter = Math.abs(Math.sin((d.getDate() * 31 + h) * 12.9898)) // stable per (day, hour)
+          let v: number
+          let p: number
+          if (h > lastHour || (back === 9 && h >= 3 && h < 6)) { wh.push(null); peak.push(null); continue }
+          if (isGrid) {
+            const morning = h >= 7 && h < 9 ? 1200 : 0
+            const evening = h >= 17 && h < 21 ? 1800 : 0
+            const solar = h >= 9 && h < 17 ? 2600 * Math.sin(Math.PI * (h - 9 + 0.5) / 8) * (0.4 + jitter * 0.6) : 0
+            v = 350 + morning + evening - solar + jitter * 150
+            p = v + (v > 0 ? 1 : -1) * 900 * jitter
+          } else if (id === 'node_11') {
+            const cooking = (h === 11 && weekend) || (h === 18 && jitter > 0.25) || (h === 12 && weekend && jitter > 0.5)
+            v = cooking ? 900 + jitter * 900 : 0
+            p = cooking ? 2050 : 0
+          } else {
+            v = 40 + jitter * 30
+            p = v + 60
+          }
+          wh.push(Math.round(v * 10) / 10)
+          peak.push(Math.round(p * 10) / 10)
+        }
+        days.push({ date, wh, peak_w: peak })
+      }
+      return HttpResponse.json({ id, role: isGrid ? 'grid' : 'load', days })
+    }
+
     const date = url.searchParams.get('date') ?? new Date().toISOString().slice(0, 10)
     const [year, month, day] = date.split('-').map(Number)
     const startOfDay = Math.floor(new Date(year, month - 1, day).getTime() / 1000)

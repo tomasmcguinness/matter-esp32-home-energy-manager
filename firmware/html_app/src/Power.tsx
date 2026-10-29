@@ -489,6 +489,257 @@ function UsageHistory({ labels }: { labels: Map<string, string> }) {
   )
 }
 
+// ---- Hourly heatmap ---------------------------------------------------------
+
+// GET /api/data/node?id=<graphId>&days=N, oldest day first. wh and peak_w keep
+// the raw meter sign; null where nothing was recorded.
+type HeatmapData = {
+  id: string
+  role?: EnergyRole
+  days: { date: string; wh: (number | null)[]; peak_w: (number | null)[] }[]
+}
+
+type HeatMetric = 'wh' | 'peak'
+
+const HEAT_RANGES = [7, 14, 30, 60]
+const HM_LEFT = 72
+const HM_RIGHT = 64 // daily total bar
+const HM_TOP = 20
+const HM_W = 800
+const HM_CELL_W = (HM_W - HM_LEFT - HM_RIGHT) / 24
+const HM_CELL_H = 16
+const HM_GAP = 2
+
+// Sequential scale for the stream's normal direction, and a green one for the
+// reverse (grid export, battery discharge). Both start pale so low reads as quiet.
+const HEAT_STOPS = ['#e0f2fe', '#38bdf8', '#10b981', '#f59e0b', '#ef4444']
+const REVERSE_STOPS = ['#dcfce7', '#4ade80', '#15803d']
+const HEAT_ZERO = '#f1f5f9'
+
+function lerpColor(stops: string[], t: number): string {
+  const x = Math.min(1, Math.max(0, t)) * (stops.length - 1)
+  const i = Math.min(stops.length - 2, Math.floor(x))
+  const f = x - i
+  const a = parseInt(stops[i].slice(1), 16)
+  const b = parseInt(stops[i + 1].slice(1), 16)
+  const ch = (s: number) => Math.round(((a >> s) & 255) + (((b >> s) & 255) - ((a >> s) & 255)) * f)
+  return `rgb(${ch(16)}, ${ch(8)}, ${ch(0)})`
+}
+
+// Readings are raw sign (+ = into the node). Solar is shown as generation, so
+// every stream reads positive in its usual direction.
+function heatSign(role?: EnergyRole): number {
+  return role === 'solar' ? -1 : 1
+}
+
+function reverseLabel(role?: EnergyRole): string {
+  return role === 'grid' ? 'export' : role === 'battery' ? 'discharge' : 'reverse'
+}
+
+function fmtWh(wh: number): string {
+  const abs = Math.abs(wh)
+  const sign = wh < 0 ? '−' : ''
+  return abs >= 1000 ? `${sign}${(abs / 1000).toFixed(2)} kWh` : `${sign}${Math.round(abs)} Wh`
+}
+
+function fmtDayLong(date: string): string {
+  return new Date(`${date}T00:00:00`).toLocaleDateString(undefined, { weekday: 'short', day: 'numeric', month: 'short' })
+}
+
+function HourlyHeatmap({ nodes }: { nodes: ConnectedNode[] }) {
+  const [streamId, setStreamId] = useState<string>(
+    () => (nodes.find(n => n.role === 'appliance') ?? nodes[0]).graphId)
+  const [range, setRange] = useState(14)
+  const [metric, setMetric] = useState<HeatMetric>('wh')
+  const [data, setData] = useState<HeatmapData | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  const [hover, setHover] = useState<{ day: number; hour: number } | null>(null)
+
+  useEffect(() => {
+    setData(null)
+    setError(null)
+    setHover(null)
+    const ac = new AbortController()
+    queuedFetch(`/api/data/node?id=${encodeURIComponent(streamId)}&days=${range}`, { signal: ac.signal })
+      .then(r => r.ok ? r.json() : Promise.reject(`HTTP ${r.status}`))
+      .then((d: HeatmapData) => setData(d))
+      .catch((e: unknown) => {
+        if (isAbortError(e)) return
+        setError(e instanceof Error ? e.message : String(e))
+      })
+    return () => ac.abort()
+  }, [streamId, range])
+
+  const today = todayString()
+  const nowHour = new Date().getHours()
+
+  let body
+  if (error) body = <div className="alert alert-danger">{error}</div>
+  else if (!data) body = <p style={{ color: '#94a3b8', fontSize: 13 }}>Loading…</p>
+  else {
+    const sign = heatSign(data.role)
+    // Newest day at the top, as the most recent hours are the ones looked at most.
+    const rows = [...data.days].reverse().map(d => ({
+      date: d.date,
+      values: (metric === 'wh' ? d.wh : d.peak_w).map(v => v === null ? null : v * sign),
+      wh: d.wh.map(v => v === null ? null : v * sign),
+      peak: d.peak_w.map(v => v === null ? null : v * sign),
+    }))
+    const all = rows.flatMap(r => r.values).filter((v): v is number => v !== null)
+    const posMax = Math.max(0, ...all)
+    const negMax = Math.max(0, ...all.map(v => -v))
+    const hasData = all.length > 0
+
+    const avg = Array.from({ length: 24 }, (_, h) => {
+      const vs = rows.map(r => r.values[h]).filter((v): v is number => v !== null)
+      return vs.length ? vs.reduce((a, b) => a + b, 0) / vs.length : null
+    })
+    const dayTotals = rows.map(r => r.wh.reduce<number>((a, v) => a + (v !== null && v > 0 ? v : 0), 0))
+    const totalMax = Math.max(1, ...dayTotals)
+
+    const fill = (v: number | null): string => {
+      if (v === null) return '#fff'
+      if (v > 0 && posMax > 0) return lerpColor(HEAT_STOPS, v / posMax)
+      if (v < 0 && negMax > 0) return lerpColor(REVERSE_STOPS, -v / negMax)
+      return HEAT_ZERO
+    }
+    const fmtValue = metric === 'wh' ? fmtWh : fmtW
+
+    const avgY = HM_TOP + rows.length * HM_CELL_H + 6
+    const svgH = avgY + HM_CELL_H + 4
+    const cellX = (h: number) => HM_LEFT + h * HM_CELL_W
+    const rowY = (i: number) => HM_TOP + i * HM_CELL_H
+
+    const hovered = hover && hover.day >= 0 ? rows[hover.day] : null
+
+    body = !hasData ? (
+      <p style={{ color: '#94a3b8', fontSize: 13 }}>No recordings for this stream in the last {range} days.</p>
+    ) : (
+      <>
+        <svg viewBox={`0 0 ${HM_W} ${svgH}`} style={{ width: '100%', height: 'auto', display: 'block' }}
+          onMouseLeave={() => setHover(null)}>
+          <defs>
+            <pattern id="heat-future" width={6} height={6} patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
+              <line x1={0} y1={0} x2={0} y2={6} stroke="#e2e8f0" strokeWidth={2} />
+            </pattern>
+          </defs>
+
+          {Array.from({ length: 24 }, (_, h) => (h % 2 === 0) && (
+            <text key={h} x={cellX(h) + HM_CELL_W / 2} y={HM_TOP - 6} textAnchor="middle" fontSize={10} fill="#94a3b8">
+              {String(h).padStart(2, '0')}
+            </text>
+          ))}
+
+          {rows.map((r, i) => {
+            const isToday = r.date === today
+            const weekend = [0, 6].includes(new Date(`${r.date}T00:00:00`).getDay())
+            return (
+              <g key={r.date}>
+                <text x={HM_LEFT - 8} y={rowY(i) + HM_CELL_H / 2 + 3.5} textAnchor="end" fontSize={10}
+                  fill={isToday ? '#3b82f6' : weekend ? '#334155' : '#94a3b8'} fontWeight={isToday || weekend ? 600 : 400}>
+                  {isToday ? 'Today' : fmtDayLong(r.date)}
+                </text>
+                {r.values.map((v, h) => {
+                  const future = isToday && h > nowHour
+                  const active = hover?.day === i && hover.hour === h
+                  return (
+                    <rect key={h} x={cellX(h) + HM_GAP / 2} y={rowY(i) + HM_GAP / 2}
+                      width={HM_CELL_W - HM_GAP} height={HM_CELL_H - HM_GAP} rx={2}
+                      fill={future ? 'url(#heat-future)' : fill(v)}
+                      stroke={active ? '#334155' : v === null && !future ? '#e2e8f0' : 'none'}
+                      strokeWidth={active ? 1.5 : 1}
+                      onMouseEnter={() => setHover({ day: i, hour: h })} />
+                  )
+                })}
+                <rect x={HM_W - HM_RIGHT + 10} y={rowY(i) + 4} height={HM_CELL_H - 8} rx={2}
+                  width={(dayTotals[i] / totalMax) * (HM_RIGHT - 14)} fill="#cbd5e1">
+                  <title>{`${fmtDayLong(r.date)} · ${fmtWh(dayTotals[i])}`}</title>
+                </rect>
+              </g>
+            )
+          })}
+
+          <text x={HM_LEFT - 8} y={avgY + HM_CELL_H / 2 + 3.5} textAnchor="end" fontSize={10} fill="#64748b" fontWeight={600}>
+            Avg / h
+          </text>
+          {avg.map((v, h) => (
+            <rect key={h} x={cellX(h) + HM_GAP / 2} y={avgY + HM_GAP / 2}
+              width={HM_CELL_W - HM_GAP} height={HM_CELL_H - HM_GAP} rx={2}
+              fill={fill(v)} stroke={hover?.day === -1 && hover.hour === h ? '#334155' : 'none'} strokeWidth={1.5}
+              onMouseEnter={() => setHover({ day: -1, hour: h })} />
+          ))}
+        </svg>
+
+        <div className="d-flex flex-wrap align-items-center justify-content-between mt-2" style={{ fontSize: 12, color: '#64748b', gap: 12 }}>
+          <div style={{ minHeight: 18 }}>
+            {hover === null ? (
+              <span style={{ color: '#94a3b8' }}>Hover a cell to see the hour's energy and peak power.</span>
+            ) : hover.day === -1 ? (
+              <>
+                <strong>Average</strong> · {String(hover.hour).padStart(2, '0')}:00–{String(hover.hour + 1).padStart(2, '0')}:00 ·{' '}
+                {avg[hover.hour] === null ? 'no data' : fmtValue(Math.round(avg[hover.hour]!))}
+              </>
+            ) : hovered && (
+              <>
+                <strong>{fmtDayLong(hovered.date)}</strong> · {String(hover.hour).padStart(2, '0')}:00–{String(hover.hour + 1).padStart(2, '0')}:00 ·{' '}
+                {hovered.date === today && hover.hour > nowHour ? 'not yet' : hovered.wh[hover.hour] === null ? 'no data' : (
+                  <>
+                    {fmtWh(hovered.wh[hover.hour]!)}
+                    {hovered.peak[hover.hour] !== null && <> · peak {fmtW(Math.round(hovered.peak[hover.hour]!))}</>}
+                  </>
+                )}
+              </>
+            )}
+          </div>
+          <div className="d-flex align-items-center" style={{ gap: 6 }}>
+            {negMax > 0 && (
+              <>
+                <span>{fmtValue(Math.round(-negMax))} {reverseLabel(data.role)}</span>
+                <span style={{ width: 48, height: 8, borderRadius: 4, background: `linear-gradient(to left, ${REVERSE_STOPS.join(', ')})` }} />
+              </>
+            )}
+            <span>0</span>
+            <span style={{ width: 96, height: 8, borderRadius: 4, background: `linear-gradient(to right, ${HEAT_STOPS.join(', ')})` }} />
+            <span>{fmtValue(Math.round(posMax))}</span>
+          </div>
+        </div>
+      </>
+    )
+  }
+
+  const toggle = (active: boolean) => `btn btn-sm ${active ? 'btn-secondary' : 'btn-outline-secondary'}`
+
+  return (
+    <div className="mb-4">
+      <h2 style={{ fontSize: 14, fontWeight: 600, color: '#64748b', marginBottom: 12 }}>
+        Hourly usage (last {range} days)
+      </h2>
+      <div style={{ border: '1px solid #e2e8f0', borderRadius: 8, padding: '12px 16px', background: '#fff' }}>
+        <div className="d-flex flex-wrap mb-3" style={{ gap: 8 }}>
+          <div className="btn-group" role="group" aria-label="Days">
+            {HEAT_RANGES.map(n => (
+              <button key={n} type="button" className={toggle(range === n)} onClick={() => setRange(n)}>{n}d</button>
+            ))}
+          </div>
+          <div className="btn-group" role="group" aria-label="Metric">
+            <button type="button" className={toggle(metric === 'wh')} onClick={() => setMetric('wh')}>Wh / mean</button>
+            <button type="button" className={toggle(metric === 'peak')} onClick={() => setMetric('peak')}>W peak</button>
+          </div>
+        </div>
+        <div className="d-flex flex-wrap mb-3" style={{ gap: 6 }}>
+          {nodes.map(n => (
+            <button key={n.graphId} type="button" className={toggle(streamId === n.graphId)}
+              onClick={() => setStreamId(n.graphId)}>
+              {n.label}{n.role === 'grid' ? ' (Grid)' : ''}
+            </button>
+          ))}
+        </div>
+        {body}
+      </div>
+    </div>
+  )
+}
+
 function NodeCard({ node, date }: { node: ConnectedNode; date: string }) {
   const url = node.role === 'grid'
     ? `/api/data/grid?date=${date}`
@@ -561,6 +812,7 @@ function Power() {
       ) : (
         <>
           <UsageHistory labels={labels} />
+          <HourlyHeatmap nodes={nodes} />
           {nodes.map(n => <NodeCard key={n.graphId} node={n} date={date} />)}
         </>
       )}

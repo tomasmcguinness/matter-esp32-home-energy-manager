@@ -65,6 +65,14 @@ char      *node_power_logger_battery_mix_trace_json(const char *date_str);
 // a malformed id or date. Caller must free.
 char      *node_power_logger_series_json(const char *node_id, const char *date_str, bool hourly);
 
+// One stream's hourly energy over the last `days` local days, oldest first:
+// {"id","role","days":[{"date","wh":[24],"peak_w":[24]}]}. wh is the hour's
+// mean power (= Wh); peak_w is the largest-magnitude minute reading. Both use
+// the raw Matter sign; null where nothing was recorded (peak_w also null when
+// only the hourly rollup survives). The grid stream reads grid-* files. NULL
+// for a malformed id. Caller must free.
+char      *node_power_logger_heatmap_json(const char *node_id, int days);
+
 // Expected usage for a local day, per appliance and for the unmonitored
 // remainder, in watts per local hour (24 values from 00:00):
 // {"date","method":"same-weekday"|"recent-days","days_used":N,

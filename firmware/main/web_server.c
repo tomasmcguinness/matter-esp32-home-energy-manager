@@ -1091,6 +1091,7 @@ static esp_err_t data_node_get_handler(httpd_req_t *req)
 {
     char node_id[48] = {0};
     char date[16]    = {0};
+    char days[8]     = {0};
 
     size_t qlen = httpd_req_get_url_query_len(req);
     if (qlen > 0 && qlen < 96)
@@ -1100,12 +1101,32 @@ static esp_err_t data_node_get_handler(httpd_req_t *req)
         {
             httpd_query_key_value(query, "id", node_id, sizeof(node_id));
             httpd_query_key_value(query, "date", date, sizeof(date));
+            httpd_query_key_value(query, "days", days, sizeof(days));
         }
     }
     if (!node_id[0])
     {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Missing id");
         return ESP_FAIL;
+    }
+
+    // ?days=N switches to the hourly heatmap over the last N days. It shares this
+    // route rather than taking a URI handler slot of its own.
+    if (days[0])
+    {
+        int n = atoi(days);
+        if (n < 1) n = 1;
+        if (n > 60) n = 60;
+        char *json = node_power_logger_heatmap_json(node_id, n);
+        if (!json)
+        {
+            httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid id");
+            return ESP_FAIL;
+        }
+        httpd_resp_set_type(req, "application/json");
+        esp_err_t err = httpd_resp_sendstr(req, json);
+        free(json);
+        return err;
     }
     if (!date[0])
     {
