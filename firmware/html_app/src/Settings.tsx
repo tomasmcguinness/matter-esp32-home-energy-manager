@@ -1,9 +1,11 @@
 import { useState } from 'react'
+import { useSetup } from './setup'
 
 type ResetState = 'idle' | 'confirm' | 'resetting' | 'done' | 'error'
 
 function Settings() {
   const [resetState, setResetState] = useState<ResetState>('idle')
+  const { advanced, setAdvanced } = useSetup()
 
   function handleResetClick() {
     setResetState('confirm')
@@ -29,6 +31,25 @@ function Settings() {
         <h1 className="mb-0">Settings</h1>
       </div>
       <hr />
+
+      <div className="mb-4" style={{ border: '1px solid #e2e8f0', borderRadius: 6, overflow: 'hidden' }}>
+        <div style={{ background: '#f8fafc', padding: '10px 16px', borderBottom: '1px solid #e2e8f0' }}>
+          <strong style={{ color: '#1e293b' }}>Display</strong>
+        </div>
+        <div style={{ padding: '16px' }}>
+          <div className="form-check mb-0">
+            <input className="form-check-input" type="checkbox" id="advanced-features"
+              checked={advanced} onChange={e => setAdvanced(e.target.checked)} />
+            <label className="form-check-label" htmlFor="advanced-features" style={{ fontWeight: 500 }}>
+              Show advanced features
+            </label>
+            <div style={{ fontSize: '0.85rem', color: '#6c757d', marginTop: 2 }}>
+              Adds the Test page, with tools for generating sample data and running the nightly jobs by hand.
+              Only affects this browser. Other pages appear on their own as you set up your home.
+            </div>
+          </div>
+        </div>
+      </div>
 
       <div style={{ border: '1px solid #f5c2c7', borderRadius: 6, overflow: 'hidden' }}>
         <div style={{ background: '#f8d7da', padding: '10px 16px', borderBottom: '1px solid #f5c2c7' }}>

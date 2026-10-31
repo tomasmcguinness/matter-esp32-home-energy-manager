@@ -62,9 +62,14 @@ size_t appliance_enumerate(char ids[][APPLIANCE_ID_MAX_LEN],
 bool appliance_profile_load(const char *graph_id, appliance_profile_t *out);
 
 // True if the appliance node carries settings.excludeFromScheduling == true,
-// marking it as non-deferrable (e.g. a hob or oven). The scheduler skips these.
-// Defaults to false on any missing node/field or parse error.
+// marking it as non-deferrable (e.g. a hob or oven), or is excluded from learning.
+// The scheduler skips these. Defaults to false on any missing node/field or parse error.
 bool appliance_is_excluded(const char *graph_id);
+
+// True if the appliance node carries settings.excludeFromLearning == true. Training
+// skips these and leaves any existing profile as it is. Defaults to false on any
+// missing node/field or parse error.
+bool appliance_is_excluded_from_learning(const char *graph_id);
 
 // Read back one appliance's persisted profile as JSON. Caller must free.
 // Shape: {"trained":bool,"graph_id":"..","standby_w":F,"avg_program_power_w":F,

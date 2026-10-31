@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
+import { useSetup } from './setup'
 
-type SimpleDevice = { nodeId: number; endpointId: number; label: string; name?: string; hasElectricalSensor: boolean; hasSolarPower: boolean; excludeFromScheduling?: boolean }
+type SimpleDevice = { nodeId: number; endpointId: number; label: string; name?: string; hasElectricalSensor: boolean; hasSolarPower: boolean; excludeFromScheduling?: boolean; excludeFromLearning?: boolean }
 
 type SlotProps = {
   label: string
@@ -412,6 +413,9 @@ function EditApplianceModal({ slotLabel, topologyNodeId, nodeType, position, wir
   const [nameTouched, setNameTouched] = useState<boolean>(!!initialSelected?.name)
   // Non-deferrable appliances (hob, oven) the scheduler should ignore.
   const [excludeFromScheduling, setExcludeFromScheduling] = useState<boolean>(initialSelected?.excludeFromScheduling ?? false)
+  // Appliances that shouldn't be profiled at all. These are never scheduled either,
+  // but excludeFromScheduling keeps its own value so unticking this restores it.
+  const [excludeFromLearning, setExcludeFromLearning] = useState<boolean>(initialSelected?.excludeFromLearning ?? false)
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -453,7 +457,7 @@ function EditApplianceModal({ slotLabel, topologyNodeId, nodeType, position, wir
         x: position.x,
         y: position.y,
         // The backend replaces the whole settings object (no merge), so send every field.
-        settings: { label: selected.label, name: resolvedName, type: nodeType, nodeId: selected.nodeId, endpointId: selected.endpointId, excludeFromScheduling },
+        settings: { label: selected.label, name: resolvedName, type: nodeType, nodeId: selected.nodeId, endpointId: selected.endpointId, excludeFromScheduling, excludeFromLearning },
       }),
     })
       .then(r => r.ok ? r.json() : Promise.reject(`HTTP ${r.status}`))
@@ -465,7 +469,7 @@ function EditApplianceModal({ slotLabel, topologyNodeId, nodeType, position, wir
             body: JSON.stringify({ id: edgeId, source: 'consumer_unit', sourceHandle, target: topologyNodeId, targetHandle: 'power-in' }),
           }).then(r => r.ok ? r.json() : Promise.reject(`HTTP ${r.status}`))
         : undefined)
-      .then(() => onSave({ ...selected, name: resolvedName, excludeFromScheduling }))
+      .then(() => onSave({ ...selected, name: resolvedName, excludeFromScheduling, excludeFromLearning }))
       .catch((e: unknown) => {
         setError(e instanceof Error ? e.message : String(e))
         setSaving(false)
@@ -489,10 +493,23 @@ function EditApplianceModal({ slotLabel, topologyNodeId, nodeType, position, wir
             style={{ width: '100%', boxSizing: 'border-box', padding: '8px 12px', borderRadius: 6, border: '1px solid #e2e8f0', fontSize: 14, color: '#1e293b' }}
           />
         </label>
-        <label style={{ display: 'flex', alignItems: 'flex-start', gap: 8, marginBottom: 16, cursor: 'pointer' }}>
+        <label style={{ display: 'flex', alignItems: 'flex-start', gap: 8, marginBottom: 12, cursor: 'pointer' }}>
           <input
             type="checkbox"
-            checked={excludeFromScheduling}
+            checked={excludeFromLearning}
+            onChange={e => setExcludeFromLearning(e.target.checked)}
+            style={{ marginTop: 2 }}
+          />
+          <span style={{ fontSize: 13, color: '#1e293b' }}>
+            Exclude from learning
+            <span style={{ display: 'block', fontSize: 12, color: '#64748b' }}>Don't build a usage profile for this appliance. It won't be scheduled either.</span>
+          </span>
+        </label>
+        <label style={{ display: 'flex', alignItems: 'flex-start', gap: 8, marginBottom: 16, cursor: excludeFromLearning ? 'not-allowed' : 'pointer' }}>
+          <input
+            type="checkbox"
+            checked={excludeFromScheduling || excludeFromLearning}
+            disabled={excludeFromLearning}
             onChange={e => setExcludeFromScheduling(e.target.checked)}
             style={{ marginTop: 2 }}
           />
@@ -591,7 +608,7 @@ const slotLabel = (slot: number) => APPLIANCE_SLOTS[slot] ?? `Appliance ${slot +
 const applianceNodeId = (slot: number) => `appliance_${slot + 1}`
 const applianceCircuitHandle = (slot: number) => `circuit_${slot + 1}`
 
-type SavedNode = { id: string; x?: number; y?: number; settings?: { label?: string; name?: string; type?: string; nodeId?: number; endpointId?: number; excludeFromScheduling?: boolean } }
+type SavedNode = { id: string; x?: number; y?: number; settings?: { label?: string; name?: string; type?: string; nodeId?: number; endpointId?: number; excludeFromScheduling?: boolean; excludeFromLearning?: boolean } }
 type SavedEdge = { id: string; source: string; target: string; sourceHandle?: string; targetHandle?: string }
 
 // A load shown in an appliance slot, with the topology node behind it.
@@ -622,7 +639,7 @@ function applianceSlots(nodes: SavedNode[], edges: SavedEdge[]): (ApplianceSlot 
     if (s.nodeId === undefined || s.endpointId === undefined || !s.label) continue
     const slot: ApplianceSlot = {
       graphId: n.id, type: s.type!, x: n.x, y: n.y,
-      device: { nodeId: s.nodeId, endpointId: s.endpointId, label: s.label, name: s.name, hasElectricalSensor: true, hasSolarPower: false, excludeFromScheduling: s.excludeFromScheduling === true },
+      device: { nodeId: s.nodeId, endpointId: s.endpointId, label: s.label, name: s.name, hasElectricalSensor: true, hasSolarPower: false, excludeFromScheduling: s.excludeFromScheduling === true, excludeFromLearning: s.excludeFromLearning === true },
     }
     const own = n.id.match(/^appliance_(\d+)$/)
     const index = own ? parseInt(own[1]) - 1 : -1
@@ -652,6 +669,8 @@ function Home() {
   const [applianceModalSlot, setApplianceModalSlot] = useState<number | null>(null)
   // Consumer Unit position, used to place newly created appliance nodes on the canvas.
   const [cuPos, setCuPos] = useState<{ x: number; y: number }>({ x: 0, y: 0 })
+  // Tabs appear as things are configured, so tell the nav after every change.
+  const { refresh: refreshSetup } = useSetup()
 
   const loadTopology = useCallback(() => {
     fetch('/api/nodes')
@@ -684,17 +703,20 @@ function Home() {
   function handleGridSave(device: SimpleDevice) {
     setGridSensor(device)
     setGridModalOpen(false)
+    refreshSetup()
   }
 
   function handleSolarSave(device: SimpleDevice) {
     setSolarInverter(device)
     setSolarModalOpen(false)
+    refreshSetup()
   }
 
   // Slots are derived from the graph, so re-read it after any change.
   function handleApplianceSave() {
     setApplianceModalSlot(null)
     loadTopology()
+    refreshSetup()
   }
 
   function handleApplianceDelete(slot: number) {
@@ -705,7 +727,7 @@ function Home() {
     const touching = edges.filter(e => e.source === graphId || e.target === graphId)
     Promise.all(touching.map(e => fetch(`/api/edges/${e.id}`, { method: 'DELETE' })))
       .then(() => fetch(`/api/nodes/${graphId}`, { method: 'DELETE' }))
-      .then(loadTopology)
+      .then(() => { loadTopology(); refreshSetup() })
       .catch(() => { })
   }
 
@@ -721,26 +743,27 @@ function Home() {
   function handleGridDelete() {
     fetch('/api/edges/grid_meter-power-out-consumer_unit-grid', { method: 'DELETE' })
       .then(() => fetch('/api/nodes/grid_meter', { method: 'DELETE' }))
-      .then(() => setGridSensor(null))
+      .then(() => { setGridSensor(null); refreshSetup() })
       .catch(() => { })
   }
 
   function handleTariffSave(device: SimpleDevice) {
     setTariff(device)
     setTariffModalOpen(false)
+    refreshSetup()
   }
 
   function handleTariffDelete() {
     fetch('/api/edges/tariff-tariff-out-consumer_unit-tariff', { method: 'DELETE' })
       .then(() => fetch('/api/nodes/tariff', { method: 'DELETE' }))
-      .then(() => setTariff(null))
+      .then(() => { setTariff(null); refreshSetup() })
       .catch(() => { })
   }
 
   function handleSolarDelete() {
     fetch('/api/edges/solar_inverter-power-out-consumer_unit-solar_input', { method: 'DELETE' })
       .then(() => fetch('/api/nodes/solar_inverter', { method: 'DELETE' }))
-      .then(() => setSolarInverter(null))
+      .then(() => { setSolarInverter(null); refreshSetup() })
       .catch(() => { })
   }
 

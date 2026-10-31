@@ -305,7 +305,8 @@ static const tool_t TOOLS[] = {
       true, tool_get_power_series },
     { "get_daily_energy",
       "Energy per node per day (kWh, raw sign: + = into the node), with cost and each load's solar/grid "
-      "split where available. Today is included and is partial.",
+      "split where available. Today is included, is partial and can be up to 5 minutes old. "
+      "building=true means the history is still being generated: retry shortly.",
       "{\"type\":\"object\",\"properties\":{"
       "\"days\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":60,\"description\":\"Days back from today, default 7.\"}}}",
       true, tool_get_daily_energy },
@@ -327,7 +328,8 @@ static const tool_t TOOLS[] = {
       true, tool_get_schedule },
     { "get_appliance_profiles",
       "Learned usage profiles (standby power, program power and length) for one appliance, or all of them "
-      "when node_id is omitted.",
+      "when node_id is omitted. excluded_from_learning=true means the appliance is no longer trained or "
+      "scheduled, so any figures are from before it was excluded.",
       "{\"type\":\"object\",\"properties\":{\"node_id\":{\"type\":\"string\"}}}",
       true, tool_get_appliance_profiles },
     { "get_tariff",
@@ -351,7 +353,8 @@ static const tool_t TOOLS[] = {
       true, tool_list_data_files },
     { "recompute_days",
       "Discard the cached cost and solar/grid split for every day from from_date up to yesterday and rebuild "
-      "them from the logged minute data. Use after a fix to the split or tariff. Raw data is not touched.",
+      "them from the logged minute data. Use after a fix to the split or tariff. Raw data is not touched. "
+      "get_daily_energy catches up in the background shortly afterwards.",
       "{\"type\":\"object\",\"properties\":{"
       "\"from_date\":{\"type\":\"string\",\"description\":\"First day to rebuild, YYYY-MM-DD, at most 60 days back.\"}},"
       "\"required\":[\"from_date\"]}",

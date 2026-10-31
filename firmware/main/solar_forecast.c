@@ -20,6 +20,7 @@
 #include "surplus_forecast.h"
 #include "surplus_model.h"
 #include "appliance_profile.h"
+#include "node_power_logger.h"
 
 static const char *TAG = "solar_forecast";
 
@@ -265,14 +266,33 @@ static bool clock_is_set(void)
     return time(NULL) > 1700000000;
 }
 
-// The nightly operation: for the current date, fetch the solar forecast, compute the
-// consumption forecast from prior data, then derive and save the surplus forecast.
-// Each writer overwrites any existing file for that date.
+// Forecasting only means something once solar is wired: without it there is no
+// surplus to predict, and a home on plugs and clamps alone shouldn't call
+// Open-Meteo every night.
+static bool forecasting_configured(void)
+{
+    return node_power_logger_has_role("solar");
+}
+
+// The nightly operation. Every night, refresh the appliance profiles. With solar
+// wired, also fetch the solar forecast, compute the consumption forecast from prior
+// data, then derive and save the surplus forecast. Each writer overwrites any
+// existing file for that date.
 esp_err_t solar_forecast_run_daily_job(void)
 {
     if (!clock_is_set()) {
         ESP_LOGW(TAG, "Skipping daily job — wall clock not set (SNTP not synced yet)");
         return ESP_ERR_INVALID_STATE;
+    }
+
+    // Refresh each appliance's usage profile (standby / program power / length)
+    // from the last 30 days of per-node minute history. Non-fatal best-effort,
+    // and independent of the forecast, so a failed fetch doesn't skip it.
+    appliance_profile_train_all(30);
+
+    if (!forecasting_configured()) {
+        ESP_LOGI(TAG, "No solar inverter wired — skipping the solar and surplus forecast");
+        return ESP_OK;
     }
 
     char target[11];
@@ -289,10 +309,6 @@ esp_err_t solar_forecast_run_daily_job(void)
     // Refit the surplus regression from the latest history (yesterday's
     // grid-hourly was rolled up at midnight, so the fit is fresh each night).
     surplus_model_train(56);
-
-    // Refresh each appliance's usage profile (standby / program power / length)
-    // from the last 30 days of per-node minute history. Non-fatal best-effort.
-    appliance_profile_train_all(30);
 
     // Consumption forecast is now only the cold-start fallback for surplus, so a
     // failure here is non-fatal — surplus_forecast_compute uses the model when
@@ -346,6 +362,10 @@ static void run_catch_up(void)
         ESP_LOGW(TAG, "Clock not set — skipping forecast catch-up");
         return;
     }
+    // Without solar there is never a surplus file, so this would re-run the job on
+    // every boot. The 02:00 run still refreshes the appliance profiles.
+    if (!forecasting_configured())
+        return;
     char target[11];
     today_date(target, sizeof(target));
     char path[64];

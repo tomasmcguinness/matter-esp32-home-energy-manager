@@ -7,6 +7,7 @@ import { EditNodeModal, type NodeSettings } from './EditNodeModal'
 import { useWebSocket, type WsMessage } from './useWebSocket'
 import { DnDProvider, useDnD } from './DnDContext';
 import { fmtMoney, fmtUnitPrice, useCurrentPrice } from './tariff'
+import { useSetup } from './setup'
 
 const edgeTypes = { powerFlow: PowerFlowEdge }
 
@@ -644,6 +645,21 @@ function editSettings(node: Node): NodeSettings {
 function Topology() {
   const [nodes, setNodes, onNodesChange] = useNodesState(initialNodes)
   const [edges, setEdges, onEdgesChangeBase] = useEdgesState(initialEdges)
+
+  // Wiring decides which tabs are shown. Edges are re-set on every power update,
+  // so watch only the set of edge ids, and wait for the saves to land first.
+  const { refresh: refreshSetup } = useSetup()
+  const edgeKey = edges.map(e => e.id).sort().join('|')
+  const lastEdgeKey = useRef<string | null>(null)
+  useEffect(() => {
+    if (lastEdgeKey.current === null || lastEdgeKey.current === edgeKey) {
+      lastEdgeKey.current = edgeKey
+      return
+    }
+    lastEdgeKey.current = edgeKey
+    const t = setTimeout(refreshSetup, 1000)
+    return () => clearTimeout(t)
+  }, [edgeKey, refreshSetup])
   const [gridModalOpen, setGridModalOpen] = useState(false)
   const [editNode, setEditNode] = useState<Node | null>(null)
   const [nodeMenu, setNodeMenu] = useState<{ node: Node; x: number; y: number } | null>(null)
@@ -679,6 +695,7 @@ function Topology() {
       const d = msg.data as { productName?: string; vendorName?: string }
       const name = [d.vendorName, d.productName].filter(Boolean).join(' ')
       addToast(`New device commissioned: ${name || 'Unknown device'}`)
+      refreshSetup()
       return
     }
 
@@ -745,7 +762,7 @@ function Topology() {
         }), subCuIds))
       }
     }
-  }, [addToast, setNodes, setEdges, getNodes])
+  }, [addToast, setNodes, setEdges, getNodes, refreshSetup])
 
   const wsState = useWebSocket(handleWsMessage)
 

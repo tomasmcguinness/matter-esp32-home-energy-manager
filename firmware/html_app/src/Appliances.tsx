@@ -14,6 +14,9 @@ type ApplianceProfile = {
   days_with_data?: number
   trained_unix?: number
   window_days?: number
+  // The user opted this appliance out, so it isn't listed here. Topology still
+  // reads its last profile for the standby figure.
+  excluded_from_learning?: boolean
 }
 type ProfilesResponse = { appliances: ApplianceProfile[] }
 
@@ -229,6 +232,8 @@ function Appliances() {
       .catch((e: unknown) => { setError(String(e)); setTraining(false) })
   }
 
+  const learning = appliances.filter(a => !a.excluded_from_learning)
+
   return (
     <div>
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
@@ -264,9 +269,13 @@ function Appliances() {
         <div style={{ padding: '48px 0', textAlign: 'center', color: '#94a3b8', fontSize: 13 }}>
           No appliances configured yet. Wire an appliance to a consumer-unit circuit in Topology.
         </div>
+      ) : learning.length === 0 ? (
+        <div style={{ padding: '48px 0', textAlign: 'center', color: '#94a3b8', fontSize: 13 }}>
+          All your appliances are excluded from learning. Change this on the Home page.
+        </div>
       ) : (
         <div className="d-flex flex-column gap-3">
-          {appliances.map(a => <ApplianceCard key={a.graph_id} a={a} />)}
+          {learning.map(a => <ApplianceCard key={a.graph_id} a={a} />)}
         </div>
       )}
     </div>

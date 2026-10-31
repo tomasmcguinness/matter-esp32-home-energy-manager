@@ -362,10 +362,9 @@ static void enumerate_appliances(appliance_visit_fn fn, void *ctx)
     cJSON_Delete(root);
 }
 
-// True if the appliance node carries settings.excludeFromScheduling == true.
-// Used by the scheduler to drop appliances the user has marked as non-deferrable
-// (e.g. a hob or oven). Defaults to false on any missing node/field or parse error.
-bool appliance_is_excluded(const char *graph_id)
+// True if the node's settings carry `key` == true. Defaults to false on any
+// missing node/field or parse error.
+static bool node_setting_is_true(const char *graph_id, const char *key)
 {
     if (!graph_id) return false;
 
@@ -375,25 +374,44 @@ bool appliance_is_excluded(const char *graph_id)
     free(raw);
     if (!root) return false;
 
-    bool excluded = false;
+    bool value = false;
     cJSON *nodes = cJSON_GetObjectItemCaseSensitive(root, "nodes");
     cJSON *n = NULL;
     cJSON_ArrayForEach(n, nodes) {
         const char *nid = json_str(n, "id");
         if (!nid || strcmp(nid, graph_id) != 0) continue;
         cJSON *settings = cJSON_GetObjectItemCaseSensitive(n, "settings");
-        cJSON *ex = settings ? cJSON_GetObjectItemCaseSensitive(settings, "excludeFromScheduling") : NULL;
-        excluded = cJSON_IsTrue(ex);
+        cJSON *flag = settings ? cJSON_GetObjectItemCaseSensitive(settings, key) : NULL;
+        value = cJSON_IsTrue(flag);
         break;
     }
 
     cJSON_Delete(root);
-    return excluded;
+    return value;
+}
+
+bool appliance_is_excluded_from_learning(const char *graph_id)
+{
+    return node_setting_is_true(graph_id, "excludeFromLearning");
+}
+
+// Used by the scheduler to drop appliances the user has marked as non-deferrable
+// (e.g. a hob or oven). An appliance that isn't learned has no profile to place,
+// so excluding it from learning excludes it from scheduling too.
+bool appliance_is_excluded(const char *graph_id)
+{
+    return node_setting_is_true(graph_id, "excludeFromScheduling") ||
+           appliance_is_excluded_from_learning(graph_id);
 }
 
 static void train_one(const char *graph_id, const char *name, void *ctx)
 {
     (void)name;
+    // Any existing profile is left alone: Topology still reads its standby figure.
+    if (appliance_is_excluded_from_learning(graph_id)) {
+        ESP_LOGI(TAG, "Skipping %s: excluded from learning", graph_id);
+        return;
+    }
     int window_days = *(int *)ctx;
     appliance_profile_train(graph_id, window_days);
 }
@@ -461,6 +479,8 @@ static cJSON *profile_to_cjson(const char *id)
 {
     cJSON *o = cJSON_CreateObject();
     cJSON_AddStringToObject(o, "graph_id", id);
+    if (appliance_is_excluded_from_learning(id))
+        cJSON_AddBoolToObject(o, "excluded_from_learning", true);
 
     appliance_profile_t prof;
     if (!load_profile(id, &prof)) {

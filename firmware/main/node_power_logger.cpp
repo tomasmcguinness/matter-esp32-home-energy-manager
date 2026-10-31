@@ -18,6 +18,8 @@
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
+#include "freertos/task.h"
+#include "esp_heap_caps.h"
 #include "esp_timer.h"
 #include "esp_log.h"
 #include "cJSON.h"
@@ -58,7 +60,16 @@ static std::vector<stream_t> s_streams;
 static esp_timer_handle_t    s_sample_timer;
 static esp_timer_handle_t    s_flush_timer;
 static esp_timer_handle_t    s_daily_timer;
+static SemaphoreHandle_t     s_compute_mutex; // serialises the worker and recompute_from
+static SemaphoreHandle_t     s_hist_mutex;    // guards the usage history rows
+static TaskHandle_t          s_hist_task;
 
+#define HIST_TASK_STACK    8192
+#define HIST_TASK_PRIO     3            // below the web server: this is background work
+#define HIST_BIT_MIDNIGHT  (1 << 0)
+#define HIST_BIT_REFRESH   (1 << 1)
+
+static void history_task(void *arg);
 static void schedule_midnight_rollup(void);
 static void cost_day_cached(const char *date, bool allow_cache_write);
 static void split_day_cached(const char *date);
@@ -288,7 +299,9 @@ static void on_flush_timer(void *arg)
     refresh_streams();
 }
 
-static void on_midnight_timer(void *arg)
+// Runs on the history worker, so it cannot interleave with a history refresh and
+// the SD work does not hold up the sample and flush timers.
+static void run_midnight_job(void)
 {
     time_t now = time(NULL);
     struct tm tm_info;
@@ -309,11 +322,18 @@ static void on_midnight_timer(void *arg)
     // Roll up yesterday's per-minute data to hourly, for both the per-node
     // streams and the grid, then build tomorrow's consumption forecast from the
     // freshly-rolled grid-hourly history.
+    xSemaphoreTake(s_compute_mutex, portMAX_DELAY);
     node_power_logger_rollup_hourly(yesterday);
     power_logger_rollup_hourly(yesterday);
     cost_day_cached(yesterday, true); // freeze yesterday's cost while the minute files are fresh
     split_day_cached(yesterday);      // ...and its solar/grid split, carrying the battery ledger on
     consumption_forecast_compute(tomorrow);
+    xSemaphoreGive(s_compute_mutex);
+}
+
+static void on_midnight_timer(void *arg)
+{
+    xTaskNotify(s_hist_task, HIST_BIT_MIDNIGHT, eSetBits);
     schedule_midnight_rollup();
 }
 
@@ -335,7 +355,9 @@ static void schedule_midnight_rollup(void)
 esp_err_t node_power_logger_init(void)
 {
     s_mutex = xSemaphoreCreateMutex();
-    if (!s_mutex)
+    s_compute_mutex = xSemaphoreCreateMutex();
+    s_hist_mutex = xSemaphoreCreateMutex();
+    if (!s_mutex || !s_compute_mutex || !s_hist_mutex)
         return ESP_ERR_NO_MEM;
 
     refresh_streams();
@@ -367,6 +389,10 @@ esp_err_t node_power_logger_init(void)
     };
     err = esp_timer_create(&daily_args, &s_daily_timer);
     if (err != ESP_OK) return err;
+
+    if (xTaskCreate(history_task, "usage_history", HIST_TASK_STACK, NULL, HIST_TASK_PRIO, &s_hist_task) != pdPASS)
+        return ESP_ERR_NO_MEM;
+
     schedule_midnight_rollup();
 
     return ESP_OK;
@@ -552,6 +578,16 @@ static bool file_kwh(const char *hourly_path, const char *minute_path, double *k
 static inline int32_t supplied_mw(int32_t raw_mw) { return -raw_mw; }
 
 struct stream_info_t { std::string graph_id; const char *role; bool is_grid; };
+
+bool node_power_logger_has_role(const char *role)
+{
+    bool found = false;
+    xSemaphoreTake(s_mutex, portMAX_DELAY);
+    for (const auto &s : s_streams)
+        if (strcmp(s.role, role) == 0) { found = true; break; }
+    xSemaphoreGive(s_mutex);
+    return found;
+}
 
 static std::vector<stream_info_t> snapshot_streams(void)
 {
@@ -1059,94 +1095,56 @@ char *node_power_logger_battery_source_json(void)
     return json; // caller must free
 }
 
-char *node_power_logger_daily_energy_json(int days)
+// One day of the usage history as a JSON object. Slow: it reads the day's rollups
+// and cost/split caches, or the minute files for today.
+static char *render_day(const char *date, bool is_today, const std::vector<stream_info_t> &streams,
+                        int32_t *currency)
 {
-    std::vector<stream_info_t> streams = snapshot_streams();
+    cJSON *day = cJSON_CreateObject();
+    cJSON_AddStringToObject(day, "date", date);
+    cJSON *kwh = cJSON_AddObjectToObject(day, "kwh");
 
-    cJSON *root  = cJSON_CreateObject();
-    cJSON *nodes = cJSON_AddArrayToObject(root, "nodes");
     for (const auto &s : streams) {
-        cJSON *obj = cJSON_CreateObject();
-        cJSON_AddStringToObject(obj, "id",   s.graph_id.c_str());
-        cJSON_AddStringToObject(obj, "role", s.role);
-        cJSON_AddItemToArray(nodes, obj);
-    }
-
-    cJSON *arr = cJSON_AddArrayToObject(root, "days");
-    time_t now = time(NULL);
-    struct tm today;
-    localtime_r(&now, &today);
-
-    bool     have_currency = false;
-    uint16_t currency = 0;
-    battery_ledger_t ledger; // seeded from the day before the window on the first iteration
-    bool ledger_seeded = false;
-
-    // Oldest first. Step the calendar day via mktime so DST changes are handled.
-    for (int back = days - 1; back >= 0; back--) {
-        struct tm d = today;
-        d.tm_hour = 12; // midday avoids DST edge cases when normalising
-        d.tm_mday -= back;
-        mktime(&d);
-        char date[11];
-        strftime(date, sizeof(date), "%Y-%m-%d", &d);
-
-        cJSON *day = cJSON_CreateObject();
-        cJSON_AddStringToObject(day, "date", date);
-        cJSON *kwh = cJSON_AddObjectToObject(day, "kwh");
-
-        for (const auto &s : streams) {
-            char hourly[96], minute[96];
-            if (s.is_grid) {
-                snprintf(hourly, sizeof(hourly), "%s/grid-hourly-%s", SD_BASE, date);
-                snprintf(minute, sizeof(minute), "%s/grid-%s", SD_BASE, date);
-            } else {
-                snprintf(hourly, sizeof(hourly), "%s/nodeh-%s-%s", SD_BASE, s.graph_id.c_str(), date);
-                snprintf(minute, sizeof(minute), "%s/node-%s-%s", SD_BASE, s.graph_id.c_str(), date);
-            }
-            double v;
-            if (file_kwh(hourly, minute, &v))
-                cJSON_AddNumberToObject(kwh, s.graph_id.c_str(), v);
-        }
-
-        // Cost in major currency units (the stored money value / 10^decimals),
-        // so days priced with different precision still add up. Omitted without a tariff.
-        day_cost_t dc;
-        if (day_cost(date, back == 0, streams, dc, true)) {
-            double scale = pow(10.0, dc.decimals);
-            cJSON *cost = cJSON_AddObjectToObject(day, "cost");
-            for (const auto &c : dc.cost) cJSON_AddNumberToObject(cost, c.first.c_str(), c.second / scale);
-            have_currency = true;
-            currency = dc.currency;
-        }
-
-        // Solar vs grid energy per load, chaining the battery ledger day to day.
-        if (!ledger_seeded) {
-            ledger = ledger_before(date);
-            ledger_seeded = true;
-        }
-        day_split_t ds;
-        if (day_split(date, back == 0, streams, ledger, ds)) {
-            cJSON *solar = cJSON_AddObjectToObject(day, "solar_kwh");
-            cJSON *gridk = cJSON_AddObjectToObject(day, "grid_kwh");
-            for (const auto &w : ds.wh) {
-                cJSON_AddNumberToObject(solar, w.first.c_str(), w.second.first / 1000.0);
-                cJSON_AddNumberToObject(gridk, w.first.c_str(), w.second.second / 1000.0);
-            }
-            ledger = ds.end;
+        char hourly[96], minute[96];
+        if (s.is_grid) {
+            snprintf(hourly, sizeof(hourly), "%s/grid-hourly-%s", SD_BASE, date);
+            snprintf(minute, sizeof(minute), "%s/grid-%s", SD_BASE, date);
         } else {
-            ledger = battery_ledger_t{}; // no grid data: the battery's history is lost
+            snprintf(hourly, sizeof(hourly), "%s/nodeh-%s-%s", SD_BASE, s.graph_id.c_str(), date);
+            snprintf(minute, sizeof(minute), "%s/node-%s-%s", SD_BASE, s.graph_id.c_str(), date);
         }
-        cJSON_AddItemToArray(arr, day);
+        double v;
+        if (file_kwh(hourly, minute, &v))
+            cJSON_AddNumberToObject(kwh, s.graph_id.c_str(), v);
     }
 
-    if (have_currency) cJSON_AddNumberToObject(root, "currency", currency);
+    // Cost in major currency units (the stored money value / 10^decimals),
+    // so days priced with different precision still add up. Omitted without a tariff.
+    *currency = -1;
+    day_cost_t dc;
+    if (day_cost(date, is_today, streams, dc, true)) {
+        double scale = pow(10.0, dc.decimals);
+        cJSON *cost = cJSON_AddObjectToObject(day, "cost");
+        for (const auto &c : dc.cost) cJSON_AddNumberToObject(cost, c.first.c_str(), c.second / scale);
+        *currency = dc.currency;
+    }
 
-    char *json = cJSON_PrintUnformatted(root);
-    cJSON_Delete(root);
-    return json; // caller must free
+    // Solar vs grid energy per load. Days are rendered oldest first, so the day
+    // before this one already has its closing battery ledger cached.
+    day_split_t ds;
+    if (day_split(date, is_today, streams, ledger_before(date), ds)) {
+        cJSON *solar = cJSON_AddObjectToObject(day, "solar_kwh");
+        cJSON *gridk = cJSON_AddObjectToObject(day, "grid_kwh");
+        for (const auto &w : ds.wh) {
+            cJSON_AddNumberToObject(solar, w.first.c_str(), w.second.first / 1000.0);
+            cJSON_AddNumberToObject(gridk, w.first.c_str(), w.second.second / 1000.0);
+        }
+    }
+
+    char *json = cJSON_PrintUnformatted(day);
+    cJSON_Delete(day);
+    return json;
 }
-
 
 // ---- Diagnostics (served by the MCP endpoint) -------------------------------
 
@@ -1344,7 +1342,7 @@ char *node_power_logger_stream_health_json(void)
     return json; // caller must free
 }
 
-int node_power_logger_recompute_from(const char *date_str)
+static int recompute_days(const char *date_str)
 {
     char date[16], today[11];
     today_str(today, sizeof(today));
@@ -1384,6 +1382,307 @@ int node_power_logger_recompute_from(const char *date_str)
         } else {
             ledger = battery_ledger_t{}; // no grid data: the battery's history is lost
         }
+    }
+    return done;
+}
+
+// ---- Usage history ----------------------------------------------------------
+// Rendering a day means opening a dozen or more files, which takes over a second
+// per day on the SD card, so the history is generated ahead of time and requests
+// are answered from memory. A finished day never changes: it is rendered once,
+// and kept in /sdcard/usage-history across reboots. Today is re-rendered on a timer.
+
+static constexpr int      kHistoryDays      = 60; // the most any caller asks for, today included
+static constexpr uint32_t kHistoryRefreshMs = 5 * 60 * 1000;
+static constexpr uint32_t kClockRetryMs     = 5 * 1000;
+static constexpr int      kHistoryFormat    = 1;  // bump when a row's fields change
+static constexpr long     kHistoryMaxFile   = 1024 * 1024;
+
+static const char *HISTORY_PATH     = SD_BASE "/usage-history";
+static const char *HISTORY_TMP_PATH = SD_BASE "/usage-history.tmp";
+
+// Rows are around a kilobyte, small enough for malloc to put them in internal RAM.
+template <class T>
+struct psram_allocator {
+    using value_type = T;
+    psram_allocator() = default;
+    template <class U> psram_allocator(const psram_allocator<U> &) {}
+    T *allocate(size_t n)
+    {
+        void *p = heap_caps_malloc(n * sizeof(T), MALLOC_CAP_SPIRAM);
+        return static_cast<T *>(p ? p : malloc(n * sizeof(T)));
+    }
+    void deallocate(T *p, size_t) { free(p); }
+    template <class U> bool operator==(const psram_allocator<U> &) const { return true; }
+    template <class U> bool operator!=(const psram_allocator<U> &) const { return false; }
+};
+
+using ps_string = std::basic_string<char, std::char_traits<char>, psram_allocator<char>>;
+
+struct history_row_t {
+    char      date[11] = "";
+    int32_t   currency = -1; // ISO 4217 numeric, -1 when the day has no cost
+    ps_string json;
+};
+
+using history_rows_t = std::vector<history_row_t, psram_allocator<history_row_t>>;
+
+// Only the worker replaces the rows, under s_hist_mutex, which is never held
+// across SD access so a request cannot wait on a rebuild.
+static history_rows_t    s_hist_rows;        // finished days, oldest first
+static history_row_t     s_hist_today;
+static ps_string         s_hist_nodes;       // the "nodes" array
+static bool              s_hist_ready = false;
+static char              s_hist_stale_from[11] = ""; // rows from this date need re-rendering
+
+static bool clock_is_set(void)
+{
+    return time(NULL) > 1700000000;
+}
+
+static ps_string render_nodes(const std::vector<stream_info_t> &streams)
+{
+    cJSON *nodes = cJSON_CreateArray();
+    for (const auto &s : streams) {
+        cJSON *obj = cJSON_CreateObject();
+        cJSON_AddStringToObject(obj, "id",   s.graph_id.c_str());
+        cJSON_AddStringToObject(obj, "role", s.role);
+        cJSON_AddItemToArray(nodes, obj);
+    }
+    char *json = cJSON_PrintUnformatted(nodes);
+    cJSON_Delete(nodes);
+    ps_string out(json ? json : "[]");
+    free(json);
+    return out;
+}
+
+static history_row_t render_row(const char *date, bool is_today, const std::vector<stream_info_t> &streams)
+{
+    history_row_t row;
+    snprintf(row.date, sizeof(row.date), "%s", date);
+    char *json = render_day(date, is_today, streams, &row.currency);
+    if (json) row.json = json;
+    free(json);
+    return row;
+}
+
+static const history_row_t *find_row(const history_rows_t &rows, const char *date)
+{
+    for (const auto &r : rows)
+        if (strcmp(r.date, date) == 0) return &r;
+    return nullptr;
+}
+
+// One line each: the format version, the nodes array, then "<date> <currency> <json>".
+// cJSON escapes newlines inside strings, so a line is always a whole record.
+static void history_save(void)
+{
+    FILE *f = fopen(HISTORY_TMP_PATH, "w");
+    if (!f) {
+        ESP_LOGW(TAG, "Cannot open %s for write", HISTORY_TMP_PATH);
+        return;
+    }
+    bool ok = fprintf(f, "%d\n%s\n", kHistoryFormat, s_hist_nodes.c_str()) > 0;
+    for (const auto &r : s_hist_rows)
+        ok = ok && fprintf(f, "%s %ld %s\n", r.date, (long)r.currency, r.json.c_str()) > 0;
+    ok = fclose(f) == 0 && ok;
+    if (!ok) {
+        ESP_LOGW(TAG, "Failed writing %s", HISTORY_TMP_PATH);
+        unlink(HISTORY_TMP_PATH);
+        return;
+    }
+    // FAT cannot rename over a file. Losing power between these two steps only
+    // costs a rebuild.
+    unlink(HISTORY_PATH);
+    if (rename(HISTORY_TMP_PATH, HISTORY_PATH) != 0)
+        ESP_LOGW(TAG, "Cannot replace %s", HISTORY_PATH);
+}
+
+// A malformed file is abandoned and rebuilt by the first refresh. A truncated one
+// keeps its complete rows; the first refresh renders the days that were lost.
+static void history_load(void)
+{
+    FILE *f = fopen(HISTORY_PATH, "rb");
+    if (!f) return;
+    fseek(f, 0, SEEK_END);
+    long len = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    if (len <= 0 || len > kHistoryMaxFile) { fclose(f); return; }
+    ps_string buf((size_t)len, '\0');
+    size_t got = fread(&buf[0], 1, (size_t)len, f);
+    fclose(f);
+    if (got != (size_t)len) return;
+
+    char *p   = &buf[0];
+    char *end = p + len;
+    auto next_line = [&]() -> char * {
+        if (p >= end) return nullptr;
+        char *line = p;
+        char *nl = (char *)memchr(p, '\n', end - p);
+        if (!nl) return nullptr; // an incomplete line is never trusted
+        *nl = '\0';
+        p = nl + 1;
+        return line;
+    };
+
+    char *version = next_line();
+    char *nodes   = next_line();
+    if (!version || !nodes || atoi(version) != kHistoryFormat) return;
+
+    history_rows_t rows;
+    while (char *line = next_line()) {
+        history_row_t row;
+        long currency = -1;
+        int  json_at  = 0;
+        if (sscanf(line, "%10s %ld %n", row.date, &currency, &json_at) != 2 ||
+            strlen(row.date) != 10 || line[json_at] != '{') {
+            ESP_LOGW(TAG, "Discarding malformed %s", HISTORY_PATH);
+            return;
+        }
+        row.currency = (int32_t)currency;
+        row.json     = line + json_at;
+        rows.push_back(std::move(row));
+    }
+
+    xSemaphoreTake(s_hist_mutex, portMAX_DELAY);
+    s_hist_rows.swap(rows);
+    s_hist_nodes = nodes;
+    s_hist_ready = true;
+    xSemaphoreGive(s_hist_mutex);
+    ESP_LOGI(TAG, "Loaded usage history (%u day(s))", (unsigned)s_hist_rows.size());
+}
+
+// Bring the rows up to date: render what is missing or stale, reuse the rest, and
+// always re-render today. The current rows keep being served until this finishes.
+static void history_refresh(void)
+{
+    if (!clock_is_set()) return;
+
+    xSemaphoreTake(s_compute_mutex, portMAX_DELAY);
+
+    std::vector<stream_info_t> streams = snapshot_streams();
+    ps_string nodes = render_nodes(streams);
+
+    char today[11], stale_from[11];
+    today_str(today, sizeof(today));
+    xSemaphoreTake(s_hist_mutex, portMAX_DELAY);
+    snprintf(stale_from, sizeof(stale_from), "%s", s_hist_stale_from);
+    s_hist_stale_from[0] = '\0';
+    xSemaphoreGive(s_hist_mutex);
+
+    // The rows hold one figure per stream, so a topology edit touches all of them.
+    bool rebuild = nodes != s_hist_nodes;
+    bool changed = rebuild;
+
+    history_rows_t rows;
+    rows.reserve(kHistoryDays - 1);
+    for (int back = kHistoryDays - 1; back >= 1; back--) {
+        char date[11];
+        if (!date_add(today, -back, date, sizeof(date))) continue;
+        const history_row_t *have = rebuild ? nullptr : find_row(s_hist_rows, date);
+        if (have && (stale_from[0] == '\0' || strcmp(date, stale_from) < 0)) {
+            rows.push_back(*have);
+        } else {
+            rows.push_back(render_row(date, false, streams));
+            changed = true;
+        }
+    }
+
+    history_row_t today_row = render_row(today, true, streams);
+
+    xSemaphoreTake(s_hist_mutex, portMAX_DELAY);
+    if (changed) {
+        s_hist_rows.swap(rows);
+        s_hist_nodes = nodes;
+    }
+    s_hist_today = std::move(today_row);
+    s_hist_ready = true;
+    xSemaphoreGive(s_hist_mutex);
+
+    if (changed) {
+        history_save();
+        ESP_LOGI(TAG, "Usage history updated to %s", today);
+    }
+    xSemaphoreGive(s_compute_mutex);
+}
+
+static void history_task(void *arg)
+{
+    history_load();
+    for (;;) {
+        history_refresh();
+
+        uint32_t wait_ms = clock_is_set() ? kHistoryRefreshMs : kClockRetryMs;
+        uint32_t bits = 0;
+        xTaskNotifyWait(0, UINT32_MAX, &bits, pdMS_TO_TICKS(wait_ms));
+        if (bits & HIST_BIT_MIDNIGHT)
+            run_midnight_job();
+    }
+}
+
+char *node_power_logger_daily_energy_json(int days)
+{
+    if (days < 1) days = 1;
+    if (days > kHistoryDays) days = kHistoryDays;
+
+    char today[11];
+    today_str(today, sizeof(today));
+
+    ps_string out;
+    xSemaphoreTake(s_hist_mutex, portMAX_DELAY);
+    if (!s_hist_ready || !clock_is_set()) {
+        out = "{\"building\":true,\"nodes\":[],\"days\":[]}";
+    } else {
+        out.reserve(s_hist_nodes.size() + (size_t)days * (s_hist_today.json.size() + 8) + 64);
+        out += "{\"nodes\":";
+        out += s_hist_nodes;
+        out += ",\"days\":[";
+
+        // Oldest first. A day with no row yet goes out empty, as a day with no data.
+        int32_t currency = -1;
+        for (int back = days - 1; back >= 0; back--) {
+            char date[11];
+            if (!date_add(today, -back, date, sizeof(date))) continue;
+            const history_row_t *row = strcmp(s_hist_today.date, date) == 0
+                                     ? &s_hist_today : find_row(s_hist_rows, date);
+            if (back != days - 1) out += ',';
+            if (row && !row->json.empty()) {
+                out += row->json;
+                if (row->currency >= 0) currency = row->currency;
+            } else {
+                out += "{\"date\":\"";
+                out += date;
+                out += "\",\"kwh\":{}}";
+            }
+        }
+        out += ']';
+        if (currency >= 0) {
+            char tail[24];
+            snprintf(tail, sizeof(tail), ",\"currency\":%ld", (long)currency);
+            out += tail;
+        }
+        out += '}';
+    }
+    xSemaphoreGive(s_hist_mutex);
+
+    char *json = (char *)heap_caps_malloc(out.size() + 1, MALLOC_CAP_SPIRAM);
+    if (!json) json = (char *)malloc(out.size() + 1);
+    if (json) memcpy(json, out.c_str(), out.size() + 1);
+    return json; // caller must free
+}
+
+int node_power_logger_recompute_from(const char *date_str)
+{
+    xSemaphoreTake(s_compute_mutex, portMAX_DELAY);
+    int done = recompute_days(date_str);
+    xSemaphoreGive(s_compute_mutex);
+
+    if (done >= 0) {
+        xSemaphoreTake(s_hist_mutex, portMAX_DELAY);
+        if (s_hist_stale_from[0] == '\0' || strcmp(date_str, s_hist_stale_from) < 0)
+            snprintf(s_hist_stale_from, sizeof(s_hist_stale_from), "%s", date_str);
+        xSemaphoreGive(s_hist_mutex);
+        xTaskNotify(s_hist_task, HIST_BIT_REFRESH, eSetBits);
     }
     return done;
 }

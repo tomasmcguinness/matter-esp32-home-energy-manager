@@ -30,8 +30,11 @@ char      *node_power_logger_day_json(const char *node_id, const char *date_str)
 esp_err_t  node_power_logger_rollup_hourly(const char *date_str);                    // rolls up every node file for the date
 char      *node_power_logger_hourly_json(const char *node_id, const char *date_str); // caller must free
 
-// Per-stream daily energy (kWh) for the last `days` local dates, today included,
-// oldest first: {"nodes":[{"id","role"}], "days":[{"date","kwh":{"<id>":n}}]}.
+// Per-stream daily energy (kWh) for the last `days` (1..60) local dates, today
+// included, oldest first: {"nodes":[{"id","role"}], "days":[{"date","kwh":{"<id>":n}}]}.
+// Served from history generated in the background, so it does not touch the SD
+// card and today can be up to 5 minutes old. Until the first generation completes
+// it returns {"building":true,"nodes":[],"days":[]}.
 // role is "grid" | "solar" | "load" | "battery". A stream with no file for a day
 // is omitted from that day's kwh object. kWh keeps the raw Matter sign (+ = into
 // the device), so a generating inverter's kWh is negative. Days with a resolved tariff also carry
@@ -66,9 +69,14 @@ char      *node_power_logger_series_json(const char *node_id, const char *date_s
 char      *node_power_logger_stream_health_json(void);
 
 // Drop the cached cost and solar/grid split for every day from date_str up to
-// yesterday and rebuild them in order from the minute files. Returns the number
-// of days rebuilt, or -1 for a malformed date or one more than 60 days back.
+// yesterday and rebuild them in order from the minute files, then have the usage
+// history regenerate those days in the background. Returns the number of days
+// rebuilt, or -1 for a malformed date or one more than 60 days back.
 int        node_power_logger_recompute_from(const char *date_str);
+
+// True if a stream with this role ("grid" | "solar" | "load" | "battery") is
+// wired in the current topology.
+bool       node_power_logger_has_role(const char *role);
 
 #ifdef __cplusplus
 }

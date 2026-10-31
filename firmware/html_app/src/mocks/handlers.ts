@@ -19,7 +19,7 @@ let nodeConfigs: NodeConfig[] = [
   { id: 'grid_meter', x: -220, y: 0, settings: { label: 'Grid Meter', type: 'device', nodeId: 30001, endpointId: 1 } },
   { id: 'node_11', x: 260, y: -40, settings: { name: 'Oven', label: 'Oven', type: 'appliance', nodeId: 20001, endpointId: 1, excludeFromScheduling: true } },
   { id: 'node_12', x: 260, y: 80, settings: { name: 'Dishwasher', label: 'Dishwasher', type: 'appliance', nodeId: 20002, endpointId: 1 } },
-  { id: 'node_13', x: 260, y: 200, settings: { name: 'Kettle', label: 'Kettle', type: 'appliance', nodeId: 20003, endpointId: 1 } },
+  { id: 'node_13', x: 260, y: 200, settings: { name: 'Kettle', label: 'Kettle', type: 'appliance', nodeId: 20003, endpointId: 1, excludeFromLearning: true } },
   { id: 'tariff', x: -220, y: 120, settings: { label: 'Energy Tariff', type: 'tariff', nodeId: 40001, endpointId: 1 } },
 ]
 let edgeConfigs: EdgeConfig[] = [
@@ -96,6 +96,16 @@ let devices: Device[] = [
     ],
   },
 ]
+
+// First-run states for trying the configuration-driven tabs: load the app with
+// ?mock=empty (nothing commissioned or wired) or ?mock=unwired (devices
+// commissioned, nothing assigned yet). The seed above is used otherwise.
+const mockSeed = new URLSearchParams(window.location.search).get('mock')
+if (mockSeed === 'empty' || mockSeed === 'unwired') {
+  nodeConfigs = nodeConfigs.filter(n => n.id === 'consumer_unit')
+  edgeConfigs = []
+  if (mockSeed === 'empty') devices = []
+}
 
 const powerWs = ws.link('ws://*/ws')
 
@@ -396,6 +406,9 @@ export const handlers = [
     } else {
       nodeConfigs.push({ id: nodeId, x: nodeX, y: nodeY, settings })
     }
+    if (!edgeConfigs.some(e => e.id === edgeId)) {
+      edgeConfigs.push({ id: edgeId, source: nodeId, sourceHandle: 'power-out', target: 'consumer_unit', targetHandle: 'grid' })
+    }
     return HttpResponse.json({
       node: { id: nodeId, x: nodeX, y: nodeY, settings },
       edge: { id: edgeId, source: nodeId, sourceHandle: 'power-out', target: 'consumer_unit', targetHandle: 'grid' },
@@ -538,7 +551,8 @@ export const handlers = [
 
   http.get('/api/appliance/profiles', () => {
     // node_11 (Oven) and node_12 (Dishwasher, 7.5 W standby) have learned profiles;
-    // node_13 (Kettle) idles at 0 W so its standby is 0; node_42 is still learning.
+    // node_13 (Kettle) idles at 0 W so its standby is 0 and is excluded from learning;
+    // node_42 is still learning.
     return HttpResponse.json({
       appliances: [
         {
@@ -555,7 +569,7 @@ export const handlers = [
           window_days: 30,
         },
         { graph_id: 'node_12', trained: true, standby_w: 7.5, avg_program_power_w: 1150, std_program_power_w: 90, avg_program_len_min: 95, std_program_len_min: 12, program_count: 9, days_with_data: 26, trained_unix: Math.floor(Date.now() / 1000) - 3600, window_days: 30 },
-        { graph_id: 'node_13', trained: true, standby_w: 0, avg_program_power_w: 2900, std_program_power_w: 60, avg_program_len_min: 4, std_program_len_min: 1, program_count: 40, days_with_data: 26, trained_unix: Math.floor(Date.now() / 1000) - 3600, window_days: 30 },
+        { graph_id: 'node_13', excluded_from_learning: true, trained: true, standby_w: 0, avg_program_power_w: 2900, std_program_power_w: 60, avg_program_len_min: 4, std_program_len_min: 1, program_count: 40, days_with_data: 26, trained_unix: Math.floor(Date.now() / 1000) - 3600, window_days: 30 },
         {
           graph_id: 'node_42',
           trained: false,

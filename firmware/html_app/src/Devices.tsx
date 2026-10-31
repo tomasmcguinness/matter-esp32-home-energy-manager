@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router'
 import { deviceTypeName } from './deviceTypeName'
+import { useSetup } from './setup'
 
 export type Endpoint = {
   endpointId: number
@@ -132,6 +133,7 @@ function EndpointRow({
 
 function Devices() {
   const [devices, setDevices] = useState<Device[]>([])
+  const { refresh: refreshSetup } = useSetup()
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [editingNodeId, setEditingNodeId] = useState<number | null>(null)
@@ -210,7 +212,7 @@ function Devices() {
     if (!window.confirm('Remove this device from the fabric and delete it from storage?')) return
     fetch(`/api/devices/${nodeId}`, { method: 'DELETE' })
       .then((r) => { if (!r.ok) throw new Error(`HTTP ${r.status}`) })
-      .then(() => setDevices((prev) => prev.filter((d) => d.nodeId !== nodeId)))
+      .then(() => { setDevices((prev) => prev.filter((d) => d.nodeId !== nodeId)); refreshSetup() })
       .catch((e: unknown) => setError(e instanceof Error ? e.message : 'Delete failed'))
   }
 

@@ -2,6 +2,8 @@ import { useEffect, useState } from 'react'
 import { useSearchParams } from 'react-router'
 import { fmtMoney } from './tariff'
 import { isAbortError, queuedFetch } from './fetchQueue'
+import { connectedNodes, nodeLabel, type ConnectedNode, type SavedEdgeConfig, type SavedNodeConfig } from './topology'
+import { useSetup } from './setup'
 
 type PowerRecord = { minute: number; power_w: number }
 
@@ -156,60 +158,6 @@ function todayString(): string {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
 }
 
-// The topology graph is the source of truth for which nodes exist and how they
-// are wired. The handle a node connects to on the consumer unit IS its role.
-const CU_ID = 'consumer_unit'
-
-type NodeRole = 'grid' | 'solar' | 'appliance' | 'other'
-
-type SavedNodeConfig = { id: string; settings?: Record<string, unknown> }
-type SavedEdgeConfig = { id: string; source: string; target: string; sourceHandle?: string; targetHandle?: string }
-
-type ConnectedNode = { graphId: string; label: string; role: NodeRole }
-
-function roleForHandle(handle?: string | null): NodeRole {
-  if (handle === 'grid') return 'grid'
-  if (handle?.startsWith('solar')) return 'solar'
-  if (handle?.startsWith('circuit')) return 'appliance'
-  return 'other'
-}
-
-function nodeLabel(node: SavedNodeConfig | undefined, fallback: string): string {
-  if (!node) return fallback
-  const name = node.settings?.name
-  const label = node.settings?.label
-  if (typeof name === 'string' && name) return name
-  if (typeof label === 'string' && label) return label
-  return fallback
-}
-
-const ROLE_ORDER: Record<NodeRole, number> = { grid: 0, solar: 1, appliance: 2, other: 3 }
-
-// Derive the connected nodes (and their roles) from the consumer unit's edges.
-function connectedNodes(nodes: SavedNodeConfig[], edges: SavedEdgeConfig[]): ConnectedNode[] {
-  const byId = new Map(nodes.map(n => [n.id, n]))
-  const seen = new Set<string>()
-  const result: ConnectedNode[] = []
-
-  for (const e of edges) {
-    let otherId: string | null = null
-    let cuHandle: string | null | undefined = null
-    if (e.source === CU_ID) { otherId = e.target; cuHandle = e.sourceHandle }
-    else if (e.target === CU_ID) { otherId = e.source; cuHandle = e.targetHandle }
-    if (!otherId || seen.has(otherId)) continue
-    if (cuHandle === 'tariff') continue // the tariff source prices power; it doesn't meter any
-    seen.add(otherId)
-    result.push({
-      graphId: otherId,
-      label: nodeLabel(byId.get(otherId), otherId),
-      role: roleForHandle(cuHandle),
-    })
-  }
-
-  return result.sort((a, b) =>
-    ROLE_ORDER[a.role] - ROLE_ORDER[b.role] || a.label.localeCompare(b.label))
-}
-
 // Fetch a day's power records from the given endpoint and chart them. The grid
 // reads its own stream; every other connected node reads its per-node stream.
 function ProfileSection({ url, date }: { url: string; date: string }) {
@@ -252,11 +200,14 @@ type DailyEnergy = {
   // counted by where its stored energy came from); present for days with grid data.
   days: { date: string; kwh: Record<string, number>; cost?: Record<string, number>; solar_kwh?: Record<string, number>; grid_kwh?: Record<string, number> }[]
   currency?: number
+  // The HEM generates the history in the background; true until the first run is done.
+  building?: boolean
 }
 
 type Series = { id: string; label: string; color: string; total: number; cost: number; solar: number; grid: number }
 
 const HISTORY_DAYS = 30
+const HISTORY_RETRY_MS = 5000
 const UNMONITORED_ID = '__unmonitored'
 const UNMONITORED_COLOR = '#94a3b8'
 // Categorical palette for appliances; assigned in graph-id order so a device
@@ -333,17 +284,34 @@ function UsageHistory({ labels }: { labels: Map<string, string> }) {
   const [data, setData] = useState<DailyEnergy | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [hovered, setHovered] = useState<string | null>(null)
+  const [building, setBuilding] = useState(false)
+  // Without a tariff there is nothing to price, so the cost columns are left out.
+  const { hasTariff } = useSetup()
 
   useEffect(() => {
-    queuedFetch(`/api/data/daily-energy?days=${HISTORY_DAYS}`)
-      .then(r => r.ok ? r.json() : Promise.reject(`HTTP ${r.status}`))
-      .then((d: DailyEnergy) => setData(d))
-      .catch((e: unknown) => setError(e instanceof Error ? e.message : String(e)))
+    let cancelled = false
+    let retry: ReturnType<typeof setTimeout>
+    const load = () => {
+      queuedFetch(`/api/data/daily-energy?days=${HISTORY_DAYS}`)
+        .then(r => r.ok ? r.json() : Promise.reject(`HTTP ${r.status}`))
+        .then((d: DailyEnergy) => {
+          if (cancelled) return
+          setBuilding(!!d.building)
+          if (d.building) retry = setTimeout(load, HISTORY_RETRY_MS)
+          else setData(d)
+        })
+        .catch((e: unknown) => setError(e instanceof Error ? e.message : String(e)))
+    }
+    load()
+    return () => {
+      cancelled = true
+      clearTimeout(retry)
+    }
   }, [])
 
   let body
   if (error) body = <div className="alert alert-danger">{error}</div>
-  else if (!data) body = <p style={{ color: '#94a3b8', fontSize: 13 }}>Loading…</p>
+  else if (!data) body = <p style={{ color: '#94a3b8', fontSize: 13 }}>{building ? 'Building usage history…' : 'Loading…'}</p>
   else {
     const { days, series, hasGrid, costedDays } = buildHistory(data, labels)
     const hasCost = costedDays > 0
@@ -419,7 +387,7 @@ function UsageHistory({ labels }: { labels: Map<string, string> }) {
                 <th style={{ fontWeight: 600, textAlign: 'right' }}>Consumption</th>
                 <th style={{ fontWeight: 600, textAlign: 'right' }}>Share</th>
                 <th style={{ fontWeight: 600, textAlign: 'right' }} title="Energy supplied by solar, directly or from solar-charged battery">Self-powered</th>
-                <th style={{ fontWeight: 600, textAlign: 'right' }}>Cost</th>
+                {hasTariff && <th style={{ fontWeight: 600, textAlign: 'right' }}>Cost</th>}
               </tr>
             </thead>
             <tbody>
@@ -442,9 +410,11 @@ function UsageHistory({ labels }: { labels: Map<string, string> }) {
                   <td style={{ textAlign: 'right', background: hovered === s.id ? '#f1f5f9' : undefined }}>
                     <SelfPowered solar={s.solar} grid={s.grid} />
                   </td>
-                  <td style={{ textAlign: 'right', background: hovered === s.id ? '#f1f5f9' : undefined, color: hasCost ? undefined : '#94a3b8' }}>
-                    {hasCost ? fmtMoney(s.cost, data.currency) : '—'}
-                  </td>
+                  {hasTariff && (
+                    <td style={{ textAlign: 'right', background: hovered === s.id ? '#f1f5f9' : undefined, color: hasCost ? undefined : '#94a3b8' }}>
+                      {hasCost ? fmtMoney(s.cost, data.currency) : '—'}
+                    </td>
+                  )}
                 </tr>
               ))}
               <tr style={{ fontWeight: 600 }}>
@@ -454,9 +424,9 @@ function UsageHistory({ labels }: { labels: Map<string, string> }) {
                 <td style={{ textAlign: 'right' }}>
                   <SelfPowered solar={series.reduce((a, s) => a + s.solar, 0)} grid={series.reduce((a, s) => a + s.grid, 0)} />
                 </td>
-                <td />
+                {hasTariff && <td />}
               </tr>
-              <tr style={{ fontWeight: 600 }}>
+              {hasTariff && <tr style={{ fontWeight: 600 }}>
                 <td>
                   Total cost
                   {hasCost && costedDays < days.length && (
@@ -469,7 +439,7 @@ function UsageHistory({ labels }: { labels: Map<string, string> }) {
                 <td style={{ textAlign: 'right', color: hasCost ? undefined : '#94a3b8' }}>
                   {hasCost ? fmtMoney(totalCost, data.currency) : 'N/A'}
                 </td>
-              </tr>
+              </tr>}
             </tbody>
           </table>
         </>
